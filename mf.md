@@ -1,304 +1,518 @@
-Here’s a battle-tested way to make “mystery XLSX” reliably importable into Smartsheet: **treat the incoming file as untrusted**, aggressively **sniff what it actually is**, then **rebuild a clean, values-only XLSX** that stays inside Smartsheet’s rules/limits, and finally **POST it to Smartsheet’s import endpoint**.
-
-## 0) Smartsheet constraints you need to design around
-
-These are the gotchas that should shape the automation:
-
-* **Import API expects CSV or XLSX (not XLS)**, and the data should be “basic text” (formulas/images/hierarchy won’t import the way Excel does). ([Smartsheet Developers][1])
-* **Only the first (left-most) worksheet imports**, and **merged cells are excluded** (so don’t rely on them). ([Smartsheet Help Center][2])
-* **Sheet hard limits**: max **20,000 rows**, **400 columns**, and **500,000 cells** (rows × columns). ([Smartsheet Developers][3])
-* **API upload size** is capped (commonly **30 MB**). ([Smartsheet Developers][4])
-* **sheetName and filename must be ASCII** when importing via API. ([Smartsheet Developers][1])
-* Import endpoints you’ll use:
-
-  * `POST /folders/{folderId}/sheets/import`
-  * `POST /workspaces/{workspaceId}/sheets/import`
-  * (`/sheets/import` is deprecated) ([Smartsheet Developers][1])
-
-## 1) Automation architecture (simple + robust)
-
-**Recommended pattern (works great with Workato/GCP/etc.):**
-
-1. **Ingest** the file (email attachment / SFTP / upload form / Workato Files / bucket event).
-2. **Repair & normalize service** (Cloud Run / Lambda / container):
-
-   * Detect actual format (real XLSX zip? old XLS? CSV? HTML disguised as XLSX?)
-   * Convert to a **clean, values-only XLSX**
-   * Trim to real used range (kills the “Smartsheet thinks I have 1556 columns” style bugs)
-   * Enforce Smartsheet limits (split into multiple sheets/files if needed)
-   * ASCII-safe naming
-3. **Upload to Smartsheet** via import API (folder/workspace import). ([Smartsheet Developers][1])
-
-The key idea: **don’t “fix” the original**. **Rebuild** a new workbook from extracted values. This eliminates most encoding/formatting weirdness in one swing.
-
-## 2) Repair strategy (the “triage ladder”)
-
-### Step A — Sniff what the file *really* is
-
-Check magic bytes:
-
-* **XLSX**: starts with `PK\x03\x04` (ZIP container)
-* **XLS (old Excel)**: starts with OLE header `D0 CF 11 E0 A1 B1 1A E1`
-* **CSV/TSV**: plain text, lots of delimiters/newlines
-* **HTML** (common lie): starts with `<html` / `<table` etc (often exported from systems then renamed `.xlsx`)
-
-### Step B — Convert/repair into something readable
-
-* If **XLS** → convert to XLSX (best fallback: **LibreOffice headless** in a container).
-* If **XLSX but “bad”** (zip errors, broken XML, encoding errors) → try:
-
-  1. load with `openpyxl`
-  2. if it fails, fallback to LibreOffice “open + resave” (it often salvages corrupt OOXML better than pure Python)
-* If **CSV/TSV/HTML** disguised as XLSX → parse and write XLSX.
-
-### Step C — Normalize for Smartsheet (non-negotiable)
-
-* Use **only left-most sheet** (or explicitly pick one).
-* **Flatten to values** (no formulas; Smartsheet import wants “basic text”). ([Smartsheet Developers][1])
-* **Remove merged cells** by rebuilding (merged cells are excluded on import anyway). ([Smartsheet Help Center][2])
-* **Trim unused rows/cols** to real data bounds.
-* Enforce:
-
-  * cols ≤ 400
-  * rows ≤ 20,000
-  * rows × cols ≤ 500,000 ([Smartsheet Developers][3])
-* ASCII-safe `sheetName` + `filename`. ([Smartsheet Developers][1])
-
-If limits are exceeded: **split into multiple outputs** (usually chunk rows).
-
-## 3) Smartsheet upload call (what your automation ultimately does)
-
-Smartsheet’s import is a “file-in-body” POST with query params like `sheetName`, `headerRowIndex`, `primaryColumnIndex`, and strict content-type. ([Smartsheet Developers][1])
-
-Example (folder import):
-
-```bash
-curl -X POST \
-  "https://api.smartsheet.com/2.0/folders/${FOLDER_ID}/sheets/import?sheetName=MySheet&headerRowIndex=0&primaryColumnIndex=0" \
-  -H "Authorization: Bearer ${SMARTSHEET_TOKEN}" \
-  -H 'Content-Disposition: attachment; filename="MySheet.xlsx"' \
-  -H "Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" \
-  --data-binary "@./MySheet.xlsx"
-```
-
-(Use `/workspaces/{workspaceId}/sheets/import` if you’re importing into a workspace.) ([Smartsheet Developers][1])
-
-## 4) Practical Python “repair + normalize” core (values-only rebuild)
-
-This is the heart of the repair service. It intentionally **rebuilds** a fresh workbook.
-
-```python
-import io
-import os
-import re
-import csv
-import zipfile
-import subprocess
-from typing import List, Tuple, Optional
-
-from openpyxl import load_workbook, Workbook
-
-ILLEGAL_XML_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
-
-def ascii_slug(s: str, default: str = "Sheet") -> str:
-    if not s:
-        return default
-    s = s.strip()
-    # Replace non-ascii with underscore, collapse runs
-    s = s.encode("ascii", "ignore").decode("ascii")
-    s = re.sub(r"[^A-Za-z0-9._ -]+", "_", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s or default
-
-def sniff_kind(b: bytes) -> str:
-    if b.startswith(b"PK\x03\x04"):
-        return "xlsx_zip"
-    if b.startswith(bytes.fromhex("D0CF11E0A1B11AE1")):
-        return "xls_ole"
-    head = b[:4096].lstrip().lower()
-    if head.startswith(b"<html") or b"<table" in head:
-        return "html"
-    # crude text sniff
-    if b"\n" in head and (head.count(b",") + head.count(b"\t") + head.count(b";")) > 10:
-        return "delimited_text"
-    return "unknown"
-
-def libreoffice_convert_to_xlsx(src_path: str, out_dir: str) -> str:
-    """
-    Requires LibreOffice installed in the runtime image.
-    Produces an .xlsx in out_dir with same basename.
-    """
-    cmd = [
-        "soffice",
-        "--headless",
-        "--nologo",
-        "--nofirststartwizard",
-        "--convert-to", "xlsx",
-        "--outdir", out_dir,
-        src_path,
-    ]
-    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    base = os.path.splitext(os.path.basename(src_path))[0]
-    out_path = os.path.join(out_dir, base + ".xlsx")
-    if not os.path.exists(out_path):
-        # LibreOffice sometimes changes casing; find newest xlsx
-        cands = [os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.lower().endswith(".xlsx")]
-        out_path = max(cands, key=os.path.getmtime)
-    return out_path
-
-def parse_delimited_to_rows(b: bytes) -> List[List[str]]:
-    text = b.decode("utf-8", errors="replace")
-    sample = text[:4096]
-    dialect = csv.Sniffer().sniff(sample, delimiters=[",", "\t", ";", "|"])
-    reader = csv.reader(io.StringIO(text), dialect)
-    return [[cell for cell in row] for row in reader]
-
-def normalize_xlsx_values_only(
-    xlsx_path: str,
-    out_path: str,
-    sheet_name: str = "Imported",
-    max_rows: int = 20000,
-    max_cols: int = 400,
-    max_cells: int = 500000,
-) -> Tuple[int, int]:
-    wb = load_workbook(xlsx_path, read_only=True, data_only=True)
-    ws = wb.worksheets[0]  # left-most sheet (Smartsheet behavior)
-    out_wb = Workbook()
-    out_ws = out_wb.active
-    out_ws.title = ascii_slug(sheet_name, "Imported")[:31]  # Excel title limit
-
-    row_count = 0
-    col_count = 0
-
-    for row in ws.iter_rows(values_only=True):
-        # Trim trailing Nones
-        row = list(row)
-        while row and row[-1] is None:
-            row.pop()
-
-        if not row:
-            # Keep empty rows? Usually no—skip to avoid “phantom range” issues.
-            continue
-
-        # Enforce max cols
-        if len(row) > max_cols:
-            row = row[:max_cols]
-
-        clean = []
-        for v in row:
-            if v is None:
-                clean.append(None)
-                continue
-            if isinstance(v, str):
-                clean.append(ILLEGAL_XML_CHARS_RE.sub("", v))
-            else:
-                clean.append(v)
-
-        out_ws.append(clean)
-        row_count += 1
-        col_count = max(col_count, len(clean))
-
-        if row_count >= max_rows:
-            break
-
-        if row_count * max(col_count, 1) >= max_cells:
-            break
-
-    out_wb.save(out_path)
-    return row_count, col_count
-
-def repair_for_smartsheet(
-    in_bytes: bytes,
-    work_dir: str,
-    desired_sheet_name: str,
-) -> List[str]:
-    os.makedirs(work_dir, exist_ok=True)
-
-    kind = sniff_kind(in_bytes)
-    src_path = os.path.join(work_dir, "input.bin")
-    with open(src_path, "wb") as f:
-        f.write(in_bytes)
-
-    # Step 1: obtain a readable XLSX on disk
-    if kind == "xlsx_zip":
-        # verify zip integrity quickly
-        try:
-            with zipfile.ZipFile(io.BytesIO(in_bytes)) as z:
-                z.testzip()
-            readable_xlsx = src_path
-            # Try openpyxl; if it fails, fall back to LO conversion
-            try:
-                load_workbook(readable_xlsx, read_only=True, data_only=True)
-            except Exception:
-                readable_xlsx = libreoffice_convert_to_xlsx(src_path, work_dir)
-        except Exception:
-            readable_xlsx = libreoffice_convert_to_xlsx(src_path, work_dir)
-    elif kind == "xls_ole":
-        readable_xlsx = libreoffice_convert_to_xlsx(src_path, work_dir)
-    elif kind in ("delimited_text", "html"):
-        # Simplest: treat as delimited text; if HTML, utf-8 decode will still pull text,
-        # but for real HTML tables you’d ideally use pandas.read_html in a fuller version.
-        rows = parse_delimited_to_rows(in_bytes)
-        temp_xlsx = os.path.join(work_dir, "from_text.xlsx")
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Imported"
-        for r in rows:
-            ws.append(r)
-        wb.save(temp_xlsx)
-        readable_xlsx = temp_xlsx
-    else:
-        # Last-ditch: try LibreOffice anyway
-        readable_xlsx = libreoffice_convert_to_xlsx(src_path, work_dir)
-
-    # Step 2: normalize into a clean, values-only XLSX inside Smartsheet limits
-    outputs = []
-    safe_name = ascii_slug(desired_sheet_name, "Imported")
-    out_path = os.path.join(work_dir, f"{safe_name}.xlsx")
-
-    rows, cols = normalize_xlsx_values_only(
-        readable_xlsx,
-        out_path,
-        sheet_name=safe_name,
-    )
-    outputs.append(out_path)
-
-    # If you want true splitting (when source exceeds limits), expand normalize_xlsx_values_only
-    # to chunk into multiple output files based on rows/cols/cells thresholds.
-
-    return outputs
-```
-
-### Why this works
-
-* Rebuilding values-only nukes most of the weird stuff that breaks Smartsheet imports:
-
-  * phantom formatting ranges that make Smartsheet think you have thousands of columns
-  * illegal XML control characters
-  * merged cells (which Smartsheet drops anyway) ([Smartsheet Help Center][2])
-  * formulas (Smartsheet import is “basic text” oriented) ([Smartsheet Developers][1])
-
-## 5) “Tell it like it is” failure cases you should explicitly handle
-
-These should produce a clear error + quarantine path (don’t silently “fix”):
-
-* **Password-protected / encrypted XLSX** (you can detect; you can’t legally/cleanly recover without the password)
-* Files that exceed limits and you haven’t implemented splitting yet (row/col/cell caps) ([Smartsheet Developers][3])
-* Over **30 MB** when using API upload ([Smartsheet Developers][4])
-* HTML “.xlsx” that isn’t actually parseable as delimited text (use `pandas.read_html` if this is common)
-
-## 6) If you’re doing this in Workato (quick mapping)
-
-* **Trigger**: New file (email / SFTP / Workato Files / Box/Drive)
-* **Action**: HTTP → call your “repair service” (Cloud Run) with file content
-* **Action**: HTTP → Smartsheet import (`/folders/{folderId}/sheets/import`), send the repaired XLSX bytes as request body and set headers exactly as required ([Smartsheet Developers][1])
-* **Logging**: store a JSON “repair report” (kind detected, rows/cols, whether LO fallback used, output filenames, split count, etc.)
+# Planning Framework — AI Prompt Templates
+## Phases 2 through 6
 
 ---
 
-If you implement just one principle: **rebuild a new XLSX from extracted values** (and trim hard). It’s the Excel equivalent of “turn it off and back on again,” except it actually works.
+## How to Use These Prompts
 
-[1]: https://developers.smartsheet.com/api/smartsheet/openapi/imports/import-sheet-into-sheets-folder "Import sheet from CSV / XLSX"
-[2]: https://help.smartsheet.com/articles/504553-import-files-to-create-new-sheets?utm_source=chatgpt.com "Import file data to new sheets"
-[3]: https://developers.smartsheet.com/api/smartsheet/guides/basics/limitations?utm_source=chatgpt.com "Limitations"
-[4]: https://developers.smartsheet.com/api/smartsheet/openapi/sheets/create-sheet-in-folder "Create sheet in folder"
+Each prompt has two parts: a **System Prompt** (set once, defines the model's role and rules) and a **User Prompt** (injected per run, contains the actual input).
+
+The `{{placeholders}}` in each User Prompt are where you inject the prior phase's JSON output.
+
+**Recommended model settings:** Temperature 0.2, JSON mode on for pipeline output. Run each phase twice — once for JSON (pipeline), once for Markdown (human review) — or use a single prompt that returns both in a structured wrapper.
+
+**The golden rule for every phase:** The model must never invent entities, fields, services, or endpoints that are not grounded in the provided input. Uncertainty should be surfaced as a flag, not silently resolved.
+
+---
+
+## Phase 1 Input Format (Recommended)
+
+Before Phase 2 can run, Phase 1 must produce a structured scope document. Recommend this template as the standard:
+
+```
+PROJECT NAME: [name]
+
+PROBLEM STATEMENT:
+[What pain does this solve? 2-4 sentences.]
+
+USERS AND ACTIONS:
+- [User type]: [what they do in the system]
+- [User type]: [what they do in the system]
+
+IN SCOPE:
+- [capability or feature]
+- [capability or feature]
+
+OUT OF SCOPE:
+- [explicitly excluded thing]
+- [explicitly excluded thing]
+
+CONSTRAINTS:
+- Technology: [languages, platforms, existing systems]
+- Integration: [external systems this must connect to]
+- Non-functional: [scale, latency, compliance requirements if known]
+```
+
+This format gives every downstream prompt a consistent, parseable input with no ambiguity about intent.
+
+---
+
+---
+
+# Phase 2: Domain Modeling
+
+## System Prompt
+
+```
+You are a domain modeling expert. Your job is to read a software project scope document and produce a domain model — a structured vocabulary of the core concepts in the system, expressed in plain language.
+
+Rules:
+- Every entity you identify must be directly justified by the scope document. Do not invent entities.
+- Attributes must describe what an entity knows about itself, not how it is stored.
+- Relationships must be directional and named (e.g., "A Decision belongs to a Project", not just "Decision ↔ Project").
+- If something in the scope is ambiguous or could be modeled multiple ways, do not silently choose — surface it as a modeling question.
+- Do not use database terminology (no "table", "column", "foreign key", "index"). This phase is concept-level only.
+- Do not include implementation details of any kind.
+
+Output format: Return a JSON object matching the schema below, followed by a Markdown section titled "Domain Model — Human Review" that presents the same information in readable prose.
+```
+
+## User Prompt
+
+```
+Here is the project scope document:
+
+---
+{{PHASE_1_SCOPE_DOCUMENT}}
+---
+
+Produce the domain model for this system.
+
+Output the following JSON structure first, wrapped in a ```json code block:
+
+{
+  "entities": [
+    {
+      "name": "string",
+      "description": "plain-language description of what this concept represents",
+      "attributes": ["string", "..."],
+      "relationships": [
+        {
+          "type": "belongs_to | has_many | has_one | many_to_many",
+          "entity": "string",
+          "description": "plain-language description of the relationship"
+        }
+      ]
+    }
+  ],
+  "modeling_questions": [
+    {
+      "question": "string",
+      "context": "why this is ambiguous or requires a decision"
+    }
+  ]
+}
+
+Then output a Markdown section titled "## Domain Model — Human Review" that presents each entity as a short paragraph a non-technical stakeholder could read and validate.
+```
+
+---
+
+---
+
+# Phase 3: Data Architecture
+
+## System Prompt
+
+```
+You are a database architect. Your job is to translate a domain model into a concrete data schema.
+
+Rules:
+- Every table must map to an entity in the domain model. Do not create tables for concepts not present in the input.
+- Every column must correspond to an attribute or relationship from the domain model.
+- Use snake_case for all table and column names.
+- Always include: id (UUID, primary key), created_at, updated_at on every table.
+- Foreign keys must reference the specific table and column they point to.
+- Enum types must list all allowed values explicitly.
+- Indexes: always index foreign keys. Index any column likely to appear in a WHERE clause based on the described user actions. Explain each index in one sentence.
+- If the domain model contains a modeling_question that affects schema design, surface it as a schema decision in your output — do not silently resolve it.
+- Do not include application logic, stored procedures, or anything that belongs in service code.
+
+Output format: Return a JSON object matching the schema below, followed by a Markdown section titled "Schema — Human Review".
+```
+
+## User Prompt
+
+```
+Here is the domain model from Phase 2:
+
+---
+{{PHASE_2_JSON}}
+---
+
+And here are the project constraints from Phase 1 that affect data architecture:
+
+---
+{{PHASE_1_CONSTRAINTS}}
+---
+
+Produce the data schema.
+
+Output the following JSON structure first, wrapped in a ```json code block:
+
+{
+  "tables": [
+    {
+      "name": "string",
+      "source_entity": "name of domain model entity this maps to",
+      "columns": [
+        {
+          "name": "string",
+          "type": "string (use standard SQL types: UUID, TEXT, VARCHAR(n), INTEGER, BIGINT, BOOLEAN, TIMESTAMP WITH TIME ZONE, JSONB, NUMERIC(p,s))",
+          "nullable": true | false,
+          "default": "string or null",
+          "description": "what this column stores"
+        }
+      ],
+      "primary_key": ["column_name"],
+      "foreign_keys": [
+        {
+          "column": "string",
+          "references_table": "string",
+          "references_column": "string",
+          "on_delete": "CASCADE | SET NULL | RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": ["string"],
+          "unique": true | false,
+          "reason": "string"
+        }
+      ],
+      "enums": [
+        {
+          "column": "string",
+          "values": ["string"]
+        }
+      ]
+    }
+  ],
+  "schema_decisions": [
+    {
+      "decision": "string",
+      "rationale": "string",
+      "alternative_considered": "string or null"
+    }
+  ],
+  "unresolved_questions": [
+    {
+      "question": "string",
+      "impact": "what schema choice depends on the answer"
+    }
+  ]
+}
+
+Then output a Markdown section titled "## Schema — Human Review" with a table per entity showing column names, types, and descriptions in a readable format.
+```
+
+---
+
+---
+
+# Phase 4: Service Architecture
+
+## System Prompt
+
+```
+You are a distributed systems architect. Your job is to define the service topology for a system — which services exist, what each one owns, how they communicate, and what domain events they publish and consume.
+
+Rules:
+- Services must be justified by the scope document. Do not create services that have no grounded purpose.
+- Each service owns its data exclusively. No two services share a database or write to each other's tables.
+- Every domain event must correspond to a meaningful state change in the system. Events are named in past tense: decision.created, status.changed, risk.escalated.
+- Every event must define a common envelope (event_id, event_type, occurred_at, correlation_id, source) and a payload.
+- Communication type (REST, async event, RPC) must be justified — do not default to REST for everything.
+- If a service boundary is ambiguous, surface it as an architecture decision. Do not silently resolve it.
+- Do not define API endpoints in this phase. That is Phase 5.
+
+Output format: Return a JSON object matching the schema below, followed by a Markdown section titled "Service Architecture — Human Review" that includes an ASCII topology diagram.
+```
+
+## User Prompt
+
+```
+Here is the domain model from Phase 2:
+
+---
+{{PHASE_2_JSON}}
+---
+
+Here is the data schema from Phase 3:
+
+---
+{{PHASE_3_JSON}}
+---
+
+Here are the integration constraints from Phase 1:
+
+---
+{{PHASE_1_CONSTRAINTS}}
+---
+
+Produce the service architecture.
+
+Output the following JSON structure first, wrapped in a ```json code block:
+
+{
+  "services": [
+    {
+      "name": "string",
+      "responsibility": "one sentence: what this service owns and does",
+      "owns_tables": ["table_name"],
+      "exposes": "REST | gRPC | none",
+      "consumes_events": ["event_type"],
+      "publishes_events": ["event_type"]
+    }
+  ],
+  "communication_links": [
+    {
+      "from": "service_name or external_client",
+      "to": "service_name",
+      "type": "REST | async_event | RPC",
+      "description": "string"
+    }
+  ],
+  "event_catalog": [
+    {
+      "event_type": "string (dot-namespaced, past tense, e.g. decision.status_changed)",
+      "published_by": "service_name",
+      "consumed_by": ["service_name"],
+      "envelope": {
+        "event_id": "UUID",
+        "event_type": "string",
+        "occurred_at": "ISO 8601 timestamp",
+        "correlation_id": "UUID",
+        "source": "service_name"
+      },
+      "payload": {
+        "description": "what fields the payload contains and why"
+      }
+    }
+  ],
+  "architecture_decisions": [
+    {
+      "decision": "string",
+      "rationale": "string",
+      "alternative_considered": "string or null"
+    }
+  ],
+  "unresolved_questions": [
+    {
+      "question": "string",
+      "impact": "what architecture choice depends on the answer"
+    }
+  ]
+}
+
+Then output a Markdown section titled "## Service Architecture — Human Review" that includes an ASCII topology diagram showing services, communication links, and the event bus. Follow the diagram with a short paragraph describing the data flow for the most important user action in the system.
+```
+
+---
+
+---
+
+# Phase 5: API Contracts
+
+## System Prompt
+
+```
+You are an API design expert. Your job is to define the complete REST API contract for a system — every endpoint, its request and response shapes, error codes, and pagination behavior.
+
+Rules:
+- Every endpoint must be grounded in a user action from the scope document or a service responsibility from the architecture. Do not create endpoints speculatively.
+- URLs are resource-oriented. Resources are nouns, never verbs. /decisions/{id}/status not /updateDecisionStatus.
+- Version all endpoints: /api/v1/...
+- All list endpoints must support cursor-based pagination. Never offset-based.
+- All error responses use a consistent shape: { error: { code, message, detail, correlation_id } }
+- HTTP status codes must be semantically correct: 200 (ok), 201 (created), 204 (no content), 400 (bad request), 401 (unauthenticated), 403 (forbidden), 404 (not found), 409 (conflict), 422 (validation error), 500 (server error).
+- Request and response body fields must map to schema columns from Phase 3. Do not introduce fields that have no column backing.
+- If a user action from the scope document cannot be satisfied by the defined endpoints, surface it as a gap.
+
+Output format: Return a JSON object matching the schema below, followed by a Markdown section titled "API Contracts — Human Review".
+```
+
+## User Prompt
+
+```
+Here is the domain model from Phase 2:
+
+---
+{{PHASE_2_JSON}}
+---
+
+Here is the service architecture from Phase 4:
+
+---
+{{PHASE_4_JSON}}
+---
+
+Here is the user and action list from Phase 1:
+
+---
+{{PHASE_1_USERS_AND_ACTIONS}}
+---
+
+Produce the API contracts.
+
+Output the following JSON structure first, wrapped in a ```json code block:
+
+{
+  "services": [
+    {
+      "service_name": "string",
+      "base_url": "/api/v1",
+      "endpoints": [
+        {
+          "method": "GET | POST | PUT | PATCH | DELETE",
+          "path": "string (use {param} for path params)",
+          "summary": "one-line description",
+          "auth_required": true | false,
+          "path_params": [
+            { "name": "string", "type": "string", "description": "string" }
+          ],
+          "query_params": [
+            { "name": "string", "type": "string", "required": true | false, "description": "string" }
+          ],
+          "request_body": {
+            "description": "string or null",
+            "fields": [
+              { "name": "string", "type": "string", "required": true | false, "description": "string" }
+            ]
+          },
+          "response_body": {
+            "success_status": 200,
+            "fields": [
+              { "name": "string", "type": "string", "description": "string" }
+            ]
+          },
+          "error_responses": [
+            { "status": 404, "code": "RESOURCE_NOT_FOUND", "when": "string" }
+          ],
+          "pagination": null | { "type": "cursor", "cursor_field": "string", "default_limit": 20 }
+        }
+      ]
+    }
+  ],
+  "error_shape": {
+    "error": {
+      "code": "string (SCREAMING_SNAKE_CASE)",
+      "message": "string",
+      "detail": "object or null",
+      "correlation_id": "UUID"
+    }
+  },
+  "gaps": [
+    {
+      "user_action": "string",
+      "issue": "why this action cannot be satisfied by the defined endpoints"
+    }
+  ]
+}
+
+Then output a Markdown section titled "## API Contracts — Human Review" with endpoints grouped by resource, showing method, path, and summary in a table format. Follow with any gaps.
+```
+
+---
+
+---
+
+# Phase 6: Observability Plan
+
+## System Prompt
+
+```
+You are an observability and reliability engineer. Your job is to define what a system measures, logs, and traces — designed in before implementation, not added after.
+
+Rules:
+- Every metric must be named in Prometheus format: service_noun_verb_unit (e.g., adr_http_requests_total).
+- Every metric must include its labels in brackets and a description of what it tracks.
+- Structured log fields must be present on every log line emitted by every service. Do not define optional fields.
+- Trace spans must cover every cross-service call and every significant internal operation.
+- Alert conditions must be expressed as plain-language thresholds, not PromQL. The developer will write the PromQL.
+- Dashboard descriptions must specify exactly what question the dashboard answers, not just what it shows.
+- Every API endpoint from Phase 5 and every event from Phase 4 must be represented in at least one metric.
+
+Output format: Return a JSON object matching the schema below, followed by a Markdown section titled "Observability Plan — Human Review".
+```
+
+## User Prompt
+
+```
+Here is the API contract from Phase 5:
+
+---
+{{PHASE_5_JSON}}
+---
+
+Here is the event catalog from Phase 4:
+
+---
+{{PHASE_4_EVENT_CATALOG}}
+---
+
+Here is the problem statement and user actions from Phase 1 (to inform what failure looks like):
+
+---
+{{PHASE_1_SCOPE_DOCUMENT}}
+---
+
+Produce the observability plan.
+
+Output the following JSON structure first, wrapped in a ```json code block:
+
+{
+  "structured_log_fields": {
+    "description": "Fields present on every log line, in every service",
+    "fields": [
+      { "name": "string", "type": "string", "description": "string", "example": "string" }
+    ]
+  },
+  "metrics": [
+    {
+      "name": "string (prometheus format)",
+      "type": "counter | gauge | histogram | summary",
+      "labels": ["string"],
+      "description": "what this metric tracks",
+      "source_phase": "which phase artifact justified this metric (e.g., Phase 5 endpoint: POST /decisions)"
+    }
+  ],
+  "traces": [
+    {
+      "span_name": "string",
+      "service": "string",
+      "triggered_by": "string (e.g., HTTP request, event consumption)",
+      "child_spans": ["string"]
+    }
+  ],
+  "dashboards": [
+    {
+      "name": "string",
+      "answers_the_question": "string",
+      "key_panels": ["string"]
+    }
+  ],
+  "alerts": [
+    {
+      "name": "string",
+      "condition": "plain-language threshold (e.g., error rate > 5% over 5 minutes)",
+      "severity": "page | warn | info",
+      "runbook_hint": "what to check first when this fires"
+    }
+  ]
+}
+
+Then output a Markdown section titled "## Observability Plan — Human Review" with metrics grouped by service, a list of dashboards and what they answer, and a list of alerts with severity and first-response guidance.
+```
+
+---
+
+---
+
+## Notes on Prompt Maintenance
+
+**Few-shot examples are the highest-leverage improvement you can make.** Once you run these prompts on a real system and get output you're happy with, add one `example_input` / `example_output` pair to each prompt. Quality improves significantly.
+
+**The `unresolved_questions` field in every phase is your feedback loop.** If the model flags the same question repeatedly across phases, your Phase 1 scope document has a gap. Fix it upstream rather than resolving it ad hoc in later phases.
+
+**Versioning:** Treat these prompt templates like code. When you change a prompt, increment the version comment at the top of each. A phase's output is only trustworthy relative to the prompt version that generated it.
