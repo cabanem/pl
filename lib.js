@@ -1655,3 +1655,210 @@ function logRuntimeState(ss) {
   console.log(JSON.stringify(state, null, 2));
   return state;
 }
+
+
+/**
+ * @file 006_PayloadBuilders.gs
+ * @description Pure payload construction helpers for webhook and workflow contracts.
+ *   All functions are stateless — they receive data and return an object.
+ *   No sheet reads or service calls should live here.
+ * @author emily.cabaniss@randstadsourceright.com
+ *
+ * CHANGES FROM ORIGINAL:
+ *  - Added buildTemplateGeneratedPayload. The original called this function from
+ *    runTemplateGeneration but never defined it — a hard ReferenceError at runtime.
+ *    Shape inferred from sendMockTemplateRegistrationPayload in the dev tools and
+ *    from the R-001a webhook spec.
+ *  - Removed the first definition of buildSupplierOutreachPayload. It was silently
+ *    overwritten by the second definition below. The first had no templateVersionId
+ *    parameter and was dead code.
+ *  - Added controlCenterId parameter to buildInitializeWorkspacePayload. The backend
+ *    handler (handleInitializeWorkspace) requires control_center_id in the payload
+ *    and throws without it. The spreadsheet ID is the natural control center ID —
+ *    ss.getId() is passed by runWorkspaceInitialization.
+ */
+
+// ---------------------------------------------------------------------------
+// PROJECT METADATA
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds normalized project metadata from customer sheet data.
+ *
+ * @param {Object} customerRaw
+ * @param {string} fallbackEmail
+ * @returns {{ project_name: string, target_vms: string, analyst_email: string, has_incumbent_data: boolean }}
+ */
+function buildProjectMetadata(customerRaw, fallbackEmail) {
+  const safe = customerRaw || {};
+  return {
+    project_name:       safe['Customer name']      || 'Unknown Project',
+    target_vms:         safe['Target VMS']         || 'Unknown VMS',
+    analyst_email:      safe['Analyst email address'] || fallbackEmail || '',
+    has_incumbent_data: String(safe['Has incumbent data?']).toUpperCase() === 'TRUE'
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WORKSPACE INITIALIZATION
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the supplier roster for workspace initialization.
+ *
+ * @param {Array<Object>} pendingSuppliers
+ * @param {Function} [uuidFn]
+ * @returns {Array<{ supplier_id: string, supplier_name: string, contact_email: string, has_seeded_data: boolean }>}
+ */
+function buildSupplierRoster(pendingSuppliers, uuidFn) {
+  const makeUuid = uuidFn || getUUID;
+  return (pendingSuppliers || []).map(s => ({
+    supplier_id:     makeUuid(),
+    supplier_name:   s.name,
+    contact_email:   s.email,
+    has_seeded_data: Boolean(s.has_seeded_data)
+  }));
+}
+
+/**
+ * Builds the /initialize-workspace payload.
+ *
+ * CHANGED: Added controlCenterId parameter. The backend handler requires
+ * control_center_id in the payload — the spreadsheet ID (ss.getId()) is the
+ * natural value and should be passed by the calling orchestrator.
+ *
+ * @param {string} controlCenterId - The spreadsheet ID (ss.getId()).
+ * @param {Object} customerRaw
+ * @param {Array<Object>} pendingSuppliers
+ * @param {Object} matrixSchema
+ * @param {string} fallbackEmail
+ * @param {Function} [uuidFn]
+ * @returns {Object}
+ */
+function buildInitializeWorkspacePayload(controlCenterId, customerRaw, pendingSuppliers, matrixSchema, fallbackEmail, uuidFn) {
+  return {
+    control_center_id: String(controlCenterId || ''),
+    project_metadata:  buildProjectMetadata(customerRaw, fallbackEmail),
+    supplier_roster:   buildSupplierRoster(pendingSuppliers, uuidFn),
+    matrix_schema:     matrixSchema || { fields: [], rules: [], lookups: [], error_translations: [] }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// TEMPLATE GENERATION
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the template-generated webhook payload (R-001a).
+ *
+ * ADDED: This function was called by runTemplateGeneration but was never defined
+ * in the original codebase. Shape inferred from sendMockTemplateRegistrationPayload
+ * and the R-001a webhook contract.
+ *
+ * @param {{ id: string, url: string, name: string }} savedFileData - From exportSheetToExcel.
+ * @param {string} spreadsheetId - The control center spreadsheet ID.
+ * @param {Object} customerData - From getCustomerData.
+ * @param {string} versionId - The template version ID from runtime state.
+ * @returns {Object}
+ */
+function buildTemplateGeneratedPayload(savedFileData, spreadsheetId, customerData, versionId) {
+  return {
+    event_type:            'template_generated',
+    template_version_id:   String(versionId || ''),
+    file_name:             savedFileData.name || '',
+    google_drive_file_id:  savedFileData.id   || '',
+    google_drive_file_url: savedFileData.url  || '',
+    config_spreadsheet_id: String(spreadsheetId || ''),
+    customer_info:         customerData || {},
+    timestamp:             new Date().toISOString()
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SUPPLIER OUTREACH
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the supplier outreach webhook payload.
+ * Optionally includes template_version_id when provided.
+ *
+ * NOTE: The first definition of this function (without templateVersionId) was
+ * removed — it was dead code silently overwritten by this definition.
+ *
+ * @param {string} spreadsheetId
+ * @param {Object} customerData
+ * @param {Array<Object>} resolvedRequests - Suppliers with resolved supplier_request_id.
+ * @param {string} [templateVersionId]
+ * @returns {Object}
+ */
+function buildSupplierOutreachPayload(spreadsheetId, customerData, resolvedRequests, templateVersionId = '') {
+  const requestsPayload = (resolvedRequests || []).map(s => ({
+    supplier_request_id:    s.supplier_request_id,
+    name:                   s.name,
+    email:                  s.email,
+    spreadsheet_row_number: s.spreadsheet_row_number,
+    has_seeded_data:        Boolean(s.has_seeded_data),
+    seed_data_location:     s.seed_data_location || ''
+  }));
+
+  const out = {
+    config_spreadsheet_id: spreadsheetId,
+    customer_info:         customerData || {},
+    requests:              requestsPayload
+  };
+
+  if (String(templateVersionId || '').trim()) {
+    out.template_version_id = String(templateVersionId).trim();
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// SEED DATA INJECTION
+// ---------------------------------------------------------------------------
+
+/**
+ * Flattens 2D sheet data into the row/field/value format expected by the
+ * /inject-seed-data route.
+ *
+ * @param {string[]} headers
+ * @param {Array<Array<*>>} dataRows
+ * @returns {Array<{ row_number: number, field_name: string, submitted_value: string }>}
+ */
+function buildSeedDataRows(headers, dataRows) {
+  const safeHeaders = headers  || [];
+  const safeRows    = dataRows || [];
+  const result      = [];
+
+  safeRows
+    .filter(row => row.some(cell => cell !== ''))
+    .forEach((row, rowIndex) => {
+      safeHeaders.forEach((header, colIndex) => {
+        if (header) {
+          result.push({
+            row_number:      rowIndex + 1,
+            field_name:      String(header).trim(),
+            submitted_value: String(row[colIndex] ?? '').trim()
+          });
+        }
+      });
+    });
+
+  return result;
+}
+
+/**
+ * Builds the /inject-seed-data payload.
+ *
+ * @param {string} supplierRequestId
+ * @param {string[]} headers
+ * @param {Array<Array<*>>} dataRows
+ * @returns {{ supplier_request_id: string, seed_data_payload: Array }}
+ */
+function buildInjectSeedDataPayload(supplierRequestId, headers, dataRows) {
+  return {
+    supplier_request_id: String(supplierRequestId || '').trim(),
+    seed_data_payload:   buildSeedDataRows(headers, dataRows)
+  };
+}
