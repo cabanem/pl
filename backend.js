@@ -1,4 +1,751 @@
 /**
+ * @file 005_Repair.gs
+ * @description Workspace version repair and verification tooling.
+ * @author emily.cabaniss@randstadsourceright.com
+ *
+ * Operational tool — not part of the provisioning webhook path.
+ * Use to fix referential integrity violations in an already-provisioned workspace,
+ * specifically current_version_id mismatches caused by Record IDs being stored
+ * instead of business UUIDs.
+ *
+ * Tables covered: VER_TemplateVersion, WFA_SupplierRequest, RUN_Upload,
+ *                 RUN_ValidationResult, CFG_Rule
+ *
+ * Core invariants:
+ *  - WFA_SupplierRequest.current_version_id must hold VER_TemplateVersion.id
+ *    (business UUID), not the Workato Record ID
+ *  - RUN_Upload.template_version_id = WFA_SupplierRequest.current_version_id
+ *  - RUN_ValidationResult.template_version_id = RUN_Upload.template_version_id
+ *
+ * CHANGES FROM ORIGINAL:
+ *  - Extracted from the provisioning engine into its own file. Zero logic changes.
+ *  - FIXED: TEMP_CONFIG.workspaceId cleared — was hardcoded with a production
+ *    workspace ID. Use setDefaultWorkspaceRepairId() before running any repair.
+ *    See resolveWorkspaceId_ for the full fallback chain.
+ */
+
+// ---------------------------------------------------------------------------
+// LOCAL CONFIG
+// ---------------------------------------------------------------------------
+
+const TEMP_CONFIG = Object.freeze({
+  workspaceId:    '',     // FIXED: set via setDefaultWorkspaceRepairId() or Script Properties
+  debugEndpoints: false
+});
+
+const WORKSPACE_REPAIR_DEFAULT_WORKSPACE_KEY_ = 'WORKSPACE_REPAIR_DEFAULT_WORKSPACE_ID';
+
+// ---------------------------------------------------------------------------
+// PUBLIC ENTRY POINTS
+// ---------------------------------------------------------------------------
+
+function previewWorkspaceVersionRepair(workspaceId, options) {
+  const opts = normalizeRepairOptions_(options || {});
+  return WorkspaceVersionRepairRunner.preview(resolveWorkspaceId_(workspaceId, opts), opts);
+}
+
+function repairSupplierRequestVersions(workspaceId, options) {
+  const opts = normalizeRepairOptions_(options || {});
+  return WorkspaceVersionRepairRunner.repairSupplierRequestVersions(resolveWorkspaceId_(workspaceId, opts), opts);
+}
+
+function backfillUploadTemplateVersions(workspaceId, options) {
+  const opts = normalizeRepairOptions_(options || {});
+  return WorkspaceVersionRepairRunner.backfillUploadTemplateVersions(resolveWorkspaceId_(workspaceId, opts), opts);
+}
+
+function backfillValidationTemplateVersions(workspaceId, options) {
+  const opts = normalizeRepairOptions_(options || {});
+  return WorkspaceVersionRepairRunner.backfillValidationTemplateVersions(resolveWorkspaceId_(workspaceId, opts), opts);
+}
+
+function verifyWorkspaceVersionInvariants(workspaceId, options) {
+  const opts = normalizeRepairOptions_(options || {});
+  return WorkspaceVersionRepairRunner.verify(resolveWorkspaceId_(workspaceId, opts), opts);
+}
+
+/**
+ * Convenience orchestrator: preview → repair requests → backfill uploads
+ * → backfill validations → verify.
+ */
+function runWorkspaceVersionRepair(workspaceId, options) {
+  const opts               = normalizeRepairOptions_(options || {});
+  const resolvedWorkspaceId = resolveWorkspaceId_(workspaceId, opts);
+
+  const results = {
+    workspaceId:         resolvedWorkspaceId,
+    preview:             null,
+    requestRepair:       null,
+    uploadBackfill:      null,
+    validationBackfill:  null,
+    verify:              null
+  };
+
+  results.preview = WorkspaceVersionRepairRunner.preview(resolvedWorkspaceId, opts);
+
+  if (opts.previewOnly) {
+    logRepairResult_('runWorkspaceVersionRepair.previewOnly', results);
+    return results;
+  }
+
+  results.requestRepair      = WorkspaceVersionRepairRunner.repairSupplierRequestVersions(resolvedWorkspaceId, opts);
+  results.uploadBackfill     = WorkspaceVersionRepairRunner.backfillUploadTemplateVersions(resolvedWorkspaceId, opts);
+  results.validationBackfill = WorkspaceVersionRepairRunner.backfillValidationTemplateVersions(resolvedWorkspaceId, opts);
+  results.verify             = WorkspaceVersionRepairRunner.verify(resolvedWorkspaceId, opts);
+
+  logRepairResult_('runWorkspaceVersionRepair.complete', results);
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// RUNNER (IIFE MODULE)
+// ---------------------------------------------------------------------------
+
+const WorkspaceVersionRepairRunner = (() => {
+
+  function preview(workspaceId, options) {
+    const opts   = normalizeRepairOptions_(options || {});
+    const client = createRepairClient_(workspaceId, opts);
+    const scan   = scanWorkspaceState_(client, opts);
+
+    const result = {
+      mode:        'preview',
+      workspaceId: workspaceId,
+      scannedAt:   new Date().toISOString(),
+      dryRun:      true,
+      counts:      scan.counts,
+      issues:      scan.issues,
+      samples:     scan.samples
+    };
+
+    logRepairResult_('previewWorkspaceVersionRepair', result);
+    return result;
+  }
+
+  function repairSupplierRequestVersions(workspaceId, options) {
+    const opts   = normalizeRepairOptions_(options || {});
+    const client = createRepairClient_(workspaceId, opts);
+
+    const templateVersions  = client.listAll('VER_TemplateVersion');
+    const requests          = client.listAll('WFA_SupplierRequest');
+    const versionById       = indexBy_(templateVersions, 'id');
+    const versionByRecordId = indexBy_(templateVersions, 'Record ID');
+
+    let examined = 0, repaired = 0, skipped = 0, ambiguous = 0;
+    const changes = [];
+
+    requests.forEach(req => {
+      examined += 1;
+      const current  = safeString_(req.current_version_id);
+      const decision = resolveCorrectRequestVersion_(req, { versionById, versionByRecordId, options: opts });
+
+      if (decision.status === 'ok_no_change') { skipped += 1; return; }
+
+      if (decision.status === 'ambiguous') {
+        ambiguous += 1;
+        changes.push({ supplier_request_id: req.id || '', supplier_name: req.supplier_name || '', current_version_id: current, action: 'manual_review', reason: decision.reason });
+        return;
+      }
+
+      if (decision.status === 'repair') {
+        changes.push({ supplier_request_id: req.id || '', supplier_name: req.supplier_name || '', current_version_id_old: current, current_version_id_new: decision.correctTemplateVersionId, action: opts.dryRun ? 'would_update' : 'updated', reason: decision.reason });
+        if (!opts.dryRun) {
+          client.updateByBusinessId('WFA_SupplierRequest', req.id, {
+            current_version_id: decision.correctTemplateVersionId,
+            last_updated_at:    new Date().toISOString()
+          });
+        }
+        repaired += 1;
+        return;
+      }
+
+      skipped += 1;
+    });
+
+    const result = { mode: 'repairSupplierRequestVersions', workspaceId, executedAt: new Date().toISOString(), dryRun: !!opts.dryRun, summary: { examined, repaired, skipped, ambiguous }, changes };
+    logRepairResult_('repairSupplierRequestVersions', result);
+    return result;
+  }
+
+  function backfillUploadTemplateVersions(workspaceId, options) {
+    const opts      = normalizeRepairOptions_(options || {});
+    const client    = createRepairClient_(workspaceId, opts);
+    const requests  = client.listAll('WFA_SupplierRequest');
+    const uploads   = client.listAll('RUN_Upload');
+    const requestById = indexBy_(requests, 'id');
+
+    let examined = 0, updated = 0, missingRequest = 0, missingRequestVersion = 0, alreadyCorrect = 0;
+    const changes = [];
+
+    uploads.forEach(upload => {
+      examined += 1;
+      const request = requestById[safeString_(upload.supplier_request_id)];
+
+      if (!request) {
+        missingRequest += 1;
+        changes.push({ upload_id: upload.id || '', supplier_request_id: upload.supplier_request_id || '', action: 'manual_review', reason: 'supplier_request_not_found' });
+        return;
+      }
+
+      const desired = safeString_(request.current_version_id);
+      if (!desired) {
+        missingRequestVersion += 1;
+        changes.push({ upload_id: upload.id || '', supplier_request_id: upload.supplier_request_id || '', action: 'manual_review', reason: 'request_missing_current_version_id' });
+        return;
+      }
+
+      const current = safeString_(upload.template_version_id);
+      if (current === desired) { alreadyCorrect += 1; return; }
+
+      changes.push({ upload_id: upload.id || '', supplier_request_id: upload.supplier_request_id || '', template_version_id_old: current, template_version_id_new: desired, action: opts.dryRun ? 'would_update' : 'updated' });
+      if (!opts.dryRun) client.updateByBusinessId('RUN_Upload', upload.id, { template_version_id: desired });
+      updated += 1;
+    });
+
+    const result = { mode: 'backfillUploadTemplateVersions', workspaceId, executedAt: new Date().toISOString(), dryRun: !!opts.dryRun, summary: { examined, updated, alreadyCorrect, missingRequest, missingRequestVersion }, changes };
+    logRepairResult_('backfillUploadTemplateVersions', result);
+    return result;
+  }
+
+  function backfillValidationTemplateVersions(workspaceId, options) {
+    const opts       = normalizeRepairOptions_(options || {});
+    const client     = createRepairClient_(workspaceId, opts);
+    const uploads    = client.listAll('RUN_Upload');
+    const validations = client.listAll('RUN_ValidationResult');
+    const uploadById = indexBy_(uploads, 'id');
+
+    let examined = 0, updated = 0, missingUpload = 0, missingUploadVersion = 0, alreadyCorrect = 0;
+    const changes = [];
+
+    validations.forEach(validation => {
+      examined += 1;
+      const upload = uploadById[safeString_(validation.upload_id)];
+
+      if (!upload) {
+        missingUpload += 1;
+        changes.push({ validation_result_id: validation.id || '', upload_id: validation.upload_id || '', action: 'manual_review', reason: 'upload_not_found' });
+        return;
+      }
+
+      const desired = safeString_(upload.template_version_id);
+      if (!desired) {
+        missingUploadVersion += 1;
+        changes.push({ validation_result_id: validation.id || '', upload_id: validation.upload_id || '', action: 'manual_review', reason: 'upload_missing_template_version_id' });
+        return;
+      }
+
+      const current = safeString_(validation.template_version_id);
+      if (current === desired) { alreadyCorrect += 1; return; }
+
+      changes.push({ validation_result_id: validation.id || '', upload_id: validation.upload_id || '', template_version_id_old: current, template_version_id_new: desired, action: opts.dryRun ? 'would_update' : 'updated' });
+      if (!opts.dryRun) client.updateByBusinessId('RUN_ValidationResult', validation.id, { template_version_id: desired });
+      updated += 1;
+    });
+
+    const result = { mode: 'backfillValidationTemplateVersions', workspaceId, executedAt: new Date().toISOString(), dryRun: !!opts.dryRun, summary: { examined, updated, alreadyCorrect, missingUpload, missingUploadVersion }, changes };
+    logRepairResult_('backfillValidationTemplateVersions', result);
+    return result;
+  }
+
+  function verify(workspaceId, options) {
+    const opts   = normalizeRepairOptions_(options || {});
+    const client = createRepairClient_(workspaceId, opts);
+    const scan   = scanWorkspaceState_(client, opts);
+    const failures = [];
+
+    const checks = [
+      ['requestVersionRecordIdMatches',       'request_current_version_id_must_not_be_record_id'],
+      ['requestVersionUnknown',               'request_current_version_id_must_resolve_to_known_template_version'],
+      ['uploadsMissingTemplateVersionId',     'uploads_must_have_template_version_id'],
+      ['validationsMissingTemplateVersionId', 'validations_must_have_template_version_id'],
+      ['uploadVersionMismatch',               'upload_template_version_id_must_match_request_current_version_id'],
+      ['validationVersionMismatch',           'validation_template_version_id_must_match_upload_template_version_id'],
+      ['cfgRulesMissingTemplateVersionId',    'cfg_rule_template_version_id_must_be_non_null'],
+      ['badRequestStatuses',                  'request_status_must_not_contain_known_bad_literals']
+    ];
+
+    checks.forEach(([countKey, invariant]) => {
+      if (scan.counts[countKey] > 0) failures.push({ invariant, count: scan.counts[countKey] });
+    });
+
+    const result = { mode: 'verifyWorkspaceVersionInvariants', workspaceId, executedAt: new Date().toISOString(), ok: failures.length === 0, failureCount: failures.length, failures, counts: scan.counts, samples: scan.samples };
+    logRepairResult_('verifyWorkspaceVersionInvariants', result);
+
+    if (!result.ok && opts.throwOnVerifyFailure) {
+      throw new Error('Workspace version invariant verification failed: ' + JSON.stringify(failures));
+    }
+
+    return result;
+  }
+
+  return { preview, repairSupplierRequestVersions, backfillUploadTemplateVersions, backfillValidationTemplateVersions, verify };
+})();
+
+// ---------------------------------------------------------------------------
+// SCANNER
+// ---------------------------------------------------------------------------
+
+function scanWorkspaceState_(client, options) {
+  const templateVersions  = client.listAll('VER_TemplateVersion');
+  const requests          = client.listAll('WFA_SupplierRequest');
+  const uploads           = client.listAll('RUN_Upload');
+  const validations       = client.listAll('RUN_ValidationResult');
+  const cfgRules          = client.listAll('CFG_Rule');
+
+  const versionById       = indexBy_(templateVersions, 'id');
+  const versionByRecordId = indexBy_(templateVersions, 'Record ID');
+  const requestById       = indexBy_(requests, 'id');
+  const uploadById        = indexBy_(uploads, 'id');
+
+  const counts = {
+    templateVersions: templateVersions.length,
+    requests: requests.length,
+    uploads:  uploads.length,
+    validations: validations.length,
+    cfgRules: cfgRules.length,
+    requestVersionMissing:             0,
+    requestVersionRecordIdMatches:     0,
+    requestVersionUnknown:             0,
+    uploadsMissingTemplateVersionId:   0,
+    uploadVersionMismatch:             0,
+    validationsMissingTemplateVersionId: 0,
+    validationVersionMismatch:         0,
+    cfgRulesMissingTemplateVersionId:  0,
+    badRequestStatuses:                0
+  };
+
+  const issues = {
+    suspiciousRequests:      [],
+    uploadsMissingVersion:   [],
+    uploadVersionMismatch:   [],
+    validationsMissingVersion: [],
+    validationVersionMismatch: [],
+    cfgRulesMissingVersion:  [],
+    badRequestStatuses:      []
+  };
+
+  requests.forEach(req => {
+    const v = safeString_(req.current_version_id);
+    if (!v) {
+      counts.requestVersionMissing += 1;
+      issues.suspiciousRequests.push(minimalRequestIssue_(req, 'missing_current_version_id'));
+      return;
+    }
+    if (versionByRecordId[v]) {
+      counts.requestVersionRecordIdMatches += 1;
+      issues.suspiciousRequests.push(minimalRequestIssue_(req, 'current_version_id_matches_record_id_not_business_id'));
+      return;
+    }
+    if (!versionById[v]) {
+      counts.requestVersionUnknown += 1;
+      issues.suspiciousRequests.push(minimalRequestIssue_(req, 'current_version_id_not_found_in_template_versions'));
+      return;
+    }
+    if (isBadSupplierStatus_(req.status)) {
+      counts.badRequestStatuses += 1;
+      issues.badRequestStatuses.push({ supplier_request_id: req.id || '', supplier_name: req.supplier_name || '', status: req.status || '' });
+    }
+  });
+
+  uploads.forEach(upload => {
+    const current = safeString_(upload.template_version_id);
+    const req     = requestById[safeString_(upload.supplier_request_id)];
+    if (!current) {
+      counts.uploadsMissingTemplateVersionId += 1;
+      issues.uploadsMissingVersion.push({ upload_id: upload.id || '', supplier_request_id: upload.supplier_request_id || '', current_template_version_id: current });
+    }
+    if (req) {
+      const desired = safeString_(req.current_version_id);
+      if (desired && current && desired !== current) {
+        counts.uploadVersionMismatch += 1;
+        issues.uploadVersionMismatch.push({ upload_id: upload.id || '', supplier_request_id: upload.supplier_request_id || '', request_current_version_id: desired, upload_template_version_id: current });
+      }
+    }
+  });
+
+  validations.forEach(validation => {
+    const current = safeString_(validation.template_version_id);
+    const upload  = uploadById[safeString_(validation.upload_id)];
+    if (!current) {
+      counts.validationsMissingTemplateVersionId += 1;
+      issues.validationsMissingVersion.push({ validation_result_id: validation.id || '', upload_id: validation.upload_id || '', current_template_version_id: current });
+    }
+    if (upload) {
+      const desired = safeString_(upload.template_version_id);
+      if (desired && current && desired !== current) {
+        counts.validationVersionMismatch += 1;
+        issues.validationVersionMismatch.push({ validation_result_id: validation.id || '', upload_id: validation.upload_id || '', upload_template_version_id: desired, validation_template_version_id: current });
+      }
+    }
+  });
+
+  cfgRules.forEach(rule => {
+    if (!safeString_(rule.template_version_id)) {
+      counts.cfgRulesMissingTemplateVersionId += 1;
+      issues.cfgRulesMissingVersion.push({ rule_id: rule.id || '', field_id: rule.field_id || '', rule_type: rule.rule_type || '' });
+    }
+  });
+
+  return {
+    counts,
+    issues,
+    samples: {
+      suspiciousRequests:      issues.suspiciousRequests.slice(0, 25),
+      uploadsMissingVersion:   issues.uploadsMissingVersion.slice(0, 25),
+      uploadVersionMismatch:   issues.uploadVersionMismatch.slice(0, 25),
+      validationsMissingVersion: issues.validationsMissingVersion.slice(0, 25),
+      validationVersionMismatch: issues.validationVersionMismatch.slice(0, 25),
+      cfgRulesMissingVersion:  issues.cfgRulesMissingVersion.slice(0, 25),
+      badRequestStatuses:      issues.badRequestStatuses.slice(0, 25)
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DECISION LOGIC
+// ---------------------------------------------------------------------------
+
+function resolveCorrectRequestVersion_(requestRow, ctx) {
+  const versionById       = ctx.versionById || {};
+  const versionByRecordId = ctx.versionByRecordId || {};
+  const opts              = ctx.options || {};
+  const current           = safeString_(requestRow.current_version_id);
+
+  if (!current) {
+    if (opts.defaultTemplateVersionId) {
+      return { status: 'repair', correctTemplateVersionId: opts.defaultTemplateVersionId, reason: 'missing_current_version_id_using_default' };
+    }
+    return { status: 'ambiguous', reason: 'missing_current_version_id_and_no_default' };
+  }
+
+  if (versionById[current])       return { status: 'ok_no_change', correctTemplateVersionId: current, reason: 'already_business_id' };
+  if (versionByRecordId[current]) return { status: 'repair', correctTemplateVersionId: safeString_(versionByRecordId[current].id), reason: 'record_id_detected_mapped_to_business_id' };
+
+  if (opts.defaultTemplateVersionId) {
+    return { status: 'repair', correctTemplateVersionId: opts.defaultTemplateVersionId, reason: 'unknown_current_version_id_using_default' };
+  }
+
+  return { status: 'ambiguous', reason: 'unknown_current_version_id_no_safe_mapping' };
+}
+
+// ---------------------------------------------------------------------------
+// CLIENT FACTORY
+// ---------------------------------------------------------------------------
+
+function createRepairClient_(workspaceId, options) {
+  return new WorkatoRepairClient(getWorkspaceRepairConfig_(workspaceId, options));
+}
+
+function getWorkspaceRepairConfig_(workspaceId, options) {
+  const opts                = options || {};
+  const scriptProps         = PropertiesService.getScriptProperties();
+  const resolvedWorkspaceId = resolveWorkspaceId_(workspaceId, opts);
+
+  const managementBaseUrl = safeString_(
+    opts.managementBaseUrl || 'https://app.eu.workato.com'
+  ).replace(/\/$/, '');
+
+  const recordsBaseUrl = safeString_(
+    opts.recordsBaseUrl ||
+    scriptProps.getProperty('WORKATO_DATA_TABLES_BASE_URL') ||
+    'https://data-tables.workato.com'
+  ).replace(/\/$/, '');
+
+  const apiToken = safeString_(opts.apiToken || scriptProps.getProperty('WORKATO_API_TOKEN'));
+
+  if (!resolvedWorkspaceId) throw new Error('Missing workspaceId');
+  if (!apiToken)            throw new Error('Missing WORKATO_API_TOKEN');
+
+  return {
+    workspaceId:      resolvedWorkspaceId,
+    managementBaseUrl,
+    recordsBaseUrl,
+    apiToken,
+    pageSize:         Number(opts.pageSize || 100),
+    debugEndpoints:   opts.debugEndpoints === true
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WORKATO REPAIR CLIENT
+// ---------------------------------------------------------------------------
+
+/**
+ * HTTP client scoped to a single managed workspace.
+ * Uses two base URLs: management API (app.eu.workato.com) and
+ * records API (data-tables.workato.com).
+ */
+class WorkatoRepairClient {
+  constructor(config) {
+    this.workspaceId      = safeString_(config.workspaceId);
+    this.managementBaseUrl = safeString_(config.managementBaseUrl).replace(/\/$/, '');
+    this.recordsBaseUrl   = safeString_(config.recordsBaseUrl).replace(/\/$/, '');
+    this.apiToken         = safeString_(config.apiToken);
+    this.pageSize         = Number(config.pageSize || 100);
+    this.debugEndpoints   = config.debugEndpoints === true;
+    this.tableCacheByName_ = null;
+    this.tableCacheById_   = null;
+
+    if (!this.workspaceId)       throw new Error('WorkatoRepairClient: workspaceId is required');
+    if (!this.managementBaseUrl) throw new Error('WorkatoRepairClient: managementBaseUrl is required');
+    if (!this.recordsBaseUrl)    throw new Error('WorkatoRepairClient: recordsBaseUrl is required');
+    if (!this.apiToken)          throw new Error('WorkatoRepairClient: apiToken is required');
+  }
+
+  listAll(tableName) {
+    const table = this.getTableByName_(tableName);
+    let page = 1, rows = [];
+    while (true) {
+      const batch = this.listPageByTableId_(table.id, page, this.pageSize);
+      rows = rows.concat(batch.records || []);
+      if (!batch.hasMore) break;
+      page += 1;
+      if (page % 10 === 0) Utilities.sleep(50);
+      if (page > 500) throw new Error(`Pagination safety limit reached for ${tableName}`);
+    }
+    return rows;
+  }
+
+  updateByBusinessId(tableName, businessId, fields) {
+    if (!businessId) throw new Error(`updateByBusinessId: missing businessId for ${tableName}`);
+    const record   = this.findOneByField_(tableName, 'id', businessId);
+    if (!record)   throw new Error(`updateByBusinessId: row not found for ${tableName}.id=${businessId}`);
+    const recordId = record['Record ID'];
+    if (!recordId) throw new Error(`updateByBusinessId: row missing Record ID for ${tableName}.id=${businessId}`);
+    return this.updateByRecordId_(tableName, recordId, fields);
+  }
+
+  findOneByField_(tableName, fieldName, value) {
+    const results = this.queryByField_(tableName, fieldName, value, 2);
+    if (!results.length) return null;
+    if (results.length > 1) throw new Error(`Expected one ${tableName} row for ${fieldName}=${value}, found ${results.length}`);
+    return results[0];
+  }
+
+  queryByField_(tableName, fieldName, value, limit) {
+    const table    = this.getTableByName_(tableName);
+    const payload  = { filters: [{ field: fieldName, operator: 'equals', value }], limit: Number(limit || 100) };
+    const response = this.requestRecords_('post', this.buildQueryEndpointByTableId_(table.id), payload);
+    return normalizeTableRecords_(response);
+  }
+
+  listPageByTableId_(tableId, page, pageSize) {
+    const endpoint = this.buildListRecordsEndpointByTableId_(tableId, page, pageSize);
+    const response = this.requestRecords_('get', endpoint, null);
+    const records  = normalizeTableRecords_(response);
+    return { records, hasMore: records.length >= pageSize };
+  }
+
+  updateByRecordId_(tableName, recordId, fields) {
+    const table = this.getTableByName_(tableName);
+    return this.requestRecords_('put', this.buildRecordEndpointByTableId_(table.id, recordId), { fields });
+  }
+
+  getTableByName_(tableName) {
+    const name = safeString_(tableName);
+    if (!name) throw new Error('Table name is required');
+    if (!this.tableCacheByName_) this.loadTableCache_();
+    const table = this.tableCacheByName_[name];
+    if (!table) throw new Error(`Data table not found: ${name}. Available: ${Object.keys(this.tableCacheByName_).sort().join(', ')}`);
+    return table;
+  }
+
+  loadTableCache_() {
+    const rows = this.listAllTables_();
+    this.tableCacheByName_ = {};
+    this.tableCacheById_   = {};
+    rows.forEach(row => {
+      const id   = safeString_(row.id);
+      const name = safeString_(row.name);
+      if (id)   this.tableCacheById_[id]     = row;
+      if (name) this.tableCacheByName_[name] = row;
+    });
+  }
+
+  listAllTables_() {
+    let page = 1, out = [];
+    while (true) {
+      const response = this.requestManagement_('get', this.buildListTablesEndpoint_(page, this.pageSize), null);
+      const rows     = normalizeTableRecords_(response);
+      out = out.concat(rows);
+      if (rows.length < this.pageSize) break;
+      page += 1;
+      if (page % 10 === 0) Utilities.sleep(50);
+      if (page > 500) throw new Error('Pagination safety limit reached while discovering data tables');
+    }
+    return out;
+  }
+
+  // Endpoint builders
+  buildListTablesEndpoint_(page, pageSize) {
+    return `/api/v2/managed_users/${encodeURIComponent(this.workspaceId)}/data_tables?page=${encodeURIComponent(page)}&per_page=${encodeURIComponent(pageSize)}`;
+  }
+  buildListRecordsEndpointByTableId_(tableId, page, pageSize) {
+    return `/api/v1/managed_users/${encodeURIComponent(this.workspaceId)}/tables/${encodeURIComponent(tableId)}/query?page=${encodeURIComponent(page)}&per_page=${encodeURIComponent(pageSize)}`;
+  }
+  buildQueryEndpointByTableId_(tableId) {
+    return `/api/v1/managed_users/${encodeURIComponent(this.workspaceId)}/tables/${encodeURIComponent(tableId)}/query`;
+  }
+  buildRecordEndpointByTableId_(tableId, recordId) {
+    return `/api/v1/managed_users/${encodeURIComponent(this.workspaceId)}/tables/${encodeURIComponent(tableId)}/records/${encodeURIComponent(recordId)}`;
+  }
+
+  requestManagement_(method, endpoint, payload) { return this.requestRaw_(this.managementBaseUrl, method, endpoint, payload, 'management'); }
+  requestRecords_(method, endpoint, payload)    { return this.requestRaw_(this.recordsBaseUrl,    method, endpoint, payload, 'records'); }
+
+  requestRaw_(baseUrl, method, endpoint, payload, familyLabel) {
+    const cleanPath = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    const url       = `${baseUrl}${cleanPath}`;
+
+    if (this.debugEndpoints) {
+      debugRepairEndpoint_(`${familyLabel}.request`, `${String(method).toUpperCase()} ${url}`);
+      if (payload != null) debugRepairEndpoint_(`${familyLabel}.payload`, JSON.stringify(payload));
+    }
+
+    const options = {
+      method:             String(method || 'get').toLowerCase(),
+      muteHttpExceptions: true,
+      headers: { Authorization: `Bearer ${this.apiToken}`, Accept: 'application/json' }
+    };
+
+    if (payload != null) {
+      options.contentType = 'application/json';
+      options.payload     = JSON.stringify(payload);
+    }
+
+    const res  = UrlFetchApp.fetch(url, options);
+    const code = res.getResponseCode();
+    const text = res.getContentText();
+
+    if (this.debugEndpoints) debugRepairEndpoint_(`${familyLabel}.response`, `${code} ${text ? text.slice(0, 1000) : ''}`);
+    if (code < 200 || code >= 300) throw new Error(`Workato API error ${code} ${String(method).toUpperCase()} ${url}: ${text}`);
+
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch (e) {
+      return { raw_content: text };
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HELPERS
+// ---------------------------------------------------------------------------
+
+function normalizeRepairOptions_(options) {
+  const opts = options || {};
+  return {
+    dryRun:                   opts.dryRun !== false,
+    previewOnly:              !!opts.previewOnly,
+    defaultTemplateVersionId: safeString_(opts.defaultTemplateVersionId),
+    defaultWorkspaceId:       safeString_(opts.defaultWorkspaceId),
+    pageSize:                 Number(opts.pageSize || 100),
+    managementBaseUrl:        safeString_(opts.managementBaseUrl),
+    recordsBaseUrl:           safeString_(opts.recordsBaseUrl),
+    apiToken:                 safeString_(opts.apiToken),
+    throwOnVerifyFailure:     opts.throwOnVerifyFailure !== false,
+    debugEndpoints:           opts.debugEndpoints === true
+  };
+}
+
+function normalizeTableRecords_(response) {
+  if (!response) return [];
+  if (Array.isArray(response))          return response;
+  if (Array.isArray(response.records))  return response.records;
+  if (Array.isArray(response.data))     return response.data;
+  if (Array.isArray(response.items))    return response.items;
+  if (Array.isArray(response.result))   return response.result;
+  return [];
+}
+
+function indexBy_(rows, key) {
+  return (rows || []).reduce((acc, row) => {
+    const v = safeString_(row && row[key]);
+    if (v) acc[v] = row;
+    return acc;
+  }, {});
+}
+
+function safeString_(v) {
+  return v == null ? '' : String(v).trim();
+}
+
+function isBadSupplierStatus_(status) {
+  const s = safeString_(status).toLowerCase();
+  return s === 'pending _supplier' || s === 'pending_supplier_typo';
+}
+
+function minimalRequestIssue_(req, reason) {
+  return { supplier_request_id: req.id || '', supplier_name: req.supplier_name || '', current_version_id: req.current_version_id || '', reason };
+}
+
+function logRepairResult_(label, obj) {
+  Logger.log('[workspace=%s] %s\n%s', obj && obj.workspaceId ? obj.workspaceId : 'unknown', label, JSON.stringify(obj, null, 2));
+}
+
+function debugRepairEndpoint_(label, value) {
+  Logger.log('[repair-endpoint] %s: %s', label, value);
+}
+
+/**
+ * Workspace ID resolution — 4-level fallback chain:
+ * 1. Explicit argument
+ * 2. options.defaultWorkspaceId
+ * 3. TEMP_CONFIG.workspaceId (set to '' by default — must be configured)
+ * 4. Script Property WORKSPACE_REPAIR_DEFAULT_WORKSPACE_ID
+ */
+function resolveWorkspaceId_(workspaceId, options) {
+  const explicit    = safeString_(workspaceId);
+  if (explicit)     return explicit;
+  const fromOptions = safeString_(options && options.defaultWorkspaceId);
+  if (fromOptions)  return fromOptions;
+  const fromConfig  = safeString_(TEMP_CONFIG && TEMP_CONFIG.workspaceId);
+  if (fromConfig)   return fromConfig;
+  const fromScript  = safeString_(PropertiesService.getScriptProperties().getProperty(WORKSPACE_REPAIR_DEFAULT_WORKSPACE_KEY_));
+  if (fromScript)   return fromScript;
+  throw new Error(`No workspaceId provided. Call setDefaultWorkspaceRepairId() or set Script Property ${WORKSPACE_REPAIR_DEFAULT_WORKSPACE_KEY_}.`);
+}
+
+function setDefaultWorkspaceRepairId(workspaceId) {
+  const value = safeString_(workspaceId);
+  if (!value) throw new Error('workspaceId is required');
+  PropertiesService.getScriptProperties().setProperty(WORKSPACE_REPAIR_DEFAULT_WORKSPACE_KEY_, value);
+  Logger.log('Default workspace repair ID set: %s', value);
+  return value;
+}
+
+function getDefaultWorkspaceRepairId() {
+  return safeString_(PropertiesService.getScriptProperties().getProperty(WORKSPACE_REPAIR_DEFAULT_WORKSPACE_KEY_));
+}
+
+function clearDefaultWorkspaceRepairId() {
+  PropertiesService.getScriptProperties().deleteProperty(WORKSPACE_REPAIR_DEFAULT_WORKSPACE_KEY_);
+  Logger.log('Default workspace repair ID cleared');
+}
+
+function summarizeResponseShape_(response) {
+  if (response == null)          return { kind: 'nullish' };
+  if (Array.isArray(response))   return { kind: 'array', length: response.length, firstKeys: response.length ? Object.keys(response[0] || {}) : [] };
+
+  const out = { kind: typeof response, keys: Object.keys(response || {}) };
+  if (Array.isArray(response.records)) { out.recordsLength = response.records.length; out.recordsFirstKeys = response.records.length ? Object.keys(response.records[0] || {}) : []; }
+  if (Array.isArray(response.data))    { out.dataLength    = response.data.length;    out.dataFirstKeys    = response.data.length    ? Object.keys(response.data[0]    || {}) : []; }
+  if (Array.isArray(response.items))   { out.itemsLength   = response.items.length;   out.itemsFirstKeys   = response.items.length   ? Object.keys(response.items[0]   || {}) : []; }
+  if (Array.isArray(response.result))  { out.resultLength  = response.result.length;  out.resultFirstKeys  = response.result.length  ? Object.keys(response.result[0]  || {}) : []; }
+  return out;
+}
+
+function summarizeResponseSample_(response) {
+  if (response == null)                return null;
+  if (Array.isArray(response))         return response.slice(0, 2);
+  if (Array.isArray(response.records)) return response.records.slice(0, 2);
+  if (Array.isArray(response.data))    return response.data.slice(0, 2);
+  if (Array.isArray(response.items))   return response.items.slice(0, 2);
+  if (Array.isArray(response.result))  return response.result.slice(0, 2);
+  return response;
+}
+
+/**
  * @file 099_Dev_Tools.gs
  * @description Development and testing utilities. Not part of the production webhook path.
  *
