@@ -1,0 +1,179 @@
+{
+  "schema_version": "2026-03-30",
+  "tables": [
+
+    // -------------------------------------------------------------------------
+    // PASS 1 — No Workato relation types. Create these first.
+    // -------------------------------------------------------------------------
+
+    {
+      "name": "VER_TemplateVersion",
+      "pass": 1,
+      "columns": [
+        { "name": "id",             "type": "string",    "optional": false },
+        { "name": "correlation_id", "type": "string",    "optional": false },
+        { "name": "version_number", "type": "integer",   "optional": false },
+        { "name": "version_label",  "type": "string",    "optional": true  },
+        { "name": "status",         "type": "string",    "optional": false },
+        { "name": "drive_file_id",  "type": "string",    "optional": false },
+        { "name": "created_at",     "type": "date_time", "optional": false },
+        { "name": "published_at",   "type": "date_time", "optional": true  }
+      ]
+    },
+
+    {
+      "name": "CFG_Lookup",
+      "pass": 1,
+      "columns": [
+        { "name": "id",                  "type": "string", "optional": false },
+        { "name": "template_version_id", "type": "string", "optional": false },
+        { "name": "lookup_name",         "type": "string", "optional": false },
+        { "name": "valid_values",        "type": "string", "optional": false }
+      ]
+    },
+
+    {
+      "name": "CFG_ErrorTranslation",
+      "pass": 1,
+      "columns": [
+        { "name": "id",                     "type": "string", "optional": false },
+        { "name": "template_version_id",    "type": "string", "optional": false },
+        { "name": "sql_error_code",         "type": "string", "optional": false },
+        { "name": "human_readable_message", "type": "string", "optional": false }
+      ]
+    },
+
+    {
+      "name": "CFG_Field",
+      "pass": 1,
+      "columns": [
+        { "name": "id",                  "type": "string",  "optional": false },
+        { "name": "template_version_id", "type": "string",  "optional": false },
+        { "name": "field_name",          "type": "string",  "optional": false },
+        { "name": "description",         "type": "string",  "optional": true  },
+        { "name": "data_type",           "type": "string",  "optional": false },
+        { "name": "required",            "type": "boolean", "optional": false },
+        { "name": "must_be_empty",       "type": "boolean", "optional": false },
+        { "name": "column_unique",       "type": "boolean", "optional": false },
+        { "name": "data_cleaning_flags", "type": "string",  "optional": true  },
+        { "name": "position",            "type": "integer", "optional": false },
+        { "name": "lookup_name",         "type": "string",  "optional": true  }
+      ]
+    },
+
+    {
+      "name": "RUN_Upload",
+      "pass": 1,
+      "columns": [
+        { "name": "id",                  "type": "string",    "optional": false },
+        { "name": "supplier_request_id", "type": "string",    "optional": false },
+        { "name": "submitted_file_id",   "type": "string",    "optional": true  },
+        { "name": "status",              "type": "string",    "optional": false },
+        { "name": "submitted_at",        "type": "date_time", "optional": false }
+      ]
+    },
+
+    // -------------------------------------------------------------------------
+    // PASS 2 — Relate to Pass 1 tables. Requires IDs from Pass 1 at create time.
+    // -------------------------------------------------------------------------
+
+    {
+      "name": "WFA_SupplierRequest",
+      "pass": 2,
+      "columns": [
+        { "name": "id",                          "type": "string",    "optional": false },
+        { "name": "correlation_id",              "type": "string",    "optional": false },
+        { "name": "current_template_version_id", "type": "string",    "optional": false },
+        { "name": "supplier_name",               "type": "string",    "optional": false },
+        { "name": "supplier_contact_name",       "type": "string",    "optional": true  },
+        { "name": "assignee_email",              "type": "string",    "optional": false },
+        { "name": "status",                      "type": "string",    "optional": false },
+        { "name": "has_seeded_data",             "type": "boolean",   "optional": false },
+        { "name": "seeded_data_file_id",         "type": "string",    "optional": true  },
+        { "name": "last_updated_at",             "type": "date_time", "optional": false },
+        { "name": "file_template",               "type": "file",      "optional": true  },
+        { "name": "file_template_seeded",        "type": "file",      "optional": true  },
+        { "name": "file_upload",                 "type": "file",      "optional": true  },
+        {
+          "name": "version",
+          "type": "relation",
+          "optional": true,
+          "relation": { "target_table": "VER_TemplateVersion" }
+        }
+      ]
+    },
+
+    {
+      "name": "RUN_ValidationResult",
+      "pass": 2,
+      "columns": [
+        { "name": "id",           "type": "string",    "optional": false },
+        { "name": "upload_id",    "type": "string",    "optional": false },
+        { "name": "status",       "type": "string",    "optional": false },
+        { "name": "valid_rows",   "type": "integer",   "optional": true  },
+        { "name": "invalid_rows", "type": "integer",   "optional": true  },
+        { "name": "completed_at", "type": "date_time", "optional": false },
+        {
+          "name": "upload",
+          "type": "relation",
+          "optional": true,
+          "relation": { "target_table": "RUN_Upload" }
+        }
+      ]
+    },
+
+    // -------------------------------------------------------------------------
+    // PASS 3 — Relate to Pass 2 tables. Must run last.
+    // -------------------------------------------------------------------------
+
+    {
+      "name": "CFG_Rule",
+      "pass": 3,
+      "columns": [
+        { "name": "id",                  "type": "string",  "optional": false },
+        { "name": "template_version_id", "type": "string",  "optional": false },
+        { "name": "field_id",            "type": "string",  "optional": false },
+        { "name": "rule_type",           "type": "string",  "optional": false },
+        { "name": "condition_field",     "type": "string",  "optional": true  },
+        { "name": "condition_operator",  "type": "string",  "optional": true  },
+        { "name": "condition_value",     "type": "string",  "optional": true  },
+        { "name": "parameter_1",         "type": "string",  "optional": true  },
+        { "name": "parameter_2",         "type": "string",  "optional": true  },
+        { "name": "error_message",       "type": "string",  "optional": false },
+        { "name": "strict_enforcement",  "type": "boolean", "optional": false },
+        {
+          "name": "field",
+          "type": "relation",
+          "optional": true,
+          "relation": { "target_table": "CFG_Field" }
+        }
+      ]
+    },
+
+    {
+      "name": "RUN_FieldError",
+      "pass": 3,
+      "columns": [
+        { "name": "id",                   "type": "string",  "optional": false },
+        { "name": "validation_result_id", "type": "string",  "optional": false },
+        { "name": "field_id",             "type": "string",  "optional": false },
+        { "name": "row_number",           "type": "integer", "optional": false },
+        { "name": "submitted_value",      "type": "string",  "optional": true  },
+        { "name": "error_message",        "type": "string",  "optional": false },
+        {
+          "name": "field",
+          "type": "relation",
+          "optional": true,
+          "relation": { "target_table": "CFG_Field" }
+        },
+        {
+          "name": "validation_result",
+          "type": "relation",
+          "optional": true,
+          "relation": { "target_table": "RUN_ValidationResult" }
+        }
+      ]
+    }
+
+  ]
+}
