@@ -10,66 +10,110 @@ You are a technical architect performing a **spec extraction** — reverse-engin
 
 The code I'm providing is a **Google Apps Script** that bridges **Monday.com** and **Smartsheet**, with Google Sheets potentially acting as an intermediary or configuration layer.
 
-Analyze the code and produce a structured spec with the following sections:
+Analyze the code and produce the spec as a **single structured YAML document**. Use the exact schema below — do not merge, rename, reorder, or omit sections.
 
-### 1. Overview
-- One-paragraph summary of what this script does end-to-end.
-- The direction(s) of data flow (Monday → Sheets → Smartsheet, bidirectional, etc.).
-- Trigger mechanism (time-driven, event-driven, manual, onOpen menu, etc.).
+```yaml
+# ── Spec Extraction Output Schema ──
 
-### 2. External Dependencies
-For each external system (Monday.com, Smartsheet, Google Sheets, any others):
-- How authentication is handled (API key in properties, OAuth, hardcoded, etc.).
-- Which API endpoints or SDK methods are called.
-- What permissions/scopes are assumed.
+overview:
+  summary: >
+    # One-paragraph description of what this script does end-to-end.
+  data_flow_direction: # e.g., "Monday → Sheets → Smartsheet", "bidirectional"
+  trigger_mechanism: # e.g., "time-driven (every 5 min)", "onOpen menu item", "manual execution"
 
-### 3. Configuration & State
-- Where configuration lives (script properties, a config sheet, hardcoded constants, etc.).
-- What values are configurable vs. hardcoded.
-- Any persistent state the script relies on between executions (e.g., last-sync timestamps, ID mappings, cursor positions).
+external_dependencies:
+  # One entry per external system (Monday.com, Smartsheet, Google Sheets, any others)
+  - system: # e.g., "Monday.com"
+    authentication:
+      method: # e.g., "API key from Script Properties", "OAuth", "hardcoded"
+      credential_location: # e.g., "PropertiesService.getScriptProperties().getProperty('MONDAY_API_KEY')"
+    api_surface:
+      - endpoint_or_method: # e.g., "POST https://api.monday.com/v2 (GraphQL)"
+        purpose: # what this call accomplishes
+    assumed_permissions: [] # scopes or access levels the script requires
 
-### 4. Data Model & Mapping
-- What entities/records are being moved (items, columns, rows, cells, etc.).
-- The field-level mapping between Monday.com columns and Smartsheet columns.
-- Any transformations, formatting, or type coercions applied during mapping.
-- How IDs, keys, or unique identifiers are resolved across systems.
+configuration_and_state:
+  config_sources:
+    - location: # e.g., "Script Properties", "sheet named 'Config'", "hardcoded constant"
+      values:
+        - name: # property/constant name
+          type: # string, number, boolean, JSON, etc.
+          hardcoded: # true/false
+          description: # what it controls
+  persistent_state:
+    - name: # e.g., "last_sync_timestamp"
+      storage: # where it's stored between runs
+      purpose: # why the script needs to remember this
 
-### 5. Function Inventory
-For **each function**, document:
-| Field | Description |
-|---|---|
-| **Name** | Function name |
-| **Purpose** | What it does in one sentence |
-| **Parameters** | Name, expected type, and meaning of each parameter |
-| **Return value** | Type and meaning (or "void / side-effect only") |
-| **Side effects** | External calls, sheet writes, property mutations, logging |
-| **Dependencies** | Other functions it calls, and external state it reads |
-| **Assumptions** | Anything the function assumes to be true about its inputs or environment |
+data_model_and_mapping:
+  entities_transferred:
+    - entity: # e.g., "Monday item → Smartsheet row"
+      description: # what this entity represents in business terms
+  field_mappings:
+    - source_system: # e.g., "Monday.com"
+      source_field: # column/field name or ID
+      target_system: # e.g., "Smartsheet"
+      target_field: # column/field name or ID
+      transformation: # any formatting, type coercion, or logic applied (or "none")
+  id_resolution:
+    strategy: # how unique identifiers are matched across systems
+    details: # specifics — mapping table location, key fields, lookup logic
 
-### 6. Control Flow & Orchestration
-- What is the entry point (or entry points)?
-- In what order do functions execute in a normal run?
-- Represent the call graph as a simple text diagram or ordered list.
+function_inventory:
+  # One entry for EVERY function, no matter how trivial
+  - name: # function name
+    purpose: # one sentence
+    parameters:
+      - name:
+        type: # expected type
+        description:
+    return_value:
+      type: # or "void"
+      description: # meaning of the return value
+    side_effects: [] # external calls, sheet writes, property mutations, logging
+    dependencies:
+      functions_called: [] # other functions this one invokes
+      external_state_read: [] # properties, sheets, APIs it reads
+    assumptions: [] # anything it assumes about inputs or environment
 
-### 7. Error Handling & Edge Cases
-- How are API errors handled (try/catch, HTTP status checks, retry logic, silent failure)?
-- What happens if a record exists in one system but not the other?
-- What happens on partial failure (e.g., 3 of 10 rows sync successfully)?
-- Are there any rate-limit considerations?
+control_flow:
+  entry_points:
+    - function: # entry point function name
+      trigger: # how it gets invoked
+  execution_order:
+    # Ordered list describing normal-run sequence
+    - step: 1
+      function:
+      description:
+  call_graph: |
+    # Text-based representation of the call graph
+    # e.g.:
+    # main()
+    #   ├─ fetchMondayItems()
+    #   │    └─ mondayApiCall()
+    #   ├─ transformData()
+    #   └─ writeToSmartsheet()
+    #        └─ smartsheetApiCall()
 
-### 8. Observations (NOT Fixes)
-Flag anything that looks like it **might** be a bug, an unhandled edge case, a race condition, or a mismatch between apparent intent and actual behavior. **Do not suggest fixes** — just state the observation factually so I can evaluate it during spec review. Format each observation as:
-- **Location:** function name or line range
-- **Observation:** what you noticed
-- **Why it matters:** potential impact if this is indeed a problem
+error_handling:
+  api_error_strategy: # e.g., "try/catch with Logger.log", "HTTP status check", "unhandled"
+  missing_record_behavior: # what happens if a record exists in one system but not the other
+  partial_failure_behavior: # what happens when some but not all records sync
+  rate_limit_handling: # any throttling, backoff, or batching logic (or "none observed")
 
----
+observations:
+  # Flags for potential issues — do NOT suggest fixes
+  - location: # function name or line range
+    observation: # what you noticed, stated factually
+    potential_impact: # why it matters if this is indeed a problem
+```
 
-## Formatting Rules
-- Use the exact section structure above — do not merge, rename, or reorder sections.
-- In the Function Inventory, cover **every** function, no matter how trivial.
-- Prefer concrete values over vague descriptions (e.g., "reads `MONDAY_API_KEY` from Script Properties" not "reads config").
-- If something is ambiguous in the code, say so explicitly rather than guessing.
+## Rules
+- **Output the YAML document and nothing else.** No preamble, no summary, no markdown wrapping. Start with `overview:` and end with the last observation.
+- Cover **every** function in `function_inventory`, no matter how trivial.
+- Prefer concrete values over vague descriptions (e.g., `"reads MONDAY_API_KEY from Script Properties"` not `"reads config"`).
+- If something is ambiguous in the code, say so explicitly in the relevant field rather than guessing.
+- Use YAML block scalars (`>` or `|`) for multi-line text. Keep all values as valid YAML.
 
 ---
 
