@@ -1,41 +1,62 @@
-import re
+import uuid, json
 
-def main(params):
-    errors = []
+# Inputs from prior steps
+suppliers   = params["suppliers"]       # parsed config array
+users       = params["users"]           # parsed config array
+variants    = params["variants"]        # CFG_Variant records from Step 4
+project_id  = params["template_project_id"]
+version_id  = params["template_version_id"]
+corr_id     = params["correlation_id"]
+analyst     = params["analyst_email"]
 
-    # 1. correlation_id: required, UUID format
-    cid = (params.get('correlation_id') or '').strip()
-    if not cid:
-        errors.append('correlation_id is missing')
-    elif not re.match(
-        r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-        cid, re.IGNORECASE
-    ):
-        errors.append('correlation_id is not a valid UUID')
+# Build variant lookup: name → variant_id
+variant_map = {v["variant_name"]: v["variant_id"] for v in variants}
 
-    # 2. client_name: required, non-empty
-    if not (params.get('client_name') or '').strip():
-        errors.append('client_name is missing')
+# Build first-user lookup: supplier_name → first user's email
+first_user = {}
+for u in users:
+    name = u["supplier_name"]
+    if name not in first_user:
+        first_user[name] = u["supplier_user_email"]
 
-    # 3. analyst_email: required, basic email format
-    email = (params.get('analyst_email') or '').strip()
-    if not email:
-        errors.append('analyst_email is missing')
-    elif not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
-        errors.append('analyst_email is not a valid email')
+# Build supplier request rows + supplier_name → request_id map
+supplier_map = {}
+request_rows = []
+for s in suppliers:
+    rid = str(uuid.uuid4())
+    supplier_map[s["supplier_name"]] = rid
+    request_rows.append({
+        "supplier_request_id":  rid,
+        "template_project_id":  project_id,
+        "assigned_version_id":  version_id,
+        "assigned_variant_id":  variant_map.get(s.get("template_variation")),
+        "correlation_id":       corr_id,
+        "supplier_name":        s["supplier_name"],
+        "contact_email":        first_user.get(s["supplier_name"]),
+        "assignee_email":       analyst,
+        "has_seeded_data":      bool(s.get("has_incumbent_data")),
+        "seed_data_file_id":    s.get("location_of_incumbent_data"),
+        "seed_data_range":      s.get("incumbent_data_range"),
+        "status":               "pending"
+    })
 
-    # 4. config_file_id: required, non-empty
-    if not (params.get('config_file_id') or '').strip():
-        errors.append('config_file_id is missing')
+# Build user rows
+user_rows = []
+for u in users:
+    req_id = supplier_map.get(u["supplier_name"])
+    if not req_id:
+        continue  # skip — no matching supplier
+    user_rows.append({
+        "supplier_user_id":     str(uuid.uuid4()),
+        "supplier_request_id":  req_id,
+        "user_email":           u["supplier_user_email"],
+        "contact_name":         u.get("supplier_contact_name"),
+        "status":               "active"
+    })
 
-    # 5. timestamp: required, ISO-8601
-    ts = (params.get('timestamp') or '').strip()
-    if not ts:
-        errors.append('timestamp is missing')
-    elif not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', ts):
-        errors.append('timestamp is not ISO-8601 format')
-
-    return {
-        'is_valid': len(errors) == 0,
-        'error_details': '; '.join(errors) if errors else ''
-    }
+return {
+    "request_rows":  json.dumps(request_rows),
+    "user_rows":     json.dumps(user_rows),
+    "supplier_request_count": len(request_rows),
+    "supplier_user_count":    len(user_rows)
+}
