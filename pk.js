@@ -8,8 +8,10 @@
  * moment a user types into a data row — but only if the PK cell
  * is still empty. The UUID never changes after that.
  *
- * Run setupPrimaryKeyColumns() once to insert headers and apply
- * column protection across all tracked sheets.
+ * Run setupPrimaryKeyColumns() once to insert headers, apply
+ * column protection, and install the onEdit trigger. If the
+ * workbook is copied, run setup again in the copy — triggers
+ * don't survive copies.
  *
  * @author Emily Cabaniss
  * @since 2026-04-02
@@ -135,9 +137,44 @@ function setupPrimaryKeyColumns() {
     console.log(`Protected PK column in "${cfg.sheetName}".`);
   });
 
+  // ── Step 4: Install the onEdit trigger (idempotent) ──
+  ensureEditTrigger_();
+
   SpreadsheetApp.getUi().alert(
-    'Setup complete. Primary key columns are in place and protected.'
+    'Setup complete.\n\n'
+    + '• Primary key columns inserted and protected.\n'
+    + '• Edit trigger installed — new rows will receive UUIDs automatically.\n\n'
+    + 'If this workbook is ever copied, run this setup again in the copy.'
   );
+}
+
+
+// ── Trigger installer ─────────────────────────────────────────
+
+/**
+ * Creates an installable onEdit trigger for stampPrimaryKey,
+ * but only if one doesn't already exist. Safe to call repeatedly.
+ * @private
+ */
+function ensureEditTrigger_() {
+  const functionName = 'stampPrimaryKey';
+
+  const existing = ScriptApp.getProjectTriggers().some(
+    t => t.getHandlerFunction() === functionName
+       && t.getEventType() === ScriptApp.EventType.ON_EDIT
+  );
+
+  if (existing) {
+    console.log('Edit trigger already installed — skipping.');
+    return;
+  }
+
+  ScriptApp.newTrigger(functionName)
+    .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
+    .onEdit()
+    .create();
+
+  console.log('Installed onEdit trigger for stampPrimaryKey.');
 }
 
 
@@ -149,8 +186,6 @@ function setupPrimaryKeyColumns() {
  *   - The edited row is at or below dataStartRow
  *   - The PK cell for that row is empty
  *   - At least one non-PK cell in the row has content
- *
- * Install via: Triggers > Add Trigger > stampPrimaryKey > On edit
  */
 function stampPrimaryKey(e) {
   if (!e || !e.range) return;
@@ -182,4 +217,37 @@ function stampPrimaryKey(e) {
   if (!hasContent) return;
 
   pkCell.setValue(Utilities.getUuid());
+}
+
+
+// ── onOpen hook ───────────────────────────────────────────────
+
+/**
+ * Call this from your existing onOpen() in main.gs.
+ * Checks whether the PK trigger is installed. If not, adds a
+ * menu item so the analyst can run setup with one click.
+ *
+ * Usage in main.gs:
+ *
+ *   function onOpen() {
+ *     const ui = SpreadsheetApp.getUi();
+ *     const menu = ui.createMenu('Supplier data collection')
+ *       .addItem('Generate template(s) and initialize Workato', 'executeFullWorkflow')
+ *       .addSeparator()
+ *       .addItem('Draft specific variant...', 'draftSpecificVariant');
+ *
+ *     appendPkSetupMenuItem(menu);   // ← add this line
+ *     menu.addToUi();
+ *   }
+ */
+function appendPkSetupMenuItem(menu) {
+  const triggerExists = ScriptApp.getProjectTriggers().some(
+    t => t.getHandlerFunction() === 'stampPrimaryKey'
+       && t.getEventType() === ScriptApp.EventType.ON_EDIT
+  );
+
+  if (!triggerExists) {
+    menu.addSeparator();
+    menu.addItem('⚠ Set up field IDs (required)', 'setupPrimaryKeyColumns');
+  }
 }
