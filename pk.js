@@ -1,253 +1,267 @@
 /**
- * @file pk_stamper.gs
- * @description Write-once UUID stamping for primary key columns.
+ * @file dependent_dropdowns.gs
+ * @description Adds dependent dropdown support to template generation.
  *
- * Reads _developer_settings.primary_keys to discover which sheets
- * need PK columns, where the column is, what the header name is,
- * and where data starts. The onEdit trigger stamps a UUID the
- * moment a user types into a data row — but only if the PK cell
- * is still empty. The UUID never changes after that.
+ * PREREQUISITES:
+ *   Enable the Google Sheets API advanced service:
+ *   Extensions > Apps Script > Services > + > Google Sheets API > Add
  *
- * Run setupPrimaryKeyColumns() once to insert headers, apply
- * column protection, and install the onEdit trigger. If the
- * workbook is copied, run setup again in the copy — triggers
- * don't survive copies.
+ * CHANGES TO EXISTING CODE (in main.gs / buildExcelVariants):
  *
- * @author Emily Cabaniss
- * @since 2026-04-02
+ *   1. Both field-push blocks (default path ~line 218, variant path ~line 248)
+ *      must add dependsOn to the field object.
+ *
+ *   2. The validation loop (~line 289) is replaced with the new version below.
+ *
+ *   3. getLookupValues gets the fixed isActive check.
  */
 
 
-// ── Configuration reader ──────────────────────────────────────
+// ── Shared utility ────────────────────────────────────────────
 
 /**
- * Parses the primary_keys block from _developer_settings into
- * a usable array of sheet configs.
- *
- * @returns {Array<{sheetName: string, colIndex: number, fieldName: string, dataStartRow: number}>}
+ * Truthy check that handles boolean, numeric 1, and string "TRUE"/"1".
+ * Use everywhere you currently check === true || === 'TRUE'.
  */
-function getPrimaryKeyConfig() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const dev = ss.getSheetByName('_developer_settings');
-  if (!dev) throw new Error('_developer_settings tab not found.');
-
-  const data = dev.getDataRange().getValues();
-
-  const find = (key) => {
-    const row = data.find(r => r[1] === 'primary_keys' && r[2] === key);
-    return row ? String(row[3]) : '';
-  };
-
-  const sheetNames   = find('sheetNames').split(',').map(s => s.trim());
-  const indices       = find('indices').split(',').map(s => parseInt(s.trim(), 10));
-  const fieldNames    = find('field_names').split(',').map(s => s.trim());
-  const dataStartRows = find('data_start_row').split(',').map(s => parseInt(s.trim(), 10));
-
-  return sheetNames.map((name, i) => ({
-    sheetName:    name,
-    colIndex:     indices[i],       // 0-based
-    fieldName:    fieldNames[i],
-    dataStartRow: dataStartRows[i]  // 1-based
-  }));
+function isChecked(val) {
+  return val === true
+      || val === 1
+      || String(val).trim() === '1'
+      || String(val).trim().toUpperCase() === 'TRUE';
 }
 
 
-// ── One-time setup ────────────────────────────────────────────
+// ── Helpers for dependent dropdowns ───────────────────────────
 
 /**
- * Run once. For each tracked sheet:
- *   1. Inserts the PK column if the header isn't already present.
- *   2. Backfills UUIDs for existing data rows that lack one.
- *   3. Applies column protection (script-writable, human-readonly).
+ * Converts a 1-based column number to a letter (1→A, 27→AA).
  */
-function setupPrimaryKeyColumns() {
-  const ss      = SpreadsheetApp.getActiveSpreadsheet();
-  const configs = getPrimaryKeyConfig();
-  const me      = Session.getEffectiveUser();
+function colToLetter(col) {
+  let letter = '';
+  while (col > 0) {
+    const mod = (col - 1) % 26;
+    letter = String.fromCharCode(65 + mod) + letter;
+    col = Math.floor((col - 1) / 26);
+  }
+  return letter;
+}
 
-  configs.forEach(cfg => {
-    const sheet = ss.getSheetByName(cfg.sheetName);
-    if (!sheet) {
-      console.warn(`Sheet "${cfg.sheetName}" not found — skipping.`);
+/**
+ * Sanitizes a string for use as a Google Sheets named range.
+ * Named ranges: letters, digits, underscores only; must start with letter/underscore.
+ */
+function sanitizeRangeName(name) {
+  let sanitized = String(name).trim()
+    .replace(/\s+/g, '_')
+    .replace(/[^A-Za-z0-9_]/g, '');
+  if (/^\d/.test(sanitized)) sanitized = '_' + sanitized;
+  return sanitized;
+}
+
+
+/**
+ * Groups lookup values by parent, writes each group as a named column
+ * in the Data_Lookups sheet, and creates named ranges.
+ *
+ * @param {Spreadsheet} tempSs - The temp spreadsheet being built.
+ * @param {Sheet} dataSheet - The Data_Lookups sheet.
+ * @param {Array<Array>} lookupData - Raw 2D array from 5_lookups.
+ * @param {string} lookupName - The dependent lookup table name (e.g., "job_title").
+ * @param {number} startCol - 1-based column to start writing in Data_Lookups.
+ * @returns {{ count: number }} Number of parent-group columns written.
+ */
+function writeDependentLookups(tempSs, dataSheet, lookupData, lookupName, startCol) {
+  // Group values by their parent
+  const groups = {};
+
+  for (let i = 1; i < lookupData.length; i++) {
+    const tableName = String(lookupData[i][0]).trim();
+    const label     = String(lookupData[i][2]).trim();
+    const parent    = lookupData[i][3] != null ? String(lookupData[i][3]).trim() : '';
+
+    if (tableName !== lookupName || !isChecked(lookupData[i][4]) || !label || !parent) {
+      continue;
+    }
+
+    if (!groups[parent]) groups[parent] = [];
+    groups[parent].push(label);
+  }
+
+  const parentNames = Object.keys(groups);
+  if (parentNames.length === 0) {
+    console.warn(`No parent-grouped values found for "${lookupName}".`);
+    return { count: 0 };
+  }
+
+  // Write each group as a column and create a named range
+  parentNames.forEach((parent, idx) => {
+    const col      = startCol + idx;
+    const values   = groups[parent];
+    const rangeName = sanitizeRangeName(parent);
+
+    // Header = raw parent name (for readability), named range = sanitized
+    dataSheet.getRange(1, col).setValue(parent).setFontWeight('bold');
+    dataSheet.getRange(2, col, values.length, 1).setValues(values.map(v => [v]));
+
+    const namedRange = dataSheet.getRange(2, col, values.length, 1);
+    tempSs.setNamedRange(rangeName, namedRange);
+  });
+
+  console.log(`Wrote ${parentNames.length} parent groups for "${lookupName}": ${parentNames.join(', ')}`);
+  return { count: parentNames.length };
+}
+
+
+// ── Updated field object push ─────────────────────────────────
+//
+// In buildExcelVariants, BOTH places where you push to activeFields
+// (the default path and the variant path), add dependsOn:
+//
+//   activeFields.push({
+//     name: fieldName,
+//     dataType:   variantData[r][2],
+//     dataFormat: variantData[r][3],
+//     lookupName: variantData[r][4],
+//     dependsOn:  variantData[r][5] || null    // ← ADD THIS
+//   });
+
+
+// ── Replacement validation loop ───────────────────────────────
+//
+// Replace the existing variant.fields.forEach validation block
+// (~lines 289–308) with the function below. Call it from
+// buildExcelVariants after writing the headers:
+//
+//   applyFieldValidations(tempSs, tempSheet, dataSheet, variant.fields, lookupDataMaster);
+
+/**
+ * Applies data validation to each field column in the generated template.
+ * Handles regular dropdowns, dependent dropdowns (via INDIRECT), and dates.
+ *
+ * @param {Spreadsheet} tempSs - The temp spreadsheet.
+ * @param {Sheet} tempSheet - The "Supplier Data" sheet.
+ * @param {Sheet} dataSheet - The "Data_Lookups" sheet.
+ * @param {Array<Object>} fields - The field definitions for this variant.
+ * @param {Array<Array>} lookupData - Raw 2D array from 5_lookups.
+ */
+function applyFieldValidations(tempSs, tempSheet, dataSheet, fields, lookupData) {
+  let lookupColTracker = 1;
+  const DATA_ROWS = 500;
+
+  // Build a name → column index map so dependent fields can find their parent
+  const fieldColMap = {};
+  fields.forEach((f, i) => { fieldColMap[f.name] = i + 1; }); // 1-based
+
+  fields.forEach((field, index) => {
+    const col = index + 1;
+    const validationRange = tempSheet.getRange(2, col, DATA_ROWS, 1);
+    const format = field.dataFormat ? String(field.dataFormat).trim().toLowerCase() : '';
+
+    // ── Dependent dropdown ────────────────────────────────
+    if (format.includes('dependent') && field.lookupName && field.dependsOn) {
+      const parentCol = fieldColMap[field.dependsOn];
+
+      if (!parentCol) {
+        console.warn(`Dependent field "${field.name}": parent "${field.dependsOn}" not found in template columns. Falling back to flat list.`);
+        // Fall through to regular dropdown below
+      } else {
+        // Write grouped columns + named ranges
+        const result = writeDependentLookups(tempSs, dataSheet, lookupData, field.lookupName, lookupColTracker);
+
+        if (result.count > 0) {
+          lookupColTracker += result.count;
+
+          // Build the INDIRECT formula:
+          //   =INDIRECT(SUBSTITUTE(E2, " ", "_"))
+          // where E is the parent column. The SUBSTITUTE handles parent values
+          // with spaces (e.g., "General Management" → named range "General_Management").
+          const parentColLetter = colToLetter(parentCol);
+          const formula = `=INDIRECT(SUBSTITUTE(${parentColLetter}2," ","_"))`;
+
+          // Use the Sheets API to set a dynamic dropdown validation.
+          // SpreadsheetApp.newDataValidation() can't do INDIRECT dropdowns.
+          Sheets.Spreadsheets.batchUpdate({
+            requests: [{
+              setDataValidation: {
+                range: {
+                  sheetId: tempSheet.getSheetId(),
+                  startRowIndex: 1,         // row 2 (0-based)
+                  endRowIndex: 1 + DATA_ROWS,
+                  startColumnIndex: col - 1, // 0-based
+                  endColumnIndex: col
+                },
+                rule: {
+                  condition: {
+                    type: 'ONE_OF_RANGE',
+                    values: [{ userEnteredValue: formula }]
+                  },
+                  showCustomUi: true,  // show as dropdown
+                  strict: false        // allow empty while parent is unselected
+                }
+              }
+            }]
+          }, tempSs.getId());
+
+          console.log(`Applied INDIRECT validation for "${field.name}" → parent "${field.dependsOn}" (col ${parentColLetter}).`);
+          return; // done with this field
+        }
+        // If no groups found, fall through to regular dropdown
+      }
+    }
+
+    // ── Regular dropdown ──────────────────────────────────
+    if (format.includes('dropdown') && field.lookupName) {
+      const lookupValues = getLookupValues(lookupData, field.lookupName);
+
+      if (lookupValues.length > 0) {
+        const values2D = lookupValues.map(val => [val]);
+        dataSheet.getRange(1, lookupColTracker).setValue(field.lookupName).setFontWeight('bold');
+        const sourceRange = dataSheet.getRange(2, lookupColTracker, lookupValues.length, 1);
+        sourceRange.setValues(values2D);
+
+        const rule = SpreadsheetApp.newDataValidation()
+          .requireValueInRange(sourceRange, true)
+          .setAllowInvalid(false)
+          .build();
+        validationRange.setDataValidation(rule);
+        lookupColTracker++;
+      }
       return;
     }
 
-    const headerRow = cfg.dataStartRow - 1; // row above data holds column headers
-    const pkCol     = cfg.colIndex + 1;     // 1-based for Sheets API
-
-    // ── Step 1: Insert column if header doesn't match ──
-    const currentHeader = sheet.getRange(headerRow, pkCol).getValue();
-    if (String(currentHeader).trim() !== cfg.fieldName) {
-      sheet.insertColumnBefore(pkCol);
-      sheet.getRange(headerRow, pkCol).setValue(cfg.fieldName);
-
-      // Label the definition/hints rows above the header if they exist
-      if (headerRow >= 2) {
-        sheet.getRange(headerRow - 1, pkCol).setValue('Do not edit.');
-      }
-      if (headerRow >= 3) {
-        sheet.getRange(headerRow - 2, pkCol).setValue('Primary key (UUID)');
-      }
-
-      console.log(`Inserted PK column in "${cfg.sheetName}" at column ${pkCol}.`);
+    // ── Date validation ───────────────────────────────────
+    if (field.dataType === 'date') {
+      const rule = SpreadsheetApp.newDataValidation()
+        .requireDate()
+        .setAllowInvalid(false)
+        .build();
+      validationRange.setDataValidation(rule);
     }
-
-    // ── Step 2: Backfill UUIDs for existing data rows ──
-    const lastRow = sheet.getLastRow();
-    if (lastRow >= cfg.dataStartRow) {
-      const dataRows = lastRow - cfg.dataStartRow + 1;
-      const pkRange  = sheet.getRange(cfg.dataStartRow, pkCol, dataRows, 1);
-      const pkValues = pkRange.getValues();
-
-      // Detect which column holds the "name" field (first non-PK content column)
-      const nameCol     = pkCol === 1 ? 2 : 1;
-      const nameValues  = sheet.getRange(cfg.dataStartRow, nameCol, dataRows, 1).getValues();
-
-      let stamped = 0;
-      for (let i = 0; i < dataRows; i++) {
-        const hasName = String(nameValues[i][0]).trim() !== '';
-        const hasPK   = String(pkValues[i][0]).trim() !== '';
-
-        if (hasName && !hasPK) {
-          pkValues[i][0] = Utilities.getUuid();
-          stamped++;
-        }
-      }
-
-      if (stamped > 0) {
-        pkRange.setValues(pkValues);
-        console.log(`Backfilled ${stamped} UUIDs in "${cfg.sheetName}".`);
-      }
-    }
-
-    // ── Step 3: Protect the PK column ──
-    const protection = sheet.getRange(1, pkCol, sheet.getMaxRows(), 1)
-      .protect()
-      .setDescription(`${cfg.fieldName} — immutable primary key`);
-
-    // Remove all editors except the script owner, so only onEdit can write
-    protection.removeEditors(protection.getEditors());
-    if (protection.canDomainEdit()) {
-      protection.setDomainEdit(false);
-    }
-
-    // Show a warning instead of a hard block — Apps Script onEdit still writes through
-    protection.setWarningOnly(true);
-
-    console.log(`Protected PK column in "${cfg.sheetName}".`);
   });
-
-  // ── Step 4: Install the onEdit trigger (idempotent) ──
-  ensureEditTrigger_();
-
-  SpreadsheetApp.getUi().alert(
-    'Setup complete.\n\n'
-    + '• Primary key columns inserted and protected.\n'
-    + '• Edit trigger installed — new rows will receive UUIDs automatically.\n\n'
-    + 'If this workbook is ever copied, run this setup again in the copy.'
-  );
 }
 
 
-// ── Trigger installer ─────────────────────────────────────────
+// ── Updated getLookupValues ───────────────────────────────────
+// Replace the existing function with this version (fixed isActive check).
 
 /**
- * Creates an installable onEdit trigger for stampPrimaryKey,
- * but only if one doesn't already exist. Safe to call repeatedly.
- * @private
+ * Get distinct values for a specific dropdown lookup table.
+ *
+ * @param {Array<Array>} lookupData - The 2D array from the lookups sheet.
+ * @param {string} tableName - The lookup table name to filter by.
+ * @returns {Array<string>} Non-blank, active dropdown labels.
  */
-function ensureEditTrigger_() {
-  const functionName = 'stampPrimaryKey';
+function getLookupValues(lookupData, tableName) {
+  const values = [];
 
-  const existing = ScriptApp.getProjectTriggers().some(
-    t => t.getHandlerFunction() === functionName
-       && t.getEventType() === ScriptApp.EventType.ON_EDIT
-  );
+  for (let i = 1; i < lookupData.length; i++) {
+    const rowTableName = String(lookupData[i][0]).trim();
+    const labelValue   = String(lookupData[i][2]).trim();
 
-  if (existing) {
-    console.log('Edit trigger already installed — skipping.');
-    return;
+    if (rowTableName === tableName && isChecked(lookupData[i][4]) && labelValue !== '') {
+      values.push(labelValue);
+    }
   }
 
-  ScriptApp.newTrigger(functionName)
-    .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
-    .onEdit()
-    .create();
-
-  console.log('Installed onEdit trigger for stampPrimaryKey.');
-}
-
-
-// ── onEdit trigger ────────────────────────────────────────────
-
-/**
- * Installable onEdit trigger. Stamps a UUID when:
- *   - The edited sheet is in the tracked list
- *   - The edited row is at or below dataStartRow
- *   - The PK cell for that row is empty
- *   - At least one non-PK cell in the row has content
- */
-function stampPrimaryKey(e) {
-  if (!e || !e.range) return;
-
-  const sheet     = e.range.getSheet();
-  const sheetName = sheet.getName();
-
-  // Quick exit for sheets we don't track
-  const configs = getPrimaryKeyConfig();
-  const cfg = configs.find(c => c.sheetName === sheetName);
-  if (!cfg) return;
-
-  const editedRow = e.range.getRow();
-  if (editedRow < cfg.dataStartRow) return;
-
-  const pkCol  = cfg.colIndex + 1; // 1-based
-  const pkCell = sheet.getRange(editedRow, pkCol);
-
-  // Already stamped — do nothing
-  if (String(pkCell.getValue()).trim() !== '') return;
-
-  // Check that the row has at least one non-empty content cell
-  const rowData = sheet.getRange(editedRow, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const hasContent = rowData.some((val, idx) => {
-    if (idx === cfg.colIndex) return false; // skip the PK column itself
-    return String(val).trim() !== '';
-  });
-
-  if (!hasContent) return;
-
-  pkCell.setValue(Utilities.getUuid());
-}
-
-
-// ── onOpen hook ───────────────────────────────────────────────
-
-/**
- * Call this from your existing onOpen() in main.gs.
- * Checks whether the PK trigger is installed. If not, adds a
- * menu item so the analyst can run setup with one click.
- *
- * Usage in main.gs:
- *
- *   function onOpen() {
- *     const ui = SpreadsheetApp.getUi();
- *     const menu = ui.createMenu('Supplier data collection')
- *       .addItem('Generate template(s) and initialize Workato', 'executeFullWorkflow')
- *       .addSeparator()
- *       .addItem('Draft specific variant...', 'draftSpecificVariant');
- *
- *     appendPkSetupMenuItem(menu);   // ← add this line
- *     menu.addToUi();
- *   }
- */
-function appendPkSetupMenuItem(menu) {
-  const triggerExists = ScriptApp.getProjectTriggers().some(
-    t => t.getHandlerFunction() === 'stampPrimaryKey'
-       && t.getEventType() === ScriptApp.EventType.ON_EDIT
-  );
-
-  if (!triggerExists) {
-    menu.addSeparator();
-    menu.addItem('⚠ Set up field IDs (required)', 'setupPrimaryKeyColumns');
-  }
+  return values;
 }
