@@ -1,262 +1,199 @@
 """
-Workato: Python snippets by Workato — Execute Python code
-==========================================================
-Action name: Generate supplier XLSX template
+R-2b Step 15 — Remap parsed config to field-UUID-keyed records
 
-INPUT FIELDS (define in Workato action config):
-  - fields        (string)  ← JSON array of field objects
-  - lookups       (string)  ← JSON array of lookup rows
-  - client_name   (string)
-  - variant_name  (string)
+Workato py_eval action. Takes the SDC Platform Connector's parse_config_file
+output (logical field names) and table_results_map (field name → field UUID)
+and produces API-ready record arrays for batch insert into each CFG table.
 
-OUTPUT FIELDS (define in Workato action config):
-  - file_content  (string)  ← base64-encoded XLSX
-  - file_name     (string)
+Inputs (via params):
+  - parsed_config_json : JSON string — Action 1 output from parse_config_file
+  - table_results_map  : JSON string — { table_name: { table_id, fields: { col_name: field_uuid } } }
+  - template_version_id: string — UUID for the new VER_TemplateVersion
+
+Outputs:
+  - cfg_field_records         : JSON string — array of records for CFG_Field
+  - cfg_rule_records          : JSON string — array of records for CFG_Rule
+  - cfg_lookup_records        : JSON string — array of records for CFG_Lookup
+  - cfg_variant_records       : JSON string — array of records for CFG_Variant
+  - cfg_variant_field_records : JSON string — array of records for CFG_VariantField
+  - cfg_error_records         : JSON string — array of records for CFG_ErrorTranslation
+  - has_variants              : "true" or "false"
 """
 
-import base64
-import io
 import json
-import re
-from copy import copy
-
-from openpyxl import Workbook
-from openpyxl.styles import Font
-from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.workbook.defined_name import DefinedName
-from openpyxl.utils import get_column_letter, quote_sheetname
-
-BOLD = Font(bold=True)
+import uuid as uuid_lib
 
 
-def main(input):
-    # ── Parse JSON string inputs ──
-    # Workato passes complex objects as JSON strings when mapped from
-    # webhook list/array datapills. Parse them if they arrive as strings.
-    fields = input.get('fields', [])
-    if isinstance(fields, str):
-        fields = json.loads(fields)
+def main(params):
+    parsed = json.loads(params["parsed_config_json"])
+    trm = json.loads(params["table_results_map"])
+    tv_id = params["template_version_id"]
 
-    lookups = input.get('lookups', [])
-    if isinstance(lookups, str):
-        lookups = json.loads(lookups)
+    # ── Helpers ───────────────────────────────────────────────────────
 
-    client_name  = input.get('client_name', 'Client')
-    variant_name = input.get('variant_name', 'Default')
+    def gen_id():
+        return str(uuid_lib.uuid4())
 
-    print(f"Generating template: {client_name} / {variant_name}")
-    print(f"Fields: {len(fields)}, Lookup rows: {len(lookups)}")
+    def remap(table_name, record):
+        """
+        Remap a single record from logical column names to field UUIDs.
+        Keys not found in the field map are silently dropped — this is
+        intentional. The connector output may include working keys
+        (like _index or field names used for FK resolution) that don't
+        map to Data Table columns.
+        """
+        field_map = trm[table_name]["fields"]
+        row = {}
+        for col_name, value in record.items():
+            if col_name in field_map:
+                row[field_map[col_name]] = value
+        return row
 
-    # ── Generate the workbook ──
-    xlsx_bytes = build_workbook(fields, lookups)
+    # ── Phase 1: Generate business PKs and build cross-reference maps ─
 
-    file_name = f"Supplier_Template_{sanitize_filename(client_name)}_{sanitize_filename(variant_name)}.xlsx"
+    # CFG_Field: generate field_id, build name → id lookup for FK resolution
+    field_name_to_id = {}
+    fields_out = []
 
-    print(f"Generated {file_name} ({len(xlsx_bytes)} bytes)")
+    for idx, f in enumerate(parsed.get("fields", [])):
+        fid = gen_id()
+        field_name_to_id[f["field_name"]] = fid
+
+        fields_out.append({
+            "field_id":                 fid,
+            "template_version_id":      tv_id,
+            "field_name":               f.get("field_name"),
+            "description":              f.get("description"),
+            "data_type":                f.get("data_type"),
+            "data_format":              f.get("data_format"),
+            "required":                 f.get("required", False),
+            "must_be_empty":            f.get("must_be_empty", False),
+            "column_unique":            f.get("column_unique", False),
+            "data_cleaning_flags":      f.get("data_cleaning_flags"),
+            "position":                 idx,
+            "lookup_name":              f.get("lookup_name"),
+            "depends_on":               None,  # resolved in Phase 2
+            "field_length_validation":  f.get("field_length_validation"),
+            "numeric_field_validation": f.get("numeric_field_validation"),
+            "date_field_validation":    f.get("date_field_validation"),
+            "field_input_validation":   f.get("field_input_validation"),
+            "strict":                   f.get("strict", False),
+            # Keep logical name for FK resolution (dropped by remap)
+            "_depends_on_field_name":   f.get("depends_on_field_name"),
+        })
+
+    # ── Phase 2: Resolve depends_on FKs ──────────────────────────────
+
+    for f in fields_out:
+        dep_name = f.pop("_depends_on_field_name", None)
+        if dep_name and dep_name in field_name_to_id:
+            f["depends_on"] = field_name_to_id[dep_name]
+
+    # ── Phase 3: CFG_Rule — generate rule_id, resolve field FKs ──────
+
+    rules_out = []
+
+    for r in parsed.get("rules", []):
+        rid = gen_id()
+
+        # Resolve target field
+        target_name = r.get("target_field_name", "")
+        target_fid = field_name_to_id.get(target_name)
+
+        # Resolve condition field
+        cond_name = r.get("condition_field_name", "")
+        cond_fid = field_name_to_id.get(cond_name)
+
+        rules_out.append({
+            "rule_id":              rid,
+            "template_version_id":  tv_id,
+            "field_id":             target_fid,
+            "target_field":         target_name,
+            "rule":                 r.get("rule"),
+            "condition_field":      cond_name,
+            "condition_field_id":   cond_fid,
+            "conditional_value":    r.get("conditional_value"),
+            "error_message":        r.get("error_message"),
+            "error_message_custom": r.get("error_message_custom"),
+            "strict_enforcement":   r.get("strict_enforcement", True),
+        })
+
+    # ── Phase 4: CFG_Lookup — generate lookup_field_id ────────────────
+
+    lookups_out = []
+
+    for l in parsed.get("lookups", []):
+        lookups_out.append({
+            "lookup_field_id":     gen_id(),
+            "template_version_id": tv_id,
+            "lookup_name":         l.get("lookup_name"),
+            "valid_values":        l.get("valid_values"),
+            "display_label":       l.get("display_label"),
+            "parent_value":        l.get("parent_value"),
+            "project_specific":    l.get("project_specific", False),
+        })
+
+    # ── Phase 5: CFG_Variant + CFG_VariantField ──────────────────────
+    # The connector returns variants as:
+    #   [{ variant_name, visible_field_names: [field_name, ...] }]
+    # We need to explode into:
+    #   CFG_Variant:      one row per variant
+    #   CFG_VariantField: one row per (variant, visible_field) pair
+
+    variants_out = []
+    variant_fields_out = []
+
+    for v in parsed.get("variants", []):
+        vid = gen_id()
+
+        variants_out.append({
+            "variant_id":           vid,
+            "template_version_id":  tv_id,
+            "variant_name":         v.get("variant_name"),
+            "description":          v.get("description"),
+        })
+
+        for field_name in v.get("visible_field_names", []):
+            fid = field_name_to_id.get(field_name)
+            if fid:
+                variant_fields_out.append({
+                    "variant_field_id": gen_id(),
+                    "variant_id":       vid,
+                    "field_id":         fid,
+                })
+
+    # ── Phase 6: CFG_ErrorTranslation ────────────────────────────────
+
+    errors_out = []
+
+    for e in parsed.get("error_translations", []):
+        errors_out.append({
+            "error_translation_id":  gen_id(),
+            "template_version_id":   tv_id,
+            "error_code":            e.get("error_code"),
+            "human_readable_message": e.get("human_readable_message"),
+            "required_placeholders": e.get("required_placeholders", ""),
+        })
+
+    # ── Phase 7: Remap all records to field-UUID keys ────────────────
+    # After this step, each record dict has field UUIDs as keys,
+    # ready for the Data Tables API batch_create_records action.
+
+    cfg_field_records = [remap("CFG_Field", r) for r in fields_out]
+    cfg_rule_records = [remap("CFG_Rule", r) for r in rules_out]
+    cfg_lookup_records = [remap("CFG_Lookup", r) for r in lookups_out]
+    cfg_variant_records = [remap("CFG_Variant", r) for r in variants_out]
+    cfg_variant_field_records = [remap("CFG_VariantField", r) for r in variant_fields_out]
+    cfg_error_records = [remap("CFG_ErrorTranslation", r) for r in errors_out]
+
+    # ── Output ───────────────────────────────────────────────────────
 
     return {
-        "file_content": base64.b64encode(xlsx_bytes).decode('utf-8'),
-        "file_name": file_name
+        "cfg_field_records":         json.dumps(cfg_field_records),
+        "cfg_rule_records":          json.dumps(cfg_rule_records),
+        "cfg_lookup_records":        json.dumps(cfg_lookup_records),
+        "cfg_variant_records":       json.dumps(cfg_variant_records),
+        "cfg_variant_field_records": json.dumps(cfg_variant_field_records),
+        "cfg_error_records":         json.dumps(cfg_error_records),
+        "has_variants":              str(len(variants_out) > 0).lower(),
     }
-
-
-# ── Helper functions (called from main) ──────────────────────────
-
-
-def sanitize_filename(name):
-    """Remove characters unsafe for filenames."""
-    return re.sub(r'[^\w\s-]', '', str(name).strip()).replace(' ', '_')
-
-
-def sanitize_range_name(name):
-    """
-    Mirror the GAS sanitizeRangeName() logic:
-      1. Replace whitespace runs with _
-      2. Strip non-alphanumeric/non-underscore chars
-      3. Prepend _ if result starts with a digit
-    """
-    sanitized = re.sub(r'\s+', '_', str(name).strip())
-    sanitized = re.sub(r'[^A-Za-z0-9_]', '', sanitized)
-    if sanitized and sanitized[0].isdigit():
-        sanitized = '_' + sanitized
-    return sanitized
-
-
-def build_workbook(fields, lookups):
-    """Build the XLSX workbook and return raw bytes."""
-    wb = Workbook()
-    DATA_ROWS = 500
-
-    # ── Supplier Data sheet ──
-    ws = wb.active
-    ws.title = "Supplier Data"
-
-    # ── Hidden Data_Lookups sheet ──
-    lookup_ws = wb.create_sheet("Data_Lookups")
-    lookup_ws.sheet_state = 'hidden'
-
-    lookup_col = 1  # next available column in Data_Lookups
-
-    # Field-name and lookup-name → column index (1-based)
-    field_col_map = {}
-    for i, f in enumerate(fields):
-        field_col_map[f['name']] = i + 1
-        if f.get('lookup_name'):
-            field_col_map[f['lookup_name']] = i + 1
-
-    # ── Write headers ──
-    for i, f in enumerate(fields):
-        cell = ws.cell(row=1, column=i + 1, value=f['name'])
-        cell.font = BOLD
-
-    # ── Process each field ──
-    for i, field in enumerate(fields):
-        col = i + 1
-        col_letter = get_column_letter(col)
-        fmt = str(field.get('data_format') or '').strip().lower()
-
-        # ── Dependent dropdown ──────────────────────────────
-        if 'dependent' in fmt and field.get('lookup_name') and field.get('depends_on'):
-            parent_col_idx = field_col_map.get(field['depends_on'])
-
-            if not parent_col_idx:
-                print(f"  WARN: parent '{field['depends_on']}' not in template, falling back to flat list")
-            else:
-                groups = group_lookups_by_parent(lookups, field['lookup_name'])
-
-                if groups:
-                    lookup_col = write_named_ranges(
-                        wb, lookup_ws, groups, lookup_col
-                    )
-
-                    # INDIRECT formula — native Excel, no conversion layer
-                    parent_letter = get_column_letter(parent_col_idx)
-                    formula = f'INDIRECT(SUBSTITUTE({parent_letter}2," ","_"))'
-
-                    dv = DataValidation(
-                        type="list",
-                        formula1=formula,
-                        allow_blank=True
-                    )
-                    dv.error = f"Select a valid {field['name']}"
-                    dv.errorTitle = "Invalid selection"
-                    dv.showErrorMessage = True
-                    dv.add(f"{col_letter}2:{col_letter}{1 + DATA_ROWS}")
-                    ws.add_data_validation(dv)
-
-                    print(f"  {field['name']}: dependent dropdown → parent col {parent_letter}")
-                    continue
-
-        # ── Regular dropdown ────────────────────────────────
-        if 'dropdown' in fmt and field.get('lookup_name'):
-            values = get_flat_lookup_values(lookups, field['lookup_name'])
-
-            if values:
-                # Write values to Data_Lookups
-                lookup_ws.cell(row=1, column=lookup_col, value=field['lookup_name']).font = BOLD
-
-                for r, val in enumerate(values, start=2):
-                    lookup_ws.cell(row=r, column=lookup_col, value=val)
-
-                # Validation referencing the lookup column
-                lk_letter = get_column_letter(lookup_col)
-                sheet_ref = quote_sheetname('Data_Lookups')
-                ref = f"={sheet_ref}!${lk_letter}$2:${lk_letter}${1 + len(values)}"
-
-                dv = DataValidation(type="list", formula1=ref, allow_blank=True)
-                dv.add(f"{col_letter}2:{col_letter}{1 + DATA_ROWS}")
-                ws.add_data_validation(dv)
-
-                lookup_col += 1
-                print(f"  {field['name']}: dropdown ({len(values)} values)")
-
-            continue
-
-        # ── Date validation ─────────────────────────────────
-        if field.get('data_type') == 'date':
-            dv = DataValidation(type="date", allow_blank=True)
-            dv.add(f"{col_letter}2:{col_letter}{1 + DATA_ROWS}")
-            ws.add_data_validation(dv)
-            print(f"  {field['name']}: date validation")
-
-    # ── Auto-fit column widths (approximate) ──
-    for i, f in enumerate(fields):
-        ws.column_dimensions[get_column_letter(i + 1)].width = max(len(f['name']) + 4, 15)
-
-    # ── Serialize ──
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    return buffer.getvalue()
-
-
-def group_lookups_by_parent(lookups, lookup_name):
-    """
-    Group lookup rows by parent_value for a given table.
-    Returns dict: { "Finance": ["Accountant", "Controller", ...], ... }
-    """
-    groups = {}
-    for row in lookups:
-        table = str(row.get('table_name', '')).strip()
-        label = str(row.get('label', '')).strip()
-        parent = str(row.get('parent_value', '')).strip()
-        is_active = row.get('is_active', False)
-
-        # Handle string booleans from JSON
-        if isinstance(is_active, str):
-            is_active = is_active.strip().upper() in ('TRUE', '1')
-
-        if table == lookup_name and is_active and label and parent:
-            groups.setdefault(parent, []).append(label)
-
-    return groups
-
-
-def get_flat_lookup_values(lookups, lookup_name):
-    """Get active labels for a non-dependent lookup table."""
-    values = []
-    for row in lookups:
-        table = str(row.get('table_name', '')).strip()
-        label = str(row.get('label', '')).strip()
-        is_active = row.get('is_active', False)
-
-        if isinstance(is_active, str):
-            is_active = is_active.strip().upper() in ('TRUE', '1')
-
-        if table == lookup_name and is_active and label:
-            values.append(label)
-
-    return values
-
-
-def write_named_ranges(wb, lookup_ws, groups, start_col):
-    """
-    Write each parent group as a column in Data_Lookups and create
-    a workbook-scoped named range for it.
-
-    Returns the next available column index.
-    """
-    col = start_col
-
-    for parent_name, values in groups.items():
-        range_name = sanitize_range_name(parent_name)
-
-        # Header
-        lookup_ws.cell(row=1, column=col, value=parent_name).font = BOLD
-
-        # Values
-        for r, val in enumerate(values, start=2):
-            lookup_ws.cell(row=r, column=col, value=val)
-
-        # Named range (workbook scope)
-        lk_letter = get_column_letter(col)
-        sheet_ref = quote_sheetname('Data_Lookups')
-        ref = f"{sheet_ref}!${lk_letter}$2:${lk_letter}${1 + len(values)}"
-
-        defn = DefinedName(range_name, attr_text=ref)
-        wb.defined_names.add(defn)
-
-        print(f"    Named range '{range_name}' → {ref} ({len(values)} values)")
-        col += 1
-
-    return col
