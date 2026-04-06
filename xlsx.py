@@ -161,3 +161,109 @@ def main(params):
         "cfg_error_translations": cfg_error_translations,
         "has_variants":           str(len(cfg_variants) > 0).lower(),
     }
+
+
+
+[
+  {
+    "name": "cfg_fields",
+    "type": "array",
+    "of": "object",
+    "label": "cfg_fields",
+    "properties": [
+      { "name": "field_id", "type": "string" },
+      { "name": "template_version_id", "type": "string" },
+      { "name": "field_name", "type": "string" },
+      { "name": "description", "type": "string", "optional": true },
+      { "name": "data_type", "type": "string" },
+      { "name": "data_format", "type": "string", "optional": true },
+      { "name": "required", "type": "boolean" },
+      { "name": "must_be_empty", "type": "boolean" },
+      { "name": "column_unique", "type": "boolean" },
+      { "name": "data_cleaning_flags", "type": "string", "optional": true },
+      { "name": "position", "type": "integer" },
+      { "name": "lookup_name", "type": "string", "optional": true },
+      { "name": "depends_on", "type": "string", "optional": true },
+      { "name": "field_length_validation", "type": "string", "optional": true },
+      { "name": "numeric_field_validation", "type": "string", "optional": true },
+      { "name": "date_field_validation", "type": "string", "optional": true },
+      { "name": "field_input_validation", "type": "string", "optional": true },
+      { "name": "strict", "type": "boolean" }
+    ]
+  },
+  {
+    "name": "cfg_rules",
+    "type": "array",
+    "of": "object",
+    "label": "cfg_rules",
+    "properties": [
+      { "name": "rule_id", "type": "string" },
+      { "name": "template_version_id", "type": "string" },
+      { "name": "field_id", "type": "string" },
+      { "name": "target_field", "type": "string" },
+      { "name": "rule", "type": "string" },
+      { "name": "condition_field", "type": "string" },
+      { "name": "condition_field_id", "type": "string" },
+      { "name": "conditional_value", "type": "string", "optional": true },
+      { "name": "error_message", "type": "string" },
+      { "name": "error_message_custom", "type": "string", "optional": true },
+      { "name": "strict_enforcement", "type": "boolean" }
+    ]
+  },
+  {
+    "name": "cfg_lookups",
+    "type": "array",
+    "of": "object",
+    "label": "cfg_lookups",
+    "properties": [
+      { "name": "lookup_field_id", "type": "string" },
+      { "name": "template_version_id", "type": "string" },
+      { "name": "lookup_name", "type": "string" },
+      { "name": "valid_values", "type": "string" },
+      { "name": "display_label", "type": "string", "optional": true },
+      { "name": "parent_value", "type": "string", "optional": true },
+      { "name": "project_specific", "type": "boolean" }
+    ]
+  },
+  {
+    "name": "cfg_variants",
+    "type": "array",
+    "of": "object",
+    "label": "cfg_variants",
+    "properties": [
+      { "name": "variant_id", "type": "string" },
+      { "name": "template_version_id", "type": "string" },
+      { "name": "variant_name", "type": "string" },
+      { "name": "description", "type": "string", "optional": true }
+    ]
+  },
+  {
+    "name": "cfg_variant_fields",
+    "type": "array",
+    "of": "object",
+    "label": "cfg_variant_fields",
+    "properties": [
+      { "name": "variant_field_id", "type": "string" },
+      { "name": "variant_id", "type": "string" },
+      { "name": "field_id", "type": "string" }
+    ]
+  },
+  {
+    "name": "cfg_error_translations",
+    "type": "array",
+    "of": "object",
+    "label": "cfg_error_translations",
+    "properties": [
+      { "name": "error_translation_id", "type": "string" },
+      { "name": "template_version_id", "type": "string" },
+      { "name": "error_code", "type": "string" },
+      { "name": "human_readable_message", "type": "string" },
+      { "name": "required_placeholders", "type": "string" }
+    ]
+  },
+  {
+    "name": "has_variants",
+    "type": "string",
+    "label": "has_variants"
+  }
+]
