@@ -35,10 +35,12 @@ const MEMORY = { logBuffer: [], mappingCache: {} };
 function onOpen() {
   try {
     SpreadsheetApp.getUi().createMenu('Portfolio Sync')
-      .addItem('Run Full Sync',          'runFullSync')
+      .addItem('Run Full Sync',              'runFullSync')
+      .addItem('Fetch & Stage Only',         'runFetchAndStageOnly')
       .addSeparator()
-      .addItem('Dry Run (Mock Payload)',  'runMockSmartsheetPush')
-      .addItem('Validate Configuration',  'validateConfiguration')
+      .addItem('Dry Run (Mock Payload)',      'runMockSmartsheetPush')
+      .addItem('Generate Mapping Sheet',      'runGenerateMappingSheet')
+      .addItem('Validate Configuration',      'validateConfiguration')
       .addToUi();
   } catch (_) { /* no UI context */ }
 }
@@ -134,6 +136,239 @@ function populateRegionalStaging_(registerSheetName, regionalTargets) {
 
     logToAuditSheet('SUCCESS', `Staged ${filtered.length} row(s) from Register (matched: ${regionKeys.join(', ')}).`, `Staging:${safeName}`, true);
   }
+}
+
+/**
+ * Runs Phases 1 and 2 only (Monday fetch + regional staging).
+ * No data is written to Smartsheet. Safe for first-time setup and previewing.
+ */
+function runFetchAndStageOnly() {
+  const config = getAppConfig_();
+  const targets = config.targets.filter(t => t.enabled);
+
+  logToAuditSheet('INFO', 'Starting fetch & stage only (no Smartsheet push).', 'runFetchAndStageOnly');
+  showToast('Fetching from Monday...', 'Fetch & Stage');
+
+  const sourceTargets = targets.filter(t => t.boardId);
+  for (const target of sourceTargets) {
+    try {
+      fetchMondayBoard_(target.boardId, target.sheetName);
+    } catch (e) {
+      logToAuditSheet('ERROR', `Monday fetch failed for "${target.sheetName}": ${e}`, 'runFetchAndStageOnly', true);
+    }
+  }
+
+  const registerTarget = sourceTargets[0];
+  const regionalTargets = targets.filter(t => !t.boardId && t.region);
+
+  if (registerTarget && regionalTargets.length) {
+    try {
+      populateRegionalStaging_(registerTarget.sheetName, regionalTargets);
+    } catch (e) {
+      logToAuditSheet('ERROR', `Regional staging failed: ${e}`, 'runFetchAndStageOnly', true);
+    }
+  }
+
+  showToast('Fetch & stage complete. No data was pushed to Smartsheet.', 'Fetch & Stage', 8);
+  logToAuditSheet('SUCCESS', 'Fetch & stage complete. Smartsheet was not touched.', 'runFetchAndStageOnly', true);
+}
+
+
+// ── MAPPING SHEET GENERATOR ─────────────────────────────────────────────────────
+
+/**
+ * Dropdown launcher — shows enabled regional targets and generates a mapping sheet
+ * by pulling live Smartsheet columns and matching them against Monday staging headers.
+ */
+function runGenerateMappingSheet() {
+  const config = getAppConfig_();
+  const regions = config.targets
+    .filter(t => t.enabled && t.region && t.smartsheetId)
+    .map(t => t.region);
+
+  if (!regions.length) {
+    SpreadsheetApp.getUi().alert('No enabled targets with a Smartsheet ID found.');
+    return;
+  }
+
+  const options = regions.map(r => `<option value="${r}">${r}</option>`).join('');
+  const html = HtmlService
+    .createHtmlOutput(`
+      <style>
+        body { font-family: Arial, sans-serif; padding: 12px; }
+        select { width: 100%; padding: 6px; margin: 10px 0; font-size: 14px; }
+        button { padding: 8px 16px; font-size: 14px; cursor: pointer; margin-right: 6px; }
+      </style>
+      <p>Select a region to generate a mapping sheet for:</p>
+      <select id="region">${options}</select>
+      <div style="margin-top: 12px; text-align: right;">
+        <button onclick="google.script.host.close()">Cancel</button>
+        <button onclick="run()">Generate</button>
+      </div>
+      <script>
+        function run() {
+          const region = document.getElementById('region').value;
+          google.script.run
+            .withSuccessHandler(function() { google.script.host.close(); })
+            .generateMappingForRegion(region);
+        }
+      </script>
+    `)
+    .setWidth(320)
+    .setHeight(160);
+
+  SpreadsheetApp.getUi().showModalDialog(html, 'Generate Mapping Sheet');
+}
+
+/**
+ * Generates (or overwrites) the mapping sheet for a region.
+ *
+ * Row 1: Smartsheet column headers (from the live API).
+ * Row 2: Auto-match status — "✓ auto" or blank.
+ * Row 3: Monday column headers — auto-matched where possible, blank where not.
+ *
+ * Auto-matching logic (applied in order, first match wins):
+ *   1. Exact match (case-insensitive).
+ *   2. One header contains the other (e.g. "PM" matches "Project Manager" won't,
+ *      but "Request Overview" matches "Request Overview" will).
+ *   3. Common synonyms (e.g. Monday "PM" ↔ Smartsheet "Project Manager").
+ *
+ * Unmatched columns are left blank in row 3 for manual review.
+ */
+function generateMappingForRegion(regionName) {
+  const config = getAppConfig_();
+  const target = config.targets.find(t => t.region.toLowerCase() === regionName.trim().toLowerCase() && t.enabled);
+  if (!target) throw new Error(`No enabled target found for "${regionName}".`);
+
+  const ss = getSpreadsheet_();
+
+  // 1. Get Smartsheet column headers from the live API
+  const ssCols = getSmartsheetColumns_(target.smartsheetId);
+  const ssHeaders = ssCols.map(c => c.title);
+
+  // 2. Get Monday headers from the staging sheet (or Register as fallback)
+  const stagingSheet = ss.getSheetByName(target.sheetName);
+  let mondayHeaders = [];
+
+  if (stagingSheet && stagingSheet.getLastRow() > 0) {
+    mondayHeaders = stagingSheet.getRange(1, 1, 1, stagingSheet.getLastColumn()).getValues()[0].map(h => String(h || '').trim());
+  } else {
+    // Fallback: try the Register sheet
+    const registerTarget = config.targets.find(t => t.boardId);
+    if (registerTarget) {
+      const regSheet = ss.getSheetByName(registerTarget.sheetName);
+      if (regSheet && regSheet.getLastRow() > 0) {
+        mondayHeaders = regSheet.getRange(1, 1, 1, regSheet.getLastColumn()).getValues()[0].map(h => String(h || '').trim());
+      }
+    }
+  }
+
+  if (!ssHeaders.length) throw new Error('No columns found in Smartsheet.');
+
+  // 3. Auto-match Monday headers to Smartsheet headers
+  const synonyms = {
+    'pm':                'project manager',
+    'review status':     'status',
+    'status as of':      'status as of date',
+    'status comment':    'status overview',
+    'business benefit':  'potential business benefit',
+    'opex pillar':       'primary classification',
+    'opex category':     'category',
+    'service line':      'lob',
+    'request date':      'request date manual input',
+    'is this a client-facing project or internal only?': 'internal or client',
+    'links':             'link'
+  };
+
+  const usedMondayHeaders = new Set();
+  const row3 = [];  // Monday matches
+  const row2 = [];  // Status indicators
+
+  for (const ssHeader of ssHeaders) {
+    const ssNorm = ssHeader.toLowerCase().trim();
+    let match = '';
+
+    // Pass 1: exact match
+    if (!match) {
+      const exact = mondayHeaders.find(m => m.toLowerCase().trim() === ssNorm && !usedMondayHeaders.has(m));
+      if (exact) match = exact;
+    }
+
+    // Pass 2: synonym match (Monday → Smartsheet direction)
+    if (!match) {
+      for (const mondayH of mondayHeaders) {
+        if (usedMondayHeaders.has(mondayH)) continue;
+        const mNorm = mondayH.toLowerCase().trim();
+        if ((synonyms[mNorm] && synonyms[mNorm] === ssNorm) ||
+            (synonyms[ssNorm] && synonyms[ssNorm] === mNorm)) {
+          match = mondayH;
+          break;
+        }
+      }
+    }
+
+    // Pass 3: substring containment (only for headers longer than 4 chars to avoid false positives)
+    if (!match) {
+      for (const mondayH of mondayHeaders) {
+        if (usedMondayHeaders.has(mondayH)) continue;
+        const mNorm = mondayH.toLowerCase().trim();
+        if (mNorm.length > 4 && ssNorm.length > 4) {
+          if (mNorm.includes(ssNorm) || ssNorm.includes(mNorm)) {
+            match = mondayH;
+            break;
+          }
+        }
+      }
+    }
+
+    if (match) {
+      usedMondayHeaders.add(match);
+      row3.push(match);
+      row2.push('✓ auto');
+    } else {
+      row3.push('');
+      row2.push('');
+    }
+  }
+
+  // 4. Write the mapping sheet
+  const mappingName = target.mappingSheet || `.header_map_${target.region}`;
+  let mapSheet = ss.getSheetByName(mappingName);
+  if (!mapSheet) mapSheet = ss.insertSheet(mappingName);
+
+  mapSheet.clear();
+  if (mapSheet.getFilter()) mapSheet.getFilter().remove();
+
+  const output = [ssHeaders, row2, row3];
+  mapSheet.getRange(1, 1, 3, ssHeaders.length).setValues(output);
+  mapSheet.getRange(1, 1, 1, ssHeaders.length).setFontWeight('bold').setBackground('#cfe2f3');  // Blue — Smartsheet
+  mapSheet.getRange(2, 1, 1, ssHeaders.length).setFontColor('#666666').setFontStyle('italic');  // Status row
+  mapSheet.getRange(3, 1, 1, ssHeaders.length).setFontWeight('bold').setBackground('#d9ead3');  // Green — Monday
+  mapSheet.setFrozenRows(3);
+  mapSheet.autoResizeColumns(1, ssHeaders.length);
+
+  // Highlight unmatched columns
+  for (let i = 0; i < row3.length; i++) {
+    if (!row3[i]) {
+      mapSheet.getRange(3, i + 1).setBackground('#f4cccc');  // Light red for unmatched
+    }
+  }
+
+  const matched = row3.filter(v => v).length;
+  const unmatched = row3.length - matched;
+  const unmatchedMonday = mondayHeaders.filter(h => h && !usedMondayHeaders.has(h));
+
+  let summary = `Mapping sheet "${mappingName}" generated.\n\n`;
+  summary += `${matched} of ${ssHeaders.length} Smartsheet columns auto-matched.\n`;
+  summary += `${unmatched} Smartsheet column(s) need manual mapping (highlighted red in row 3).\n`;
+  if (unmatchedMonday.length) {
+    summary += `\n${unmatchedMonday.length} Monday column(s) had no Smartsheet match:\n`;
+    summary += unmatchedMonday.slice(0, 10).map(h => `  • ${h}`).join('\n');
+    if (unmatchedMonday.length > 10) summary += `\n  ...and ${unmatchedMonday.length - 10} more.`;
+  }
+
+  showToast(`Mapping generated: ${matched} matched, ${unmatched} to review.`, 'Mapping Sheet', 10);
+  try { SpreadsheetApp.getUi().alert(summary); } catch (_) {}
 }
 
 
@@ -707,12 +942,31 @@ function runMockSmartsheetPush() {
  */
 function runMockForRegion(regionName) {
   const config = getAppConfig_();
-  const target = config.targets.find(t => t.region.toLowerCase() === regionName.trim().toLowerCase() && t.enabled);
+  const targets = config.targets.filter(t => t.enabled);
+  const target = targets.find(t => t.region.toLowerCase() === regionName.trim().toLowerCase());
   if (!target) throw new Error(`No enabled target found for "${regionName}".`);
 
   const ss = getSpreadsheet_();
-  const sheet = ss.getSheetByName(target.sheetName);
-  if (!sheet) throw new Error(`Sheet "${target.sheetName}" not found.`);
+  let sheet = ss.getSheetByName(target.sheetName);
+
+  // If the staging sheet doesn't exist yet, hydrate it from the Register.
+  if (!sheet) {
+    ss.toast('Staging sheet not found — fetching from Monday...', 'Mock Sync', 10);
+
+    const registerTarget = targets.find(t => t.boardId);
+    if (!registerTarget) throw new Error('No target with a Monday Board ID found. Cannot populate staging.');
+
+    // Fetch the Register from Monday if it hasn't been pulled yet
+    if (!ss.getSheetByName(registerTarget.sheetName)) {
+      fetchMondayBoard_(registerTarget.boardId, registerTarget.sheetName);
+    }
+
+    // Filter the Register into this region's staging sheet
+    populateRegionalStaging_(registerTarget.sheetName, [target]);
+
+    sheet = ss.getSheetByName(target.sheetName);
+    if (!sheet) throw new Error(`Failed to create staging sheet "${target.sheetName}".`);
+  }
 
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) throw new Error('No data rows found.');
