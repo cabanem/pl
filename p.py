@@ -1,43 +1,49 @@
-import json
+# ── Phase 7: Form slot assignment ────────────────────────────
 
-def main(params):
-    fields = json.loads(params["fields_json"])
-    lookups = json.loads(params["lookups_json"])
-    variants = json.loads(params["variants_json"])
-    variant_fields = json.loads(params["variant_fields_json"])
-    client_name = params["client_name"]
+SLOT_POOL = {
+    "text":             [f"text_{i:02d}" for i in range(1, 9)],
+    "email":            [f"text_{i:02d}" for i in range(1, 9)],   # shares text slots
+    "number":           [f"num_{i:02d}" for i in range(1, 4)],
+    "currency":         [f"num_{i:02d}" for i in range(1, 4)],    # shares number slots
+    "date":             [f"date_{i:02d}" for i in range(1, 4)],
+    "select":           [f"sel_{i:02d}" for i in range(1, 5)],
+    "dependent_select": [f"sel_{i:02d}" for i in range(1, 5)],    # shares select slots
+    "checkbox":         [f"chk_{i:02d}" for i in range(1, 3)],
+}
 
-    vf_map = {}
-    for vf in variant_fields:
-        vid = vf.get("variant_id")
-        fid = vf.get("field_id")
-        if vid and fid:
-            vf_map.setdefault(vid, []).append(fid)
+# Track which slots have been claimed
+claimed = set()
+cfg_form_slots = []
+slot_warnings = []
 
-    lookups_str = json.dumps(lookups)
-    payloads = []
+visible_fields = sorted(
+    [f for f in cfg_fields if f.get("visible")],
+    key=lambda f: f.get("position", 999)
+)
 
-    if not variants:
-        payloads.append({
-            "variant_name": "",
-            "fields": json.dumps(fields),
-            "lookups": lookups_str,
-            "client_name": client_name,
-        })
-    else:
-        for v in variants:
-            vid = v.get("variant_id")
-            vname = v.get("variant_name", "")
-            visible_fids = set(vf_map.get(vid, []))
-            visible_fields = [f for f in fields if f.get("field_id") in visible_fids]
-            payloads.append({
-                "variant_name": vname,
-                "fields": json.dumps(visible_fields),
-                "lookups": lookups_str,
-                "client_name": client_name,
-            })
+for f in visible_fields:
+    ct = f.get("control_type", "text")
+    pool = SLOT_POOL.get(ct, SLOT_POOL["text"])
 
-    return {
-        "payloads": payloads,
-        "payload_count": len(payloads),
-    }
+    assigned = None
+    for candidate in pool:
+        if candidate not in claimed:
+            assigned = candidate
+            claimed.add(candidate)
+            break
+
+    if assigned is None:
+        slot_warnings.append(f"No slot available for {f['field_name']} (type: {ct})")
+        continue
+
+    cfg_form_slots.append({
+        "form_slot_id":         gen_id(),
+        "template_version_id":  tv_id,
+        "field_id":             f["field_id"],
+        "field_name":           f["field_name"],
+        "slot_name":            assigned,
+        "control_type":         ct,
+        "required":             f.get("required", False),
+        "lookup_name":          f.get("lookup_name"),
+        "position":             f.get("position", 0),
+    })
