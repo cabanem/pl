@@ -11,14 +11,11 @@
  *
  * @author Emily Cabaniss
  * @since  2026-03-30
- * @modified 2026-04-07  Refactored to serialize-and-POST architecture
+ * @modified 2026-04-07  Added _field_visibility derived map from 7_form
  */
 
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  CONFIGURATION
-// ═══════════════════════════════════════════════════════════════════════════
-
+//  --- CONFIGURATION --------------------------------------------------
 /**
  * Sheets the SDC Platform Connector expects in the serialized JSON.
  * Everything else (START_HERE, .user_guide, .math_notation, .regex,
@@ -32,9 +29,24 @@ const CONNECTOR_SHEETS = new Set([
   '4_complex_validations',
   '5_lookups',
   '6_variants',
+  '7_form',
   '_error_translation',
   '_mapping'
 ]);
+
+/**
+ * 7_form layout constants (0-indexed row/col positions).
+ *
+ * These describe the fixed structure of the 7_form sheet so that
+ * buildFieldVisibilityMap can extract the visibility mapping without
+ * hard-coding magic numbers inline.
+ */
+const FORM_LAYOUT = {
+  HEADER_ROW:  4,   // "All fields | Data type | … | Visible?"
+  DATA_START:  5,   // first field row
+  FIELD_COL:   1,   // column B — field name (cast from 4_fields)
+  VISIBLE_COL: 6    // column G — checkbox boolean
+};
 
 /**
  * Reads the _developer_settings tab and builds a centralized config object.
@@ -63,7 +75,8 @@ function buildConfig() {
       fields:      getSetting('sheets', 'fields', '4_fields'),
       validations: getSetting('sheets', 'validations', '4_complex_validations'),
       lookups:     getSetting('sheets', 'lookupTables', '5_lookups'),
-      variants:    getSetting('sheets', 'variants', '6_variants')
+      variants:    getSetting('sheets', 'variants', '6_variants'),
+      form_ui:     getSetting('sheets', 'form', '7_form')
     },
     webhook: {
       url: getSetting('webhook', 'fileExportUrl')
@@ -86,10 +99,7 @@ function buildConfig() {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  MENU
-// ═══════════════════════════════════════════════════════════════════════════
-
+//  --- MENU -----------------------------------------------------------
 /**
  * Builds the custom menu on spreadsheet open.
  */
@@ -103,10 +113,8 @@ function onOpen() {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  ORCHESTRATOR
-// ═══════════════════════════════════════════════════════════════════════════
 
+//  --- ORCHESTRATOR ---------------------------------------------------
 /**
  * Main entry point. Called from the custom menu.
  * Serializes the full config to Drive, then fires the webhook.
@@ -195,14 +203,16 @@ function initializeOrUpdateWorkspace() {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  SERIALIZATION
-// ═══════════════════════════════════════════════════════════════════════════
-
+//  --- SERIALIZATION --------------------------------------------------
 /**
  * Reads every connector-relevant sheet and produces a JSON object keyed by
  * sheet name, where each value is a 2D array of row arrays (the native
  * format returned by getDataRange().getValues()).
+ *
+ * Also builds derived structures:
+ *   • _field_visibility — { fieldName: boolean } map extracted from 7_form.
+ *     Provides a flat lookup so C-01 can resolve which fields belong on
+ *     the manual-input form without parsing raw 2D arrays.
  *
  * Saves the JSON as a file in the same Drive folder as the spreadsheet.
  *
@@ -232,6 +242,11 @@ function serializeConfigToDrive() {
     output[name] = cleaned;
   }
 
+  // ── Derived: field visibility map from 7_form ──────────
+  if (output['7_form']) {
+    output['_field_visibility'] = buildFieldVisibilityMap(output['7_form']);
+  }
+
   // Save to the same Drive folder as the spreadsheet
   const json     = JSON.stringify(output);
   const stamp    = new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-');
@@ -243,6 +258,29 @@ function serializeConfigToDrive() {
   const file         = parentFolder.createFile(blob);
 
   return file.getId();
+}
+
+
+/**
+ * Extracts a field-name → visible map from the raw 7_form 2D array.
+ *
+ * Only rows with a non-empty field name are included, so the placeholder
+ * rows (empty name, visibility = false) are naturally excluded.
+ *
+ * @param {Array<Array>} formData - Raw 2D array from the 7_form sheet.
+ * @returns {Object} e.g. { "Employee name": true, "Contract ID": true }
+ */
+function buildFieldVisibilityMap(formData) {
+  const map = {};
+
+  for (let i = FORM_LAYOUT.DATA_START; i < formData.length; i++) {
+    const fieldName = String(formData[i][FORM_LAYOUT.FIELD_COL] || '').trim();
+    if (fieldName === '') continue;
+
+    map[fieldName] = formData[i][FORM_LAYOUT.VISIBLE_COL] === true;
+  }
+
+  return map;
 }
 
 
@@ -271,10 +309,7 @@ function shareFileWithEditors(fileId, emails) {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  WEBHOOK
-// ═══════════════════════════════════════════════════════════════════════════
-
+//  --- WEBHOOK --------------------------------------------------------
 /**
  * POSTs the payload to the Workato webhook with exponential backoff.
  *
@@ -328,10 +363,7 @@ function sendWebhookNotification(webhookUrl, payload) {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  HELPERS
-// ═══════════════════════════════════════════════════════════════════════════
-
+//  --- HELPERS --------------------------------------------------------
 /**
  * Searches a sheet for a label string and returns the first non-empty
  * value found in the three columns to its right.
@@ -358,10 +390,7 @@ function findValueByLabel(sheet, label) {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  PRIMARY KEY STAMPER
-// ═══════════════════════════════════════════════════════════════════════════
-
+// --- PRIMARY KEY STAMPER ---------------------------------------------
 /**
  * Parses the primary_keys block from _developer_settings.
  *
