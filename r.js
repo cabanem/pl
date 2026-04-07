@@ -44,8 +44,10 @@ function onOpen() {
 }
 
 /**
- * Main entry point. Pulls every enabled target from Monday, stages locally,
- * then pushes new rows to Smartsheet — all in a single execution.
+ * Main entry point. Three phases:
+ *   1. Fetch Monday boards (the Register).
+ *   2. Filter the Register by region into staging sheets.
+ *   3. Push each staging sheet to its Smartsheet.
  */
 function runFullSync() {
   const config = getAppConfig_();
@@ -54,24 +56,84 @@ function runFullSync() {
   logToAuditSheet('INFO', `Starting full sync for ${targets.length} target(s).`, 'runFullSync');
   showToast(`Syncing ${targets.length} target(s)...`, 'Portfolio Sync');
 
-  for (const target of targets) {
+  // Phase 1 — Fetch from Monday (targets with a Board ID, e.g. the Register)
+  const sourceTargets = targets.filter(t => t.boardId);
+  for (const target of sourceTargets) {
     try {
-      // Phase 1 — Monday → Staging sheet (skip if no board ID)
-      if (target.boardId) {
-        fetchMondayBoard_(target.boardId, target.sheetName);
-      }
-
-      // Phase 2 — Staging sheet → Smartsheet (skip if no Smartsheet ID)
-      if (target.smartsheetId && target.smartsheetId !== 'REPLACE_ME') {
-        pushNewRowsToSmartsheet_(target, config);
-      }
+      fetchMondayBoard_(target.boardId, target.sheetName);
     } catch (e) {
-      logToAuditSheet('ERROR', `Target "${target.region || target.sheetName}" failed: ${e}`, 'runFullSync', true);
+      logToAuditSheet('ERROR', `Monday fetch failed for "${target.sheetName}": ${e}`, 'runFullSync', true);
+    }
+  }
+
+  // Phase 2 — Populate regional staging sheets from the Register
+  // Regional targets have no Board ID but have a region and a Smartsheet ID.
+  const registerTarget = sourceTargets[0];
+  const regionalTargets = targets.filter(t => !t.boardId && t.region);
+
+  if (registerTarget && regionalTargets.length) {
+    try {
+      populateRegionalStaging_(registerTarget.sheetName, regionalTargets);
+    } catch (e) {
+      logToAuditSheet('ERROR', `Regional staging failed: ${e}`, 'runFullSync', true);
+    }
+  }
+
+  // Phase 3 — Push staging sheets to Smartsheet
+  const pushTargets = targets.filter(t => t.smartsheetId && t.smartsheetId !== 'REPLACE_ME');
+  for (const target of pushTargets) {
+    try {
+      pushNewRowsToSmartsheet_(target, config);
+    } catch (e) {
+      logToAuditSheet('ERROR', `Smartsheet push failed for "${target.region || target.sheetName}": ${e}`, 'runFullSync', true);
     }
   }
 
   showToast('Sync complete.', 'Portfolio Sync', 8);
   logToAuditSheet('SUCCESS', 'Full sync completed.', 'runFullSync', true);
+}
+
+/**
+ * Reads the Register sheet and filters rows into regional staging sheets
+ * based on the "Region" column. A target region like "EMEA/APAC" matches
+ * rows where Region is "EMEA" or "APAC".
+ */
+function populateRegionalStaging_(registerSheetName, regionalTargets) {
+  const ss = getSpreadsheet_();
+  const registerSheet = ss.getSheetByName(registerSheetName);
+  if (!registerSheet) {
+    logToAuditSheet('ERROR', `Register sheet "${registerSheetName}" not found.`, 'populateRegionalStaging_', true);
+    return;
+  }
+
+  const data = registerSheet.getDataRange().getValues();
+  if (data.length <= 1) return;
+
+  const headers = data[0];
+  const rows = data.slice(1);
+
+  // Find the Region column
+  const regionIndex = headers.findIndex(h => String(h || '').trim().toLowerCase() === 'region');
+  if (regionIndex === -1) {
+    logToAuditSheet('ERROR', 'Register sheet has no "Region" column. Cannot filter into staging sheets.', 'populateRegionalStaging_', true);
+    return;
+  }
+
+  for (const target of regionalTargets) {
+    // "EMEA/APAC" → ["emea", "apac"] so either value matches
+    const regionKeys = target.region.split('/').map(r => r.trim().toLowerCase());
+
+    const filtered = rows.filter(row => {
+      const rowRegion = String(row[regionIndex] || '').trim().toLowerCase();
+      return regionKeys.some(key => rowRegion === key || rowRegion.includes(key));
+    });
+
+    const output = [headers, ...filtered];
+    const safeName = sanitizeSheetName_(target.sheetName);
+    writeTableToSheet_(safeName, output);
+
+    logToAuditSheet('SUCCESS', `Staged ${filtered.length} row(s) from Register (matched: ${regionKeys.join(', ')}).`, `Staging:${safeName}`, true);
+  }
 }
 
 
@@ -604,24 +666,38 @@ function runMockSmartsheetPush() {
         body { font-family: Arial, sans-serif; padding: 12px; }
         select { width: 100%; padding: 6px; margin: 10px 0; font-size: 14px; }
         button { padding: 8px 16px; font-size: 14px; cursor: pointer; margin-right: 6px; }
+        button:disabled { opacity: 0.5; cursor: wait; }
+        #status { margin-top: 10px; font-size: 13px; color: #c00; }
       </style>
       <p>Select a region to mock:</p>
       <select id="region">${options}</select>
       <div style="margin-top: 12px; text-align: right;">
-        <button onclick="google.script.host.close()">Cancel</button>
-        <button onclick="run()">Run Dry Run</button>
+        <button id="cancelBtn" onclick="google.script.host.close()">Cancel</button>
+        <button id="runBtn" onclick="run()">Run Dry Run</button>
       </div>
+      <div id="status"></div>
       <script>
         function run() {
+          document.getElementById('runBtn').disabled = true;
+          document.getElementById('runBtn').textContent = 'Running...';
+          document.getElementById('cancelBtn').disabled = true;
+          document.getElementById('status').textContent = '';
+
           const region = document.getElementById('region').value;
           google.script.run
             .withSuccessHandler(function() { google.script.host.close(); })
+            .withFailureHandler(function(err) {
+              document.getElementById('status').textContent = 'Error: ' + err.message;
+              document.getElementById('runBtn').disabled = false;
+              document.getElementById('runBtn').textContent = 'Run Dry Run';
+              document.getElementById('cancelBtn').disabled = false;
+            })
             .runMockForRegion(region);
         }
       </script>
     `)
     .setWidth(300)
-    .setHeight(160);
+    .setHeight(180);
 
   SpreadsheetApp.getUi().showModalDialog(html, 'Mock Sync — Dry Run');
 }
@@ -709,8 +785,5 @@ function runMockForRegion(regionName) {
   const criteria = SpreadsheetApp.newFilterCriteria().setHiddenValues(['SKIP (exists)']).build();
   filter.setColumnFilterCriteria(1, criteria); // Column A = Action
 
-  showToast(`Done! ${addCount} new, ${skipCount} existing. Check "${mockTab}".`, 'Mock Sync', 10);
-  try {
-    SpreadsheetApp.getUi().alert(`Done! Check the "${mockTab}" tab.\n\n${addCount} new project(s) to add.\n${skipCount} existing project(s) filtered out — toggle the Action column to see them.`);
-  } catch (_) {}
+  showToast(`Done! ${addCount} new, ${skipCount} existing. Check "${mockTab}".`, 'Mock Sync Complete', 10);
 }
