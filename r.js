@@ -1,517 +1,647 @@
 /**
- * @file main.gs
- * @description Thin trigger layer for the SDC platform.
+ * @file PortfolioSync.gs
  *
- * Two responsibilities:
- *   1. Serialize the master config spreadsheet as JSON → save to Drive
- *   2. Fire a webhook to Workato with pointers to the config + metadata
+ * Single-pass sync: Monday.com → Google Sheets (staging) → Smartsheet.
+ * Finds NEW projects in Monday and appends them to Smartsheet.
  *
- * Template generation has moved to Workato (C-02).
- * Config parsing and validation live in the SDC Platform Connector.
+ * Architecture:
+ *   1. For each enabled target, fetch all items from its Monday board.
+ *   2. Write the result to a local staging sheet (for visibility / debugging).
+ *   3. Read the staging sheet + mapping sheet to build the Smartsheet payload.
+ *   4. Fetch the Smartsheet index (existing primary keys).
+ *   5. POST only the rows whose primary key doesn't already exist.
+ *   6. Log everything to the audit sheet.
  *
- * @author Emily Cabaniss
- * @since  2026-03-30
- * @modified 2026-04-07  Refactored to serialize-and-POST architecture
+ * Config lives in the "Sync_Targets" sheet. Column mappings live in
+ * per-target mapping sheets (row 1 = Smartsheet headers, row 3 = Monday headers).
+ * API keys are stored in Script or Document Properties.
  */
 
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  CONFIGURATION
-// ═══════════════════════════════════════════════════════════════════════════
+// ── CONFIG ──────────────────────────────────────────────────────────────────────
+
+const APP = Object.freeze({
+  SHEETS:   { AUDIT: '.audit_log', TARGETS: 'Sync_Targets' },
+  RUNTIME:  { LOG_FLUSH_SIZE: 10, SMARTSHEET_BATCH_SIZE: 500, SMARTSHEET_INDEX_PAGE_SIZE: 500 },
+  DEFAULTS: { MONDAY_URL: 'https://api.monday.com/v2', MONDAY_API_VERSION: '2025-10', SMARTSHEET_URL: 'https://api.smartsheet.com/2.0' }
+});
+
+const EXECUTION_ID = Utilities.getUuid();
+const MEMORY = { logBuffer: [], mappingCache: {} };
+
+
+// ── UI / ENTRY POINTS ───────────────────────────────────────────────────────────
+
+function onOpen() {
+  try {
+    SpreadsheetApp.getUi().createMenu('Portfolio Sync')
+      .addItem('Run Full Sync',          'runFullSync')
+      .addSeparator()
+      .addItem('Dry Run (Mock Payload)',  'runMockSmartsheetPush')
+      .addItem('Validate Configuration',  'validateConfiguration')
+      .addToUi();
+  } catch (_) { /* no UI context */ }
+}
 
 /**
- * Sheets the SDC Platform Connector expects in the serialized JSON.
- * Everything else (START_HERE, .user_guide, .math_notation, .regex,
- * _script_logs, _developer_settings) is excluded.
+ * Main entry point. Pulls every enabled target from Monday, stages locally,
+ * then pushes new rows to Smartsheet — all in a single execution.
  */
-const CONNECTOR_SHEETS = new Set([
-  '1_customer',
-  '2_suppliers',
-  '3_users',
-  '4_fields',
-  '4_complex_validations',
-  '5_lookups',
-  '6_variants',
-  '_error_translation',
-  '_mapping'
-]);
+function runFullSync() {
+  const config = getAppConfig_();
+  const targets = config.targets.filter(t => t.enabled);
 
-/**
- * Reads the _developer_settings tab and builds a centralized config object.
- * All magic strings live in the spreadsheet, not in code.
- */
-function buildConfig() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const devSheet = ss.getSheetByName('_developer_settings');
+  logToAuditSheet('INFO', `Starting full sync for ${targets.length} target(s).`, 'runFullSync');
+  showToast(`Syncing ${targets.length} target(s)...`, 'Portfolio Sync');
 
-  if (!devSheet) {
-    throw new Error("Critical Error: The '_developer_settings' tab is missing.");
+  for (const target of targets) {
+    try {
+      // Phase 1 — Monday → Staging sheet (skip if no board ID)
+      if (target.boardId) {
+        fetchMondayBoard_(target.boardId, target.sheetName);
+      }
+
+      // Phase 2 — Staging sheet → Smartsheet (skip if no Smartsheet ID)
+      if (target.smartsheetId && target.smartsheetId !== 'REPLACE_ME') {
+        pushNewRowsToSmartsheet_(target, config);
+      }
+    } catch (e) {
+      logToAuditSheet('ERROR', `Target "${target.region || target.sheetName}" failed: ${e}`, 'runFullSync', true);
+    }
   }
 
-  const devData = devSheet.getDataRange().getValues();
+  showToast('Sync complete.', 'Portfolio Sync', 8);
+  logToAuditSheet('SUCCESS', 'Full sync completed.', 'runFullSync', true);
+}
 
-  const getSetting = (category, key, defaultValue = null) => {
-    const row = devData.find(r => r[1] === category && r[2] === key);
-    return row ? row[3] : defaultValue;
+
+// ── PHASE 1: MONDAY → STAGING SHEET ─────────────────────────────────────────────
+
+function fetchMondayBoard_(boardId, sheetName) {
+  const safeName = sanitizeSheetName_(sheetName);
+  const tag = `Monday:${safeName}`;
+  showToast(`Fetching Monday board → ${safeName}...`, 'Monday');
+
+  const firstPage = mondayRequest_(`query {
+    boards (ids: ${boardId}) {
+      columns { id title }
+      items_page (limit: 500) {
+        cursor
+        items { id name column_values { id text } }
+      }
+    }
+  }`, tag);
+
+  const board = (firstPage.data?.boards || [])[0];
+  if (!board?.items_page) {
+    logToAuditSheet('WARN', `No data returned for board ${boardId}.`, tag, true);
+    return;
+  }
+
+  // Paginate
+  const allItems = [...(board.items_page.items || [])];
+  let cursor = board.items_page.cursor;
+
+  while (cursor) {
+    const page = mondayRequest_(`query {
+      next_items_page (limit: 500, cursor: "${cursor}") {
+        cursor
+        items { id name column_values { id text } }
+      }
+    }`, tag);
+
+    const next = page.data?.next_items_page;
+    if (!next?.items?.length) break;
+    allItems.push(...next.items);
+    cursor = next.cursor || null;
+  }
+
+  // Build rows
+  const dynamicCols = (board.columns || []).filter(c => c.id !== 'name');
+  const nameTitle = (board.columns || []).find(c => c.id === 'name')?.title || 'Item Name';
+  const colOrder = ['id', 'name', ...dynamicCols.map(c => c.id)];
+  const headerMap = { id: 'Item ID', name: nameTitle };
+  dynamicCols.forEach(c => { headerMap[c.id] = c.title; });
+
+  const rows = [colOrder.map(id => headerMap[id])];
+
+  for (const item of allItems) {
+    const vals = { id: item.id, name: item.name };
+    (item.column_values || []).forEach(cv => { vals[cv.id] = cv.text; });
+    rows.push(colOrder.map(id => vals[id] ?? ''));
+  }
+
+  writeTableToSheet_(safeName, rows);
+  logToAuditSheet('SUCCESS', `Staged ${rows.length - 1} item(s) from Monday.`, tag, true);
+}
+
+
+// ── PHASE 2: STAGING SHEET → SMARTSHEET (NEW ROWS ONLY) ─────────────────────────
+
+function pushNewRowsToSmartsheet_(target, config) {
+  const tag = `Smartsheet:${target.region || target.sheetName}`;
+  showToast(`Pushing new rows → Smartsheet (${target.region})...`, 'Smartsheet');
+
+  // 1. Read staging sheet
+  const sheet = getSpreadsheet_().getSheetByName(target.sheetName);
+  if (!sheet) {
+    logToAuditSheet('ERROR', `Staging sheet "${target.sheetName}" not found.`, tag, true);
+    return;
+  }
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) {
+    logToAuditSheet('INFO', `No data rows in "${target.sheetName}".`, tag, true);
+    return;
+  }
+
+  const headers = data[0];
+  const rows = data.slice(1);
+
+  // 2. Load column mapping (Monday header name → Smartsheet column ID)
+  const columnMap = getSmartsheetMapping_(target.mappingSheet, target.smartsheetId);
+  if (!Object.keys(columnMap).length) {
+    logToAuditSheet('ERROR', `Mapping sheet "${target.mappingSheet}" returned no usable mappings.`, tag, true);
+    return;
+  }
+
+  // 3. Resolve primary key column in the staging sheet
+  const pkIndex = resolvePrimaryKeyIndex_(headers, target.sourcePrimaryKeyHeader);
+  if (pkIndex === -1) {
+    logToAuditSheet('ERROR', `Primary key header "${target.sourcePrimaryKeyHeader || 'Item ID'}" not found.`, tag, true);
+    return;
+  }
+
+  // 4. Fetch existing Smartsheet PKs
+  const existingPKs = getSmartsheetIndex_(target.smartsheetId, target.primaryKeyColumnId, config.smartsheetApiKey);
+
+  // 5. Build payload — new rows only
+  const newRows = [];
+
+  for (const row of rows) {
+    const pk = String(row[pkIndex] ?? '').trim();
+    if (!pk || pk in existingPKs) continue;
+
+    const cells = [];
+    headers.forEach((header, i) => {
+      if (header in columnMap) {
+        cells.push({ columnId: columnMap[header], value: sanitizeCellValue_(row[i]) });
+      }
+    });
+
+    if (cells.length) {
+      newRows.push({ pk, requestRow: { toBottom: true, cells } });
+    }
+  }
+
+  if (!newRows.length) {
+    logToAuditSheet('INFO', `No new rows to add for ${target.region}.`, tag, true);
+    return;
+  }
+
+  // 6. POST in batches
+  const result = postSmartsheetRows_(target.smartsheetId, newRows, config.smartsheetApiKey, tag);
+  const summary = `Added ${result.added}, failed ${result.failed} of ${newRows.length} new row(s).`;
+  logToAuditSheet(result.failed ? 'WARN' : 'SUCCESS', summary, tag, true);
+  showToast(summary, `Smartsheet: ${target.region}`, 8);
+}
+
+
+// ── SMARTSHEET HELPERS ──────────────────────────────────────────────────────────
+
+/**
+ * Fetches every existing primary-key value from a Smartsheet.
+ * Returns a plain object where keys are stringified PKs and values are row IDs.
+ */
+function getSmartsheetIndex_(sheetId, keyColumnId, token) {
+  const config = getAppConfig_();
+  const index = Object.create(null);
+  let page = 1;
+
+  while (true) {
+    const url = `${config.smartsheetUrl}/sheets/${sheetId}` +
+      `?columnIds=${encodeURIComponent(String(keyColumnId))}` +
+      `&page=${page}&pageSize=${APP.RUNTIME.SMARTSHEET_INDEX_PAGE_SIZE}`;
+
+    const resp = fetchWithBackoff_(url, { method: 'get', headers: ssHeaders_(token) });
+    if (resp.getResponseCode() !== 200) {
+      throw new Error(`Smartsheet index fetch failed. HTTP ${resp.getResponseCode()}`);
+    }
+
+    const body = safeJsonParse_(resp.getContentText(), {});
+    for (const row of (body.rows || [])) {
+      const cell = (row.cells || []).find(c => Number(c.columnId) === Number(keyColumnId));
+      if (cell?.value != null && cell.value !== '') {
+        index[String(cell.value)] = row.id;
+      }
+    }
+
+    if (page >= Number(body.totalPages || 1)) break;
+    page++;
+  }
+
+  return index;
+}
+
+/**
+ * POSTs new rows to Smartsheet in batches of 500, using allowPartialSuccess.
+ */
+function postSmartsheetRows_(sheetId, wrappedRows, token, tag) {
+  const config = getAppConfig_();
+  let added = 0, failed = 0;
+
+  for (let i = 0; i < wrappedRows.length; i += APP.RUNTIME.SMARTSHEET_BATCH_SIZE) {
+    const batch = wrappedRows.slice(i, i + APP.RUNTIME.SMARTSHEET_BATCH_SIZE);
+    const url = `${config.smartsheetUrl}/sheets/${sheetId}/rows?allowPartialSuccess=true`;
+
+    const resp = fetchWithBackoff_(url, {
+      method: 'post',
+      headers: ssHeaders_(token),
+      payload: JSON.stringify(batch.map(w => w.requestRow))
+    });
+
+    const code = resp.getResponseCode();
+    const body = safeJsonParse_(resp.getContentText(), {});
+
+    if (code === 200 && (body.message === 'SUCCESS' || Number(body.resultCode) === 0)) {
+      added += batch.length;
+      continue;
+    }
+
+    if (code === 200 && (body.message === 'PARTIAL_SUCCESS' || Number(body.resultCode) === 3)) {
+      const failures = Array.isArray(body.failedItems) ? body.failedItems : [];
+      added += batch.length - failures.length;
+      failed += failures.length;
+      for (const f of failures) {
+        const pk = batch[f.index]?.pk || '?';
+        logToAuditSheet('ERROR', `Row PK "${pk}": ${f.error?.message || 'Unknown'}`, tag);
+      }
+      continue;
+    }
+
+    // Non-200 or unrecognized response — log and count entire batch as failed
+    logToAuditSheet('ERROR', `Batch POST failed. HTTP ${code}: ${resp.getContentText().substring(0, 300)}`, tag);
+    failed += batch.length;
+  }
+
+  return { added, failed };
+}
+
+function ssHeaders_(token) {
+  return {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json'
   };
+}
+
+
+// ── COLUMN MAPPING ──────────────────────────────────────────────────────────────
+
+/**
+ * Reads the crosswalk sheet (row 1 = Smartsheet names, row 3 = Monday names),
+ * then resolves Smartsheet column IDs from the live API.
+ * Returns { "Monday Header Name": smartsheetColumnId, ... }
+ */
+function getSmartsheetMapping_(mappingSheetName, smartsheetId) {
+  if (MEMORY.mappingCache[mappingSheetName]) return MEMORY.mappingCache[mappingSheetName];
+
+  const sheet = getSpreadsheet_().getSheetByName(mappingSheetName);
+  if (!sheet) {
+    logToAuditSheet('ERROR', `Mapping sheet "${mappingSheetName}" not found.`, 'getSmartsheetMapping_');
+    return {};
+  }
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 3) return {};
+
+  const ssHeaders = data[0].map(h => String(h || '').trim());
+  const mondayHeaders = data[2].map(h => String(h || '').trim());
+
+  // Fetch live Smartsheet column IDs
+  const liveCols = getSmartsheetColumns_(smartsheetId);
+  const liveIndex = Object.create(null);
+  liveCols.forEach(c => { liveIndex[c.title.toLowerCase()] = c.id; });
+
+  const mapping = {};
+  for (let i = 0; i < mondayHeaders.length; i++) {
+    const monday = mondayHeaders[i];
+    const ss = ssHeaders[i];
+    if (!monday || monday.toUpperCase() === 'N/A' || !ss || ss.toUpperCase() === 'N/A') continue;
+
+    const colId = liveIndex[ss.toLowerCase()];
+    if (colId) {
+      mapping[monday] = colId;
+    }
+  }
+
+  MEMORY.mappingCache[mappingSheetName] = mapping;
+  return mapping;
+}
+
+function getSmartsheetColumns_(sheetId) {
+  const config = getAppConfig_();
+  const url = `${config.smartsheetUrl}/sheets/${encodeURIComponent(String(sheetId))}/columns?includeAll=true`;
+  const resp = fetchWithBackoff_(url, { method: 'get', headers: ssHeaders_(config.smartsheetApiKey) });
+
+  if (resp.getResponseCode() !== 200) {
+    throw new Error(`Failed to fetch columns for sheet ${sheetId}. HTTP ${resp.getResponseCode()}`);
+  }
+
+  return (safeJsonParse_(resp.getContentText(), {}).data || [])
+    .map(c => ({ id: Number(c.id), title: String(c.title || '').trim(), primary: Boolean(c.primary) }))
+    .filter(c => c.title && !Number.isNaN(c.id));
+}
+
+
+// ── GENERIC HELPERS ─────────────────────────────────────────────────────────────
+
+function mondayRequest_(query, tag) {
+  const config = getAppConfig_();
+  const resp = fetchWithBackoff_(config.mondayUrl, {
+    method: 'post',
+    headers: { Authorization: config.mondayApiKey, 'Content-Type': 'application/json', 'API-Version': config.mondayApiVersion },
+    payload: JSON.stringify({ query })
+  });
+
+  if (resp.getResponseCode() !== 200) {
+    throw new Error(`Monday HTTP ${resp.getResponseCode()}: ${resp.getContentText()}`);
+  }
+
+  const body = safeJsonParse_(resp.getContentText(), {});
+  if (body.errors?.length) {
+    const msg = body.errors.map(e => e.message).join(' | ');
+    throw new Error(`Monday GraphQL: ${msg}`);
+  }
+  return body;
+}
+
+function fetchWithBackoff_(url, options, maxRetries) {
+  const retries = maxRetries ?? 4;
+  const request = { ...options, muteHttpExceptions: true };
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const resp = UrlFetchApp.fetch(url, request);
+      const code = resp.getResponseCode();
+
+      if (code < 400 || (code >= 400 && code < 500 && code !== 429)) return resp;
+      if (attempt === retries) return resp;
+
+      const retryAfter = Number(resp.getHeaders()?.['retry-after'] || resp.getHeaders()?.['Retry-After']);
+      const delay = (!Number.isNaN(retryAfter) && retryAfter > 0)
+        ? retryAfter * 1000
+        : (2 ** (attempt + 1)) * 1000 + Math.floor(Math.random() * 1000);
+      Utilities.sleep(delay);
+    } catch (e) {
+      if (attempt === retries) throw e;
+      Utilities.sleep((2 ** (attempt + 1)) * 1000 + Math.floor(Math.random() * 1000));
+    }
+  }
+  throw new Error(`Exhausted retries for ${url}`);
+}
+
+function writeTableToSheet_(sheetName, rows) {
+  const ss = getSpreadsheet_();
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) sheet = ss.insertSheet(sheetName);
+
+  const lastRow = Math.max(sheet.getLastRow(), rows.length);
+  const lastCol = Math.max(sheet.getLastColumn(), rows[0]?.length || 1);
+  if (lastRow > 0 && lastCol > 0) sheet.getRange(1, 1, lastRow, lastCol).clearContent();
+
+  if (rows.length && rows[0].length) {
+    sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+    sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+}
+
+function sanitizeCellValue_(value) {
+  if (value == null || value === '') return '';
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return isNaN(value.getTime()) ? '' : Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  if (typeof value === 'string') return value.length > 3999 ? value.substring(0, 3999) : value;
+  return value;
+}
+
+function sanitizeSheetName_(name) {
+  return String(name || '').replace(/[\/\\?*\[\]]/g, '').substring(0, 100);
+}
+
+function resolvePrimaryKeyIndex_(headers, preferred) {
+  const pref = String(preferred || '').trim().toLowerCase();
+  if (pref) {
+    const i = headers.findIndex(h => String(h || '').trim().toLowerCase() === pref);
+    if (i !== -1) return i;
+  }
+  return headers.findIndex(h => {
+    const n = String(h || '').trim().toLowerCase();
+    return n === 'item id' || n === 'id';
+  });
+}
+
+function safeJsonParse_(text, fallback) {
+  try { return JSON.parse(text); } catch (_) { return fallback; }
+}
+
+function showToast(message, title, seconds) {
+  try { SpreadsheetApp.getActiveSpreadsheet()?.toast(message, title || 'Sync', seconds || 5); } catch (_) {}
+}
+
+
+// ── AUDIT LOG ───────────────────────────────────────────────────────────────────
+
+function logToAuditSheet(status, message, module, flushNow) {
+  MEMORY.logBuffer.push([new Date(), EXECUTION_ID, module, status, message]);
+  console.log(`[${status}] ${module}: ${message}`);
+  if (flushNow || status === 'ERROR' || MEMORY.logBuffer.length >= APP.RUNTIME.LOG_FLUSH_SIZE) flushAuditLogs();
+}
+
+function flushAuditLogs() {
+  if (!MEMORY.logBuffer.length) return;
+  try {
+    const ss = getSpreadsheet_();
+    let sheet = ss.getSheetByName(APP.SHEETS.AUDIT);
+    if (!sheet) {
+      sheet = ss.insertSheet(APP.SHEETS.AUDIT);
+      sheet.getRange(1, 1, 1, 5).setValues([['Timestamp', 'Execution ID', 'Module', 'Status', 'Message']]);
+      sheet.getRange(1, 1, 1, 5).setFontWeight('bold');
+      sheet.setFrozenRows(1);
+    }
+    const batch = MEMORY.logBuffer.splice(0).reverse();
+    sheet.insertRowsAfter(1, batch.length);
+    sheet.getRange(2, 1, batch.length, batch[0].length).setValues(batch);
+  } catch (e) {
+    console.error(`Audit flush failed: ${e}`);
+  }
+}
+
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────
+
+function getSpreadsheet_() {
+  const store = PropertiesService.getDocumentProperties() || PropertiesService.getScriptProperties();
+  let id = store.getProperty('SPREADSHEET_ID');
+  if (!id) {
+    const active = SpreadsheetApp.getActiveSpreadsheet();
+    if (!active) throw new Error('Cannot resolve spreadsheet. Open it once or set SPREADSHEET_ID.');
+    id = active.getId();
+    store.setProperty('SPREADSHEET_ID', id);
+  }
+  return SpreadsheetApp.openById(id);
+}
+
+function getAppConfig_() {
+  const scriptProps  = (PropertiesService.getScriptProperties()?.getProperties()) || {};
+  const docProps     = (PropertiesService.getDocumentProperties()?.getProperties()) || {};
+  const props        = { ...scriptProps, ...docProps };
 
   return {
-    sheets: {
-      customer:    getSetting('sheets', 'customer', '1_customer'),
-      suppliers:   getSetting('sheets', 'suppliers', '2_suppliers'),
-      users:       getSetting('sheets', 'supplier_users', '3_users'),
-      fields:      getSetting('sheets', 'fields', '4_fields'),
-      validations: getSetting('sheets', 'validations', '4_complex_validations'),
-      lookups:     getSetting('sheets', 'lookupTables', '5_lookups'),
-      variants:    getSetting('sheets', 'variants', '6_variants')
-    },
-    webhook: {
-      url: getSetting('webhook', 'fileExportUrl')
-    },
-    labels: {
-      customerName:       'Customer name',
-      analystEmail:       'Analyst email address',
-      folderId:           'Where should we save the template (Google Drive folder ID)?',
-      separateWorkspace:  'Is a separate Workato workspace required?',
-      targetVMS:          'What is the target vendor management system (VMS)?'
-    }
+    mondayApiKey:     props.MONDAY_API_KEY || '',
+    smartsheetApiKey: props.SMARTSHEET_API_KEY || '',
+    mondayUrl:        props.MONDAY_URL || APP.DEFAULTS.MONDAY_URL,
+    mondayApiVersion: props.MONDAY_API_VERSION || APP.DEFAULTS.MONDAY_API_VERSION,
+    smartsheetUrl:    props.SMARTSHEET_URL || APP.DEFAULTS.SMARTSHEET_URL,
+    targets:          loadTargets_()
   };
 }
 
+function loadTargets_() {
+  const sheet = getSpreadsheet_().getSheetByName(APP.SHEETS.TARGETS);
+  if (!sheet) throw new Error(`"${APP.SHEETS.TARGETS}" sheet is missing.`);
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  MENU
-// ═══════════════════════════════════════════════════════════════════════════
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
 
-/**
- * Builds the custom menu on spreadsheet open.
- */
-function onOpen() {
+  const headers = data[0].map(h => String(h || '').trim());
+  const idx = {};
+  headers.forEach((h, i) => { idx[h] = i; });
+
+  const required = ['Enabled', 'Local Sheet Name'];
+  const missing = required.filter(h => !(h in idx));
+  if (missing.length) throw new Error(`Sync_Targets is missing: ${missing.join(', ')}`);
+
+  return data.slice(1)
+    .filter(row => toBoolean_(row[idx['Enabled']], true))
+    .map(row => ({
+      enabled:                true,
+      region:                 String(row[idx['Region']] || '').trim(),
+      boardId:                String(row[idx['Monday Board ID']] || '').trim(),
+      sheetName:              String(row[idx['Local Sheet Name']] || '').trim(),
+      smartsheetId:           String(row[idx['Smartsheet ID']] || '').trim(),
+      primaryKeyColumnId:     Number(row[idx['Smartsheet Primary Key Column ID']]),
+      mappingSheet:           String(row[idx['Mapping Sheet']] || '').trim(),
+      sourcePrimaryKeyHeader: String(row[idx['Source Primary Key Header']] || 'Item ID').trim()
+    }))
+    .filter(t => t.sheetName);
+}
+
+function toBoolean_(value, defaultValue) {
+  if (typeof value === 'boolean') return value;
+  if (value === 1 || value === '1') return true;
+  if (value === 0 || value === '0') return false;
+  if (typeof value === 'string') {
+    const n = value.trim().toLowerCase();
+    if (['true', 'yes', 'y'].includes(n)) return true;
+    if (['false', 'no', 'n'].includes(n)) return false;
+  }
+  return defaultValue;
+}
+
+
+// ── VALIDATION ──────────────────────────────────────────────────────────────────
+
+function validateConfiguration() {
+  const issues = [];
+  let config;
+
+  try { config = getAppConfig_(); } catch (e) { issues.push(String(e)); }
+
+  if (config) {
+    if (!config.mondayApiKey)     issues.push('Missing MONDAY_API_KEY in Script Properties.');
+    if (!config.smartsheetApiKey) issues.push('Missing SMARTSHEET_API_KEY in Script Properties.');
+
+    const targets = config.targets;
+    if (!targets.length) issues.push('No enabled targets found in Sync_Targets.');
+
+    targets.forEach((t, i) => {
+      const p = `Target ${i + 1} (${t.region || 'unnamed'})`;
+      if (!t.boardId && !t.smartsheetId) issues.push(`${p}: needs at least a Monday Board ID or Smartsheet ID.`);
+      if (t.smartsheetId && !t.mappingSheet) issues.push(`${p}: has a Smartsheet ID but no Mapping Sheet.`);
+      if (t.mappingSheet && !getSpreadsheet_().getSheetByName(t.mappingSheet)) {
+        issues.push(`${p}: mapping sheet "${t.mappingSheet}" not found.`);
+      }
+    });
+  }
+
+  const msg = issues.length
+    ? `Found ${issues.length} issue(s):\n\n${issues.map(v => `• ${v}`).join('\n')}`
+    : 'Configuration looks good.';
+
+  logToAuditSheet(issues.length ? 'ERROR' : 'SUCCESS', msg.replace(/\n/g, ' | '), 'validateConfiguration', true);
+  try { SpreadsheetApp.getUi().alert(msg); } catch (_) {}
+}
+
+
+// ── MOCK DRY RUN ────────────────────────────────────────────────────────────────
+
+function runMockSmartsheetPush() {
   const ui = SpreadsheetApp.getUi();
-  const menu = ui.createMenu('Supplier Integration')
-    .addItem('Initialize / Update Workspace', 'initializeOrUpdateWorkspace');
+  const resp = ui.prompt('Mock Sync', 'Which region? (e.g. NOAM or EMEA/APAC)', ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
 
-  appendPkSetupMenuItem(menu);
-  menu.addToUi();
-}
+  const config = getAppConfig_();
+  const target = config.targets.find(t => t.region.toLowerCase() === resp.getResponseText().trim().toLowerCase() && t.enabled);
+  if (!target) { ui.alert('No enabled target found for that region.'); return; }
 
+  const ss = getSpreadsheet_();
+  const sheet = ss.getSheetByName(target.sheetName);
+  if (!sheet) { ui.alert(`Sheet "${target.sheetName}" not found.`); return; }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  ORCHESTRATOR
-// ═══════════════════════════════════════════════════════════════════════════
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) { ui.alert('No data rows found.'); return; }
 
-/**
- * Main entry point. Called from the custom menu.
- * Serializes the full config to Drive, then fires the webhook.
- */
-function initializeOrUpdateWorkspace() {
-  const CONFIG = buildConfig();
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const ui = SpreadsheetApp.getUi();
+  ss.toast('Building mock payload...', 'Mock Sync', 10);
 
-  // ── Validate prerequisites ──────────────────────────────
-  const customerSheet = ss.getSheetByName(CONFIG.sheets.customer);
-  if (!customerSheet) {
-    ui.alert('Error', `Sheet "${CONFIG.sheets.customer}" not found.`, ui.ButtonSet.OK);
-    return;
-  }
+  const headers = data[0];
+  const rows = data.slice(1);
+  const columnMap = getSmartsheetMapping_(target.mappingSheet, target.smartsheetId);
+  const liveColumns = getSmartsheetColumns_(target.smartsheetId);
+  const reverseMap = {};
+  liveColumns.forEach(c => { reverseMap[c.id] = c.title; });
 
-  const webhookUrl = CONFIG.webhook.url;
-  if (!webhookUrl) {
-    ui.alert(
-      'Error',
-      'Webhook URL not configured. Check _developer_settings → webhook.fileExportUrl.',
-      ui.ButtonSet.OK
-    );
-    return;
-  }
+  const existingPKs = getSmartsheetIndex_(target.smartsheetId, target.primaryKeyColumnId, config.smartsheetApiKey);
+  const pkIndex = resolvePrimaryKeyIndex_(headers, target.sourcePrimaryKeyHeader);
+  const nameIndex = headers.findIndex(h => String(h || '').trim().toLowerCase() === 'project name');
 
-  const clientName        = findValueByLabel(customerSheet, CONFIG.labels.customerName);
-  const analystEmail      = findValueByLabel(customerSheet, CONFIG.labels.analystEmail);
-  const targetVms         = findValueByLabel(customerSheet, CONFIG.labels.targetVMS);
-  const separateWorkspace = findValueByLabel(customerSheet, CONFIG.labels.separateWorkspace);
+  const output = [['Monday Item ID', 'Project Name', 'Action', 'SS Column', 'SS Column ID', 'Monday Column', 'Value']];
 
-  if (!clientName || !analystEmail) {
-    ui.alert('Error', 'Customer name and analyst email are required in the 1_customer tab.', ui.ButtonSet.OK);
-    return;
-  }
+  for (const row of rows) {
+    const pk = String(row[pkIndex] ?? '').trim();
+    if (!pk) continue;
+    const action = pk in existingPKs ? 'SKIP (exists)' : 'ADD NEW ROW';
+    const name = nameIndex !== -1 ? row[nameIndex] : '';
 
-  // ── Step 1: Serialize config to Drive ───────────────────
-  ui.showSidebar(
-    HtmlService.createHtmlOutput('<p>Serializing configuration…</p>').setTitle('Status')
-  );
-
-  let configJsonFileId;
-  try {
-    configJsonFileId = serializeConfigToDrive();
-  } catch (e) {
-    ui.alert('Error', 'Failed to serialize config:\n\n' + e.message, ui.ButtonSet.OK);
-    return;
-  }
-
-  // ── Step 2: Build payload ───────────────────────────────
-  const correlationId = Utilities.getUuid();
-
-  const payload = {
-    correlation_id:             correlationId,
-    client_name:                clientName,
-    analyst_email:              analystEmail,
-    target_vms:                 targetVms || '',
-    config_file_id:             ss.getId(),
-    template_file_ids:          '[]',                          // backward compat — Workato generates templates now
-    timestamp:                  new Date().toISOString(),
-    separate_workspace_required: String(separateWorkspace || false),
-    drive_id_config_json:       configJsonFileId
-  };
-
-  // ── Step 3: Fire webhook ────────────────────────────────
-  try {
-    sendWebhookNotification(webhookUrl, payload);
-  } catch (e) {
-    ui.alert(
-      'Error',
-      'Config was serialized to Drive, but the Workato webhook failed:\n\n' + e.message,
-      ui.ButtonSet.OK
-    );
-    return;
-  }
-
-  // ── Done ────────────────────────────────────────────────
-  ui.alert(
-    'Success',
-    'Configuration sent to Workato.\n\nCorrelation ID: ' + correlationId,
-    ui.ButtonSet.OK
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  SERIALIZATION
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Reads every connector-relevant sheet and produces a JSON object keyed by
- * sheet name, where each value is a 2D array of row arrays (the native
- * format returned by getDataRange().getValues()).
- *
- * Saves the JSON as a file in the same Drive folder as the spreadsheet.
- *
- * @returns {string} Google Drive file ID of the saved JSON file.
- */
-function serializeConfigToDrive() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const tz = ss.getSpreadsheetTimeZone();
-  const output = {};
-
-  for (const sheet of ss.getSheets()) {
-    const name = sheet.getName();
-    if (!CONNECTOR_SHEETS.has(name)) continue;
-
-    const data = sheet.getDataRange().getValues();
-
-    // Convert Date objects to YYYY-MM-DD strings; preserve everything else as-is
-    const cleaned = data.map(row =>
-      row.map(cell => {
-        if (cell instanceof Date) {
-          return Utilities.formatDate(cell, tz, 'yyyy-MM-dd');
-        }
-        return cell;
-      })
-    );
-
-    output[name] = cleaned;
-  }
-
-  // Save to the same Drive folder as the spreadsheet
-  const json     = JSON.stringify(output);
-  const stamp    = new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-');
-  const fileName = `config_${ss.getId()}_${stamp}.json`;
-
-  const ssFile       = DriveApp.getFileById(ss.getId());
-  const parentFolder = ssFile.getParents().next();
-  const blob         = Utilities.newBlob(json, 'application/json', fileName);
-  const file         = parentFolder.createFile(blob);
-
-  return file.getId();
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  WEBHOOK
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * POSTs the payload to the Workato webhook with exponential backoff.
- *
- * @param {string} webhookUrl - The Workato webhook endpoint.
- * @param {Object} payload    - The JSON payload to send.
- */
-function sendWebhookNotification(webhookUrl, payload) {
-  if (!webhookUrl || !payload) {
-    throw new Error('Missing webhook URL or payload.');
-  }
-
-  const options = {
-    method:             'post',
-    contentType:        'application/json',
-    payload:            JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-
-  const maxRetries = 3;
-  let attempt = 0;
-
-  while (attempt < maxRetries) {
-    try {
-      const response   = UrlFetchApp.fetch(webhookUrl, options);
-      const statusCode = response.getResponseCode();
-
-      if (statusCode >= 200 && statusCode < 300) {
-        console.log('Webhook delivered successfully.');
-        return true;
-      }
-
-      // Client errors (except 429) are not retryable
-      if (statusCode >= 400 && statusCode < 500 && statusCode !== 429) {
-        throw new Error(`Client error ${statusCode}: ${response.getContentText()}`);
-      }
-
-      console.warn(`Attempt ${attempt + 1} failed with status ${statusCode}. Retrying…`);
-
-    } catch (e) {
-      console.error(`Fetch exception on attempt ${attempt + 1}: ${e.message}`);
-      if (attempt === maxRetries - 1) {
-        throw new Error(`Failed to contact Workato after ${maxRetries} attempts. Last error: ${e.message}`);
-      }
-    }
-
-    attempt++;
-    if (attempt < maxRetries) {
-      Utilities.sleep(Math.pow(2, attempt - 1) * 1000);
-    }
-  }
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  HELPERS
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Searches a sheet for a label string and returns the first non-empty
- * value found in the three columns to its right.
- *
- * Works with the 1_customer layout where labels are in column B
- * and values are in column C (or D/E as fallback).
- *
- * @param {Sheet}  sheet - The sheet to search.
- * @param {string} label - The label text to match (case-insensitive).
- * @returns {*} The value, or null if not found.
- */
-function findValueByLabel(sheet, label) {
-  const data   = sheet.getDataRange().getValues();
-  const target = label.toLowerCase().trim();
-
-  for (let i = 0; i < data.length; i++) {
-    for (let j = 0; j < data[i].length; j++) {
-      if (String(data[i][j]).toLowerCase().trim() === target) {
-        return data[i][j + 1] || data[i][j + 2] || data[i][j + 3] || null;
-      }
-    }
-  }
-  return null;
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  PRIMARY KEY STAMPER
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Parses the primary_keys block from _developer_settings.
- *
- * @returns {Array<{sheetName: string, colIndex: number, fieldName: string, dataStartRow: number}>}
- */
-function getPrimaryKeyConfig() {
-  const ss  = SpreadsheetApp.getActiveSpreadsheet();
-  const dev = ss.getSheetByName('_developer_settings');
-  if (!dev) throw new Error('_developer_settings tab not found.');
-
-  const data = dev.getDataRange().getValues();
-
-  const find = (key) => {
-    const row = data.find(r => r[1] === 'primary_keys' && r[2] === key);
-    return row ? String(row[3]) : '';
-  };
-
-  const sheetNames   = find('sheetNames').split(',').map(s => s.trim());
-  const indices      = find('indices').split(',').map(s => parseInt(s.trim(), 10));
-  const fieldNames   = find('field_names').split(',').map(s => s.trim());
-  const dataStartRows = find('data_start_row').split(',').map(s => parseInt(s.trim(), 10));
-
-  return sheetNames.map((name, i) => ({
-    sheetName:    name,
-    colIndex:     indices[i],
-    fieldName:    fieldNames[i],
-    dataStartRow: dataStartRows[i]
-  }));
-}
-
-
-/**
- * One-time setup. Inserts PK columns, backfills UUIDs, protects columns,
- * and installs the onEdit trigger.
- */
-function setupPrimaryKeyColumns() {
-  const ss      = SpreadsheetApp.getActiveSpreadsheet();
-  const configs = getPrimaryKeyConfig();
-
-  configs.forEach(cfg => {
-    const sheet = ss.getSheetByName(cfg.sheetName);
-    if (!sheet) {
-      console.warn(`Sheet "${cfg.sheetName}" not found — skipping.`);
-      return;
-    }
-
-    const headerRow = cfg.dataStartRow - 1;
-    const pkCol     = cfg.colIndex + 1;
-
-    // Insert column if header doesn't match
-    const currentHeader = sheet.getRange(headerRow, pkCol).getValue();
-    if (String(currentHeader).trim() !== cfg.fieldName) {
-      sheet.insertColumnBefore(pkCol);
-      sheet.getRange(headerRow, pkCol).setValue(cfg.fieldName);
-
-      if (headerRow >= 2) sheet.getRange(headerRow - 1, pkCol).setValue('Do not edit.');
-      if (headerRow >= 3) sheet.getRange(headerRow - 2, pkCol).setValue('Primary key (UUID)');
-
-      console.log(`Inserted PK column in "${cfg.sheetName}" at column ${pkCol}.`);
-    }
-
-    // Backfill UUIDs for existing data rows
-    const lastRow = sheet.getLastRow();
-    if (lastRow >= cfg.dataStartRow) {
-      const dataRows  = lastRow - cfg.dataStartRow + 1;
-      const pkRange   = sheet.getRange(cfg.dataStartRow, pkCol, dataRows, 1);
-      const pkValues  = pkRange.getValues();
-      const nameCol   = pkCol === 1 ? 2 : 1;
-      const nameValues = sheet.getRange(cfg.dataStartRow, nameCol, dataRows, 1).getValues();
-
-      let stamped = 0;
-      for (let i = 0; i < dataRows; i++) {
-        if (String(nameValues[i][0]).trim() !== '' && String(pkValues[i][0]).trim() === '') {
-          pkValues[i][0] = Utilities.getUuid();
-          stamped++;
+    headers.forEach((header, i) => {
+      if (header in columnMap) {
+        const val = sanitizeCellValue_(row[i]);
+        if (val !== '') {
+          output.push([pk, name, action, reverseMap[columnMap[header]] || '?', columnMap[header], header, val]);
         }
       }
-
-      if (stamped > 0) {
-        pkRange.setValues(pkValues);
-        console.log(`Backfilled ${stamped} UUIDs in "${cfg.sheetName}".`);
-      }
-    }
-
-    // Protect the PK column
-    const protection = sheet.getRange(1, pkCol, sheet.getMaxRows(), 1)
-      .protect()
-      .setDescription(`${cfg.fieldName} — immutable primary key`);
-
-    protection.removeEditors(protection.getEditors());
-    if (protection.canDomainEdit()) protection.setDomainEdit(false);
-    protection.setWarningOnly(true);
-
-    sheet.hideColumns(pkCol);
-    console.log(`Protected and hid PK column in "${cfg.sheetName}".`);
-  });
-
-  ensureEditTrigger_();
-
-  SpreadsheetApp.getUi().alert(
-    'Setup complete.\n\n'
-    + '• Primary key columns inserted and protected.\n'
-    + '• Edit trigger installed — new rows will receive UUIDs automatically.\n\n'
-    + 'If this workbook is ever copied, run this setup again in the copy.'
-  );
-}
-
-
-/**
- * Creates an installable onEdit trigger for stampPrimaryKey (idempotent).
- * @private
- */
-function ensureEditTrigger_() {
-  const functionName = 'stampPrimaryKey';
-
-  const existing = ScriptApp.getProjectTriggers().some(
-    t => t.getHandlerFunction() === functionName
-      && t.getEventType() === ScriptApp.EventType.ON_EDIT
-  );
-
-  if (existing) {
-    console.log('Edit trigger already installed — skipping.');
-    return;
+    });
   }
 
-  ScriptApp.newTrigger(functionName)
-    .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
-    .onEdit()
-    .create();
+  const mockTab = `._mock_${target.sheetName}`;
+  let mockSheet = ss.getSheetByName(mockTab);
+  if (!mockSheet) mockSheet = ss.insertSheet(mockTab);
 
-  console.log('Installed onEdit trigger for stampPrimaryKey.');
-}
+  mockSheet.clear();
+  mockSheet.getRange(1, 1, output.length, output[0].length).setValues(output);
+  mockSheet.getRange('A1:G1').setFontWeight('bold').setBackground('#d9ead3');
+  mockSheet.setFrozenRows(1);
+  mockSheet.autoResizeColumns(1, 7);
 
-
-/**
- * Installable onEdit trigger. Stamps a UUID when a new data row is
- * entered in a tracked sheet and the PK cell is still empty.
- */
-function stampPrimaryKey(e) {
-  if (!e || !e.range) return;
-
-  const sheet     = e.range.getSheet();
-  const sheetName = sheet.getName();
-
-  const configs = getPrimaryKeyConfig();
-  const cfg = configs.find(c => c.sheetName === sheetName);
-  if (!cfg) return;
-
-  const editedRow = e.range.getRow();
-  if (editedRow < cfg.dataStartRow) return;
-
-  const pkCol  = cfg.colIndex + 1;
-  const pkCell = sheet.getRange(editedRow, pkCol);
-
-  if (String(pkCell.getValue()).trim() !== '') return;
-
-  const rowData = sheet.getRange(editedRow, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const hasContent = rowData.some((val, idx) => {
-    if (idx === cfg.colIndex) return false;
-    return String(val).trim() !== '';
-  });
-
-  if (!hasContent) return;
-
-  pkCell.setValue(Utilities.getUuid());
-}
-
-
-/**
- * Adds the PK setup menu item if the trigger isn't installed yet.
- * Called from onOpen().
- */
-function appendPkSetupMenuItem(menu) {
-  try {
-    const triggerExists = ScriptApp.getProjectTriggers().some(
-      t => t.getHandlerFunction() === 'stampPrimaryKey'
-        && t.getEventType() === ScriptApp.EventType.ON_EDIT
-    );
-
-    if (!triggerExists) {
-      menu.addSeparator();
-      menu.addItem('⚠ Set up field IDs (required)', 'setupPrimaryKeyColumns');
-    }
-  } catch (e) {
-    menu.addSeparator();
-    menu.addItem('⚠ Set up field IDs (required)', 'setupPrimaryKeyColumns');
-  }
+  ui.alert(`Done! Check the "${mockTab}" tab.`);
 }
