@@ -615,23 +615,43 @@ function runMockSmartsheetPush() {
   const pkIndex = resolvePrimaryKeyIndex_(headers, target.sourcePrimaryKeyHeader);
   const nameIndex = headers.findIndex(h => String(h || '').trim().toLowerCase() === 'project name');
 
-  const output = [['Monday Item ID', 'Project Name', 'Action', 'SS Column', 'SS Column ID', 'Monday Column', 'Value']];
+  // Build ordered list of mapped Smartsheet column names for the output header row.
+  // Preserves the order columns appear in the Monday staging sheet.
+  const mappedHeaders = [];    // Monday header names that have a mapping
+  const ssColumnNames = [];    // Corresponding Smartsheet display names
+  headers.forEach((header, i) => {
+    if (header in columnMap) {
+      mappedHeaders.push(header);
+      ssColumnNames.push(reverseMap[columnMap[header]] || header);
+    }
+  });
+
+  // Output: one row per project
+  const outputHeaders = ['Action', 'Monday Item ID', 'Project Name', ...ssColumnNames];
+  const outputRows = [];
+
+  let addCount = 0;
+  let skipCount = 0;
 
   for (const row of rows) {
     const pk = String(row[pkIndex] ?? '').trim();
     if (!pk) continue;
+
     const action = pk in existingPKs ? 'SKIP (exists)' : 'ADD NEW ROW';
+    if (action === 'ADD NEW ROW') { addCount++; } else { skipCount++; }
+
     const name = nameIndex !== -1 ? row[nameIndex] : '';
 
-    headers.forEach((header, i) => {
-      if (header in columnMap) {
-        const val = sanitizeCellValue_(row[i]);
-        if (val !== '') {
-          output.push([pk, name, action, reverseMap[columnMap[header]] || '?', columnMap[header], header, val]);
-        }
-      }
+    // Build one cell per mapped column, in the same order as the header row
+    const cells = mappedHeaders.map(header => {
+      const i = headers.indexOf(header);
+      return sanitizeCellValue_(row[i]);
     });
+
+    outputRows.push([action, pk, name, ...cells]);
   }
+
+  const output = [outputHeaders, ...outputRows];
 
   const mockTab = `._mock_${target.sheetName}`;
   let mockSheet = ss.getSheetByName(mockTab);
@@ -641,18 +661,14 @@ function runMockSmartsheetPush() {
   if (mockSheet.getFilter()) mockSheet.getFilter().remove();
 
   mockSheet.getRange(1, 1, output.length, output[0].length).setValues(output);
-  mockSheet.getRange('A1:G1').setFontWeight('bold').setBackground('#d9ead3');
+  mockSheet.getRange(1, 1, 1, output[0].length).setFontWeight('bold').setBackground('#d9ead3');
   mockSheet.setFrozenRows(1);
-  mockSheet.autoResizeColumns(1, 7);
+  mockSheet.autoResizeColumns(1, output[0].length);
 
-  // Apply filter defaulted to "ADD NEW ROW" so the team sees what would actually be pushed.
-  // Toggle the Action column filter to include "SKIP (exists)" to see the full picture.
+  // Filter defaults to showing only new rows. Toggle the Action filter to see skipped rows.
   const filter = mockSheet.getRange(1, 1, output.length, output[0].length).createFilter();
-  const actionCol = 3; // Column C = "Action"
   const criteria = SpreadsheetApp.newFilterCriteria().setHiddenValues(['SKIP (exists)']).build();
-  filter.setColumnFilterCriteria(actionCol, criteria);
+  filter.setColumnFilterCriteria(1, criteria); // Column A = Action
 
-  const addCount = output.slice(1).filter(r => r[2] === 'ADD NEW ROW').length;
-  const skipCount = output.slice(1).filter(r => r[2] === 'SKIP (exists)').length;
-  ui.alert(`Done! Check the "${mockTab}" tab.\n\nShowing ${addCount} new row(s) to add.\n${skipCount} existing row(s) are filtered out — toggle the Action column filter to see them.`);
+  ui.alert(`Done! Check the "${mockTab}" tab.\n\n${addCount} new project(s) to add.\n${skipCount} existing project(s) filtered out — toggle the Action column to see them.`);
 }
