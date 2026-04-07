@@ -1,49 +1,108 @@
-# ── Phase 7: Form slot assignment ────────────────────────────
+import uuid
+import json
 
-SLOT_POOL = {
-    "text":             [f"text_{i:02d}" for i in range(1, 9)],
-    "email":            [f"text_{i:02d}" for i in range(1, 9)],   # shares text slots
-    "number":           [f"num_{i:02d}" for i in range(1, 4)],
-    "currency":         [f"num_{i:02d}" for i in range(1, 4)],    # shares number slots
-    "date":             [f"date_{i:02d}" for i in range(1, 4)],
-    "select":           [f"sel_{i:02d}" for i in range(1, 5)],
-    "dependent_select": [f"sel_{i:02d}" for i in range(1, 5)],    # shares select slots
-    "checkbox":         [f"chk_{i:02d}" for i in range(1, 3)],
-}
 
-# Track which slots have been claimed
-claimed = set()
-cfg_form_slots = []
-slot_warnings = []
+def main(input):
+    raw_config = input.get("parsed_config", "{}")
+    try:
+        config = json.loads(raw_config)
+    except json.JSONDecodeError:
+        config = {}
 
-visible_fields = sorted(
-    [f for f in cfg_fields if f.get("visible")],
-    key=lambda f: f.get("position", 999)
-)
+    suppliers = config.get("suppliers", [])
+    users     = config.get("users", [])
+    variants  = input.get("variants", [])
 
-for f in visible_fields:
-    ct = f.get("control_type", "text")
-    pool = SLOT_POOL.get(ct, SLOT_POOL["text"])
+    project_id = input.get("template_project_id")
+    version_id = input.get("template_version_id")
+    corr_id    = input.get("correlation_id")
+    analyst    = input.get("analyst_email")
 
-    assigned = None
-    for candidate in pool:
-        if candidate not in claimed:
-            assigned = candidate
-            claimed.add(candidate)
-            break
+    # Form slot metadata
+    form_slots = json.loads(input.get("form_slots_json", "[]"))
 
-    if assigned is None:
-        slot_warnings.append(f"No slot available for {f['field_name']} (type: {ct})")
-        continue
+    # Build variant lookup: name -> variant_id
+    variant_map = {
+        v.get("variant_name"): v.get("variant_id")
+        for v in variants
+    }
 
-    cfg_form_slots.append({
-        "form_slot_id":         gen_id(),
-        "template_version_id":  tv_id,
-        "field_id":             f["field_id"],
-        "field_name":           f["field_name"],
-        "slot_name":            assigned,
-        "control_type":         ct,
-        "required":             f.get("required", False),
-        "lookup_name":          f.get("lookup_name"),
-        "position":             f.get("position", 0),
-    })
+    # Build first-user lookup: supplier_name -> first user's email
+    first_user = {}
+    for u in users:
+        name = u.get("supplier_name")
+        if name and name not in first_user:
+            first_user[name] = u.get("supplier_user_email")
+
+    # ── Build slot label columns (same for all suppliers) ────
+    slot_columns = {}
+
+    # Initialize all 40 columns to None
+    for i in range(1, 9):
+        slot_columns[f"text_{i:02d}"] = None
+        slot_columns[f"text_{i:02d}_label"] = None
+    for i in range(1, 4):
+        slot_columns[f"num_{i:02d}"] = None
+        slot_columns[f"num_{i:02d}_label"] = None
+        slot_columns[f"date_{i:02d}"] = None
+        slot_columns[f"date_{i:02d}_label"] = None
+    for i in range(1, 5):
+        slot_columns[f"sel_{i:02d}"] = None
+        slot_columns[f"sel_{i:02d}_label"] = None
+    for i in range(1, 3):
+        slot_columns[f"chk_{i:02d}"] = None
+        slot_columns[f"chk_{i:02d}_label"] = None
+
+    # Stamp labels from slot assignments
+    for s in form_slots:
+        slot = s.get("slot_name")
+        if slot:
+            slot_columns[f"{slot}_label"] = s.get("field_name")
+
+    # ── Build supplier request rows ──────────────────────────
+    supplier_map = {}
+    request_rows = []
+
+    for s in suppliers:
+        rid = str(uuid.uuid4())
+        supplier_name = s.get("supplier_name")
+        supplier_map[supplier_name] = rid
+
+        request_rows.append({
+            "supplier_request_id":  rid,
+            "template_project_id":  project_id,
+            "assigned_version_id":  version_id,
+            "assigned_variant_id":  variant_map.get(s.get("template_variation")),
+            "correlation_id":       corr_id,
+            "supplier_name":        supplier_name,
+            "contact_email":        first_user.get(supplier_name),
+            "assignee_email":       analyst,
+            "has_seeded_data":      bool(s.get("has_incumbent_data")),
+            "seed_data_file_id":    s.get("location_of_incumbent_data"),
+            "seed_data_range":      s.get("incumbent_data_range"),
+            "status":               "pending",
+            **slot_columns,
+        })
+
+    # ── Build user rows ──────────────────────────────────────
+    user_rows = []
+
+    for u in users:
+        req_id = supplier_map.get(u.get("supplier_name"))
+        if not req_id:
+            continue
+
+        user_rows.append({
+            "supplier_user_id":     str(uuid.uuid4()),
+            "supplier_request_id":  req_id,
+            "user_email":           u.get("supplier_user_email"),
+            "contact_name":         u.get("supplier_contact_name"),
+            "status":               "active",
+        })
+
+    return {
+        "request_rows":           request_rows,
+        "user_rows":              user_rows,
+        "supplier_request_count": len(request_rows),
+        "supplier_user_count":    len(user_rows),
+    }
