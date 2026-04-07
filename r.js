@@ -638,10 +638,21 @@ function runMockSmartsheetPush() {
   if (!mockSheet) mockSheet = ss.insertSheet(mockTab);
 
   mockSheet.clear();
+  if (mockSheet.getFilter()) mockSheet.getFilter().remove();
+
   mockSheet.getRange(1, 1, output.length, output[0].length).setValues(output);
   mockSheet.getRange('A1:G1').setFontWeight('bold').setBackground('#d9ead3');
   mockSheet.setFrozenRows(1);
   mockSheet.autoResizeColumns(1, 7);
 
-  ui.alert(`Done! Check the "${mockTab}" tab.`);
+  // Apply filter defaulted to "ADD NEW ROW" so the team sees what would actually be pushed.
+  // Toggle the Action column filter to include "SKIP (exists)" to see the full picture.
+  const filter = mockSheet.getRange(1, 1, output.length, output[0].length).createFilter();
+  const actionCol = 3; // Column C = "Action"
+  const criteria = SpreadsheetApp.newFilterCriteria().setHiddenValues(['SKIP (exists)']).build();
+  filter.setColumnFilterCriteria(actionCol, criteria);
+
+  const addCount = output.slice(1).filter(r => r[2] === 'ADD NEW ROW').length;
+  const skipCount = output.slice(1).filter(r => r[2] === 'SKIP (exists)').length;
+  ui.alert(`Done! Check the "${mockTab}" tab.\n\nShowing ${addCount} new row(s) to add.\n${skipCount} existing row(s) are filtered out — toggle the Action column filter to see them.`);
 }
