@@ -93,6 +93,7 @@ function runFullSync() {
 
   showToast('Sync complete.', 'Portfolio Sync', 8);
   logToAuditSheet('SUCCESS', 'Full sync completed.', 'runFullSync', true);
+  hideInternalSheets_();
 }
 
 /**
@@ -713,6 +714,30 @@ function writeTableToSheet_(sheetName, rows) {
   }
 }
 
+/**
+ * Hides all sheets whose names start with "." (staging, audit, mapping, mock tabs).
+ * Skips any sheet names in the exclude array so they stay visible.
+ * Always ensures at least one sheet remains visible.
+ */
+function hideInternalSheets_(exclude) {
+  const skip = (exclude || []).map(n => n.toLowerCase());
+  const ss = getSpreadsheet_();
+  const sheets = ss.getSheets();
+
+  // Don't hide if it would leave zero visible sheets
+  const visibleAfter = sheets.filter(s =>
+    !s.getName().startsWith('.') || skip.includes(s.getName().toLowerCase())
+  );
+  if (!visibleAfter.length) return;
+
+  for (const s of sheets) {
+    const name = s.getName();
+    if (name.startsWith('.') && !skip.includes(name.toLowerCase())) {
+      s.hideSheet();
+    }
+  }
+}
+
 function sanitizeCellValue_(value) {
   if (value == null || value === '') return '';
   if (Object.prototype.toString.call(value) === '[object Date]') {
@@ -1040,4 +1065,6 @@ function runMockForRegion(regionName) {
   filter.setColumnFilterCriteria(1, criteria); // Column A = Action
 
   showToast(`Done! ${addCount} new, ${skipCount} existing. Check "${mockTab}".`, 'Mock Sync Complete', 10);
+  hideInternalSheets_([mockTab]);
+  ss.setActiveSheet(mockSheet);
 }
