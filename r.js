@@ -587,20 +587,59 @@ function validateConfiguration() {
 // ── MOCK DRY RUN ────────────────────────────────────────────────────────────────
 
 function runMockSmartsheetPush() {
-  const ui = SpreadsheetApp.getUi();
-  const resp = ui.prompt('Mock Sync', 'Which region? (e.g. NOAM or EMEA/APAC)', ui.ButtonSet.OK_CANCEL);
-  if (resp.getSelectedButton() !== ui.Button.OK) return;
-
   const config = getAppConfig_();
-  const target = config.targets.find(t => t.region.toLowerCase() === resp.getResponseText().trim().toLowerCase() && t.enabled);
-  if (!target) { ui.alert('No enabled target found for that region.'); return; }
+  const regions = config.targets
+    .filter(t => t.enabled && t.region && t.smartsheetId)
+    .map(t => t.region);
+
+  if (!regions.length) {
+    SpreadsheetApp.getUi().alert('No enabled targets with a Smartsheet ID found.');
+    return;
+  }
+
+  const options = regions.map(r => `<option value="${r}">${r}</option>`).join('');
+  const html = HtmlService
+    .createHtmlOutput(`
+      <style>
+        body { font-family: Arial, sans-serif; padding: 12px; }
+        select { width: 100%; padding: 6px; margin: 10px 0; font-size: 14px; }
+        button { padding: 8px 16px; font-size: 14px; cursor: pointer; margin-right: 6px; }
+      </style>
+      <p>Select a region to mock:</p>
+      <select id="region">${options}</select>
+      <div style="margin-top: 12px; text-align: right;">
+        <button onclick="google.script.host.close()">Cancel</button>
+        <button onclick="run()">Run Dry Run</button>
+      </div>
+      <script>
+        function run() {
+          const region = document.getElementById('region').value;
+          google.script.run
+            .withSuccessHandler(function() { google.script.host.close(); })
+            .runMockForRegion(region);
+        }
+      </script>
+    `)
+    .setWidth(300)
+    .setHeight(160);
+
+  SpreadsheetApp.getUi().showModalDialog(html, 'Mock Sync — Dry Run');
+}
+
+/**
+ * Called by the dropdown dialog. Builds the mock payload for a single region.
+ */
+function runMockForRegion(regionName) {
+  const config = getAppConfig_();
+  const target = config.targets.find(t => t.region.toLowerCase() === regionName.trim().toLowerCase() && t.enabled);
+  if (!target) throw new Error(`No enabled target found for "${regionName}".`);
 
   const ss = getSpreadsheet_();
   const sheet = ss.getSheetByName(target.sheetName);
-  if (!sheet) { ui.alert(`Sheet "${target.sheetName}" not found.`); return; }
+  if (!sheet) throw new Error(`Sheet "${target.sheetName}" not found.`);
 
   const data = sheet.getDataRange().getValues();
-  if (data.length <= 1) { ui.alert('No data rows found.'); return; }
+  if (data.length <= 1) throw new Error('No data rows found.');
 
   ss.toast('Building mock payload...', 'Mock Sync', 10);
 
@@ -670,5 +709,8 @@ function runMockSmartsheetPush() {
   const criteria = SpreadsheetApp.newFilterCriteria().setHiddenValues(['SKIP (exists)']).build();
   filter.setColumnFilterCriteria(1, criteria); // Column A = Action
 
-  ui.alert(`Done! Check the "${mockTab}" tab.\n\n${addCount} new project(s) to add.\n${skipCount} existing project(s) filtered out — toggle the Action column to see them.`);
+  showToast(`Done! ${addCount} new, ${skipCount} existing. Check "${mockTab}".`, 'Mock Sync', 10);
+  try {
+    SpreadsheetApp.getUi().alert(`Done! Check the "${mockTab}" tab.\n\n${addCount} new project(s) to add.\n${skipCount} existing project(s) filtered out — toggle the Action column to see them.`);
+  } catch (_) {}
 }
