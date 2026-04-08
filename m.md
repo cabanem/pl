@@ -22,8 +22,12 @@
 
 1. Create a user group called **`Supplier`**
    - This is what S-00 Step 14 (`invite_user`) references in `user_group_ids: ['Supplier']`
-2. The group scopes portal visibility — suppliers in this group should only see their own request(s)
-3. Set the data filter: `contact_email` equals `logged-in user's email`
+2. Assign the **Member** role to this group (NOT Manager)
+   - Members can only see requests they created or are **assigned to**
+   - Managers see all requests (use this for the analyst group)
+3. No data filter needed — visibility scoping is built into Workato's native role model
+   - The `create_request` action in S-00 (Task 3) is what assigns a request to a supplier
+   - That assignment is what makes the request visible to the supplier when they log in
 
 ### 1C. Build the Minimal Supplier Page
 
@@ -37,15 +41,22 @@ The page is backed by WFA_SupplierRequest. You need **three functional component
 | Display as        | Read-only text or badge                        |
 | Purpose           | Shows the supplier where they are: `sent` → `in_progress` → `validated` / `supplier_action_required` |
 
-#### Component 2: Template Download
+#### Component 2: Template Download (Button → Open Webpage)
 
 | Setting          | Value                                          |
 |------------------|------------------------------------------------|
-| Source field      | `template_file_id` (UUID: `fcb89b24-697c-45e7-8952-441e02d3347e`) |
-| Component type    | File download                                  |
-| Purpose           | Lets supplier download their XLSX template (blank or seeded) |
+| Component type    | **Button**                                     |
+| Action            | **Open webpage**                               |
+| URL source        | `template_file_id` (UUID: `fcb89b24-697c-45e7-8952-441e02d3347e`) |
+| Button label      | "Download Template" or similar                 |
+| Purpose           | Opens the FileStorage shareable link in-browser; supplier downloads XLSX |
 
-This field gets stamped by S-00 Step 10 during onboarding.
+This field holds a **shareable FileStorage URL** (not a raw file ID).
+S-00 generates this URL via `generate_shareable_link` with a 10-day TTL.
+The link never appears in outreach emails — suppliers must authenticate
+into the portal first, then click the button. If the link expires before
+the supplier acts, the future reminder workflow (Workflow 7) will
+regenerate the link and re-stamp it on WFA_SupplierRequest.
 
 #### Component 3: File Upload
 
@@ -118,6 +129,21 @@ path:      ["11fbe9a6_a16d_4d7e_86ea_afe42ec03005"]
 4. Drop it in
 
 **Verification:** The datapill should match the same pattern used in Step 5's IF condition and Step 11's filter — both correctly reference `d568a68e` (the foreach).
+
+### Also: Add `generate_shareable_link` Step Before Step 10
+
+Insert a new step between the variant/base resolution (Steps 5–9) and Step 10:
+
+| Setting           | Value / Source                                 |
+|-------------------|------------------------------------------------|
+| Action            | `workato_files.generate_shareable_link`         |
+| File path         | Variable `current_template_file_id` (from Step 7 or 9) |
+| Duration          | `10` days                                      |
+
+This produces a temporary authenticated download URL. Then in Step 10,
+map `template_file_id` to the **shareable link URL output** from this step
+(instead of the raw FileStorage path). The supplier's portal button opens
+this URL to download their XLSX.
 
 ---
 
