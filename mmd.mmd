@@ -1,0 +1,275 @@
+---
+title: SDC Platform — Data Model
+---
+erDiagram
+
+    %% ═══════════════════════════════════
+    %% BASE WORKSPACE (HOME)
+    %% ═══════════════════════════════════
+
+    HOME_Manifests {
+        string manifest_id PK
+        string manifest_hash
+        string bundle_version
+        string schema_version
+        text snapshot_json
+        datetime created_at
+        boolean is_current
+    }
+
+    HOME_WorkspaceRegistry {
+        string workspace_id PK
+        string workspace_name
+        string status "AVAILABLE | UNAVAILABLE"
+        integer project_count
+        integer capacity
+        string api_token_ref "Property name not token"
+        datetime initialized_at
+        string region
+    }
+
+    HOME_Requests {
+        string request_id PK
+        string correlation_id UK
+        string client_name
+        string analyst_email
+        string target_vms
+        boolean separate_workspace_required
+        string workspace_id FK
+        string project_id
+        string manifest_id FK
+        string status "PENDING | PROVISIONING | ACTIVE | FAILED | CLOSED"
+        text error_message
+        datetime created_at
+        datetime updated_at
+        string config_drive_file_id "Google Drive ID"
+        text template_file_ids
+        string workato_file_storage_paths "FileStorage base path"
+    }
+
+    MAIN_ProvisioningResults {
+        string correlation_id FK
+        string table_name
+        string table_id
+        string schema_json
+    }
+
+    HOME_Requests ||--o| HOME_WorkspaceRegistry : "assigned to"
+    HOME_Requests ||--o| HOME_Manifests : "built from"
+    HOME_Requests ||--o{ MAIN_ProvisioningResults : "produces"
+
+    %% ═══════════════════════════════════
+    %% PER-CLIENT WORKSPACE
+    %% Project context
+    %% ═══════════════════════════════════
+
+    WFA_TemplateProject {
+        string template_project_id PK
+        string project_name "Client name"
+        string analyst_email
+        string target_vms
+        string correlation_id FK "HOME_Requests"
+        string drive_folder_id "Google Drive"
+        string config_file_id "Google Drive spreadsheet"
+        string parsed_config_file_id "FileStorage path"
+        string drive_file_id "Incumbent data Drive ID"
+        integer variant_count
+        integer reminder_days_1
+    }
+
+    VER_TemplateVersion {
+        string template_version_id PK
+        string template_project_id FK
+        integer version_number
+        string version_label
+        string status "draft | published | deprecated"
+        string master_template_file_id "FileStorage path"
+        string manifest_id FK "HOME_Manifests"
+        datetime published_at
+        string validation_summary
+    }
+
+    WFA_TemplateProject ||--o{ VER_TemplateVersion : "has versions"
+
+    %% ═══════════════════════════════════
+    %% PER-CLIENT WORKSPACE
+    %% Configuration (version-scoped)
+    %% ═══════════════════════════════════
+
+    CFG_Field {
+        string field_id PK
+        string template_version_id FK
+        string field_name
+        string description
+        string data_type "string | integer | date | decimal | boolean"
+        string data_format
+        boolean required
+        boolean must_be_empty
+        boolean column_unique
+        string data_cleaning_flags
+        integer position
+        string lookup_name "Soft FK to CFG_Lookup"
+        string depends_on FK "CFG_Field parent"
+        string field_length_validation
+        string numeric_field_validation
+        string date_field_validation
+        string field_input_validation
+        boolean strict
+        boolean visible "WFA form visibility"
+        string control_type
+    }
+
+    CFG_Rule {
+        string rule_id PK
+        string field_id FK "Primary field"
+        string target_field "Denormalized name"
+        string rule "must_equal | required_when | etc"
+        string condition_field "Denormalized name"
+        string condition_field_id FK "Secondary field"
+        string conditional_value
+        string error_message
+        string error_message_custom
+        boolean strict_enforcement
+        string template_version_id FK
+    }
+
+    CFG_Lookup {
+        string lookup_field_id PK
+        string template_version_id FK
+        string lookup_name
+        string valid_values
+        string parent_value "For dependent dropdowns"
+        boolean project_specific
+    }
+
+    CFG_ErrorTranslation {
+        string error_translation_id PK
+        string template_version_id FK
+        string error_code
+        string human_readable_message
+        string required_placeholders
+    }
+
+    CFG_FormSlot {
+        string form_slot_id PK
+        string template_version_id FK
+        string field_id FK "CFG_Field"
+        string field_name "Display name"
+        string slot_name "e.g. slot_text_01"
+        string control_type
+        boolean required
+        string lookup_name "For dropdowns"
+        integer position
+    }
+
+    CFG_Variant {
+        string variant_id PK
+        string template_version_id FK
+        string variant_name
+        string description
+        string template_file_id "FileStorage path to variant XLSX"
+    }
+
+    CFG_VariantField {
+        string variant_field_id PK
+        string variant_id FK
+        string field_id FK
+    }
+
+    VER_TemplateVersion ||--o{ CFG_Field : "defines"
+    VER_TemplateVersion ||--o{ CFG_Rule : "defines"
+    VER_TemplateVersion ||--o{ CFG_Lookup : "defines"
+    VER_TemplateVersion ||--o{ CFG_ErrorTranslation : "defines"
+    VER_TemplateVersion ||--o{ CFG_FormSlot : "defines"
+    VER_TemplateVersion ||--o{ CFG_Variant : "defines"
+    CFG_Variant ||--o{ CFG_VariantField : "includes"
+    CFG_Field ||--o{ CFG_VariantField : "referenced by"
+    CFG_Field ||--o{ CFG_Rule : "validated by"
+    CFG_Field ||--o{ CFG_FormSlot : "mapped to slot"
+
+    %% ═══════════════════════════════════
+    %% PER-CLIENT WORKSPACE
+    %% Operational (supplier-facing)
+    %% ═══════════════════════════════════
+
+    WFA_SupplierRequest {
+        string supplier_request_id PK
+        string template_project_id FK
+        string assigned_version_id FK "Frozen at creation"
+        string assigned_variant_id FK "Nullable"
+        string correlation_id FK "HOME_Requests"
+        string supplier_name
+        string contact_email
+        string assignee_email "Analyst"
+        string template_file_id "Shareable link URL (7-day TTL)"
+        boolean has_seeded_data
+        string seeded_data_file_id "FileStorage path"
+        string seeded_template_file_id "FileStorage path"
+        file upload_from_ui "WFA file upload"
+        string status_StateMachine "pending | sent | in_progress | submitted | validated | accepted | rejected"
+        datetime last_updated_at
+        string slot_text_01 "thru 08 plus labels"
+        string slot_num_01 "thru 02 plus labels"
+        string slot_bool_01 "thru 02 plus labels"
+        string slot_sel_01 "thru 04 plus labels"
+        string slot_date_01 "thru 04 plus labels"
+    }
+
+    WFA_SupplierUser {
+        string supplier_user_id PK
+        string supplier_request_id FK
+        string user_email "Portal login"
+        string contact_name
+        string status "active | deactivated"
+        datetime created_at
+    }
+
+    RUN_Upload {
+        string upload_id PK
+        string supplier_request_id FK
+        string template_version_id FK "Frozen from request"
+        string submitted_file_id "FileStorage path"
+        string extracted_file_version_id "FileStorage path"
+        string valid_payload "JSON"
+        string status "received | extracting | validating | validated | failed"
+        datetime submitted_at
+    }
+
+    RUN_ValidationResult {
+        string validation_result_id PK
+        string upload_id FK
+        string template_version_id FK
+        string status "running | passed | failed | error"
+        integer valid_rows
+        integer invalid_rows
+        datetime completed_at
+    }
+
+    RUN_FieldError {
+        string field_error_id PK
+        string validation_result_id FK
+        string field_id FK "CFG_Field"
+        integer row_number
+        string submitted_value
+        string error_message
+    }
+
+    RUN_ManualEntry {
+        string manual_entry_id PK
+        string supplier_request_id FK
+        integer row_number "Which worker"
+        string field_name "Matches CFG_Field"
+        string field_id FK "Optional"
+        string submitted_value
+        string slot_name "Debug trace"
+    }
+
+    WFA_TemplateProject ||--o{ WFA_SupplierRequest : "contains"
+    VER_TemplateVersion ||--o{ WFA_SupplierRequest : "assigned version"
+    CFG_Variant ||--o{ WFA_SupplierRequest : "assigned variant"
+    WFA_SupplierRequest ||--o{ WFA_SupplierUser : "has users"
+    WFA_SupplierRequest ||--o{ RUN_Upload : "uploads"
+    WFA_SupplierRequest ||--o{ RUN_ManualEntry : "manual entries"
+    RUN_Upload ||--o{ RUN_ValidationResult : "validated by"
+    RUN_ValidationResult ||--o{ RUN_FieldError : "produces errors"
+    CFG_Field ||--o{ RUN_FieldError : "error on field"
