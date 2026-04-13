@@ -1,0 +1,492 @@
+flowchart TD
+    GAS["⚡ GAS Webhook"]
+
+    subgraph PIPELINE_1["Pipeline 1: Provisioning"]
+        B01["B-01: Receive Request"]
+        B02["B-02: Route Request"]
+        P01["P-01: Provision Project"]
+        P02A["P-02a: Build XLSX"]
+        P03["P-03: Onboard Suppliers"]
+    end
+
+    subgraph PIPELINE_2["Pipeline 2: File Upload + Validation"]
+        WFA04["WFA-04: File Upload"]
+        V01["V-01: Validate Input"]
+        V02["V-02: Route Results"]
+    end
+
+    subgraph PIPELINE_3["Pipeline 3: Manual Entry"]
+        WFA01["WFA-01: Advance Stage"]
+        WFA02["WFA-02: Save Entry"]
+        WFA03["WFA-03: Submit Manual"]
+    end
+
+    subgraph PIPELINE_4["Pipeline 4: Late Seeding"]
+        WFA05A["WFA-05a: Project Selector"]
+        WFA05B["WFA-05b: Dropdown Data"]
+        WFA05C["WFA-05c: Seed Data"]
+        P02B["P-02b: Seed Incumbent"]
+    end
+
+    subgraph REVIEW["Analyst Review"]
+        TASK["📋 Approval Task"]
+        WFA06["WFA-06: Handle Decision"]
+        APPROVE["✅ Approved"]
+        REWORK["🔄 Rework"]
+    end
+
+    GAS --> B01
+    B01 -->|"new request\n(ASYNC)"| B02
+    B01 -->|"config update\n(ASYNC)"| P01
+    B02 -->|ASYNC| P01
+    P01 -->|"SYNC\nper variant"| P02A
+    P01 -->|ASYNC| P03
+    P03 -.->|"Supplier has\ntemplate"| WFA04
+    P03 -.->|"Supplier has\nform access"| WFA01
+
+    WFA04 -->|ASYNC| V01
+    WFA03 -->|ASYNC| V01
+    WFA01 -.-> WFA02
+    WFA02 -.-> WFA03
+    V01 -->|ASYNC| V02
+
+    V02 -->|"passed"| TASK
+    V02 -->|"failed"| WFA04
+
+    TASK --> WFA06
+    WFA06 --> APPROVE
+    WFA06 --> REWORK
+    REWORK -.->|"Supplier\nresubmits"| WFA04
+
+    WFA05A --> WFA05B --> WFA05C
+    WFA05C -->|"skip_seed_flag_check\n=true"| P02B
+
+    style B01 fill:#4a90d9,color:#fff
+    style B02 fill:#4a90d9,color:#fff
+    style P01 fill:#7b68ee,color:#fff
+    style P02A fill:#7b68ee,color:#fff
+    style P02B fill:#7b68ee,color:#fff
+    style P03 fill:#7b68ee,color:#fff
+    style V01 fill:#e67e22,color:#fff
+    style V02 fill:#e67e22,color:#fff
+    style WFA01 fill:#2ecc71,color:#fff
+    style WFA02 fill:#2ecc71,color:#fff
+    style WFA03 fill:#2ecc71,color:#fff
+    style WFA04 fill:#2ecc71,color:#fff
+    style WFA05A fill:#2ecc71,color:#fff
+    style WFA05B fill:#2ecc71,color:#fff
+    style WFA05C fill:#2ecc71,color:#fff
+    style WFA06 fill:#9b59b6,color:#fff
+    style TASK fill:#3498db,color:#fff
+    style APPROVE fill:#27ae60,color:#fff
+    style REWORK fill:#e74c3c,color:#fff
+
+
+
+
+    // STATE MACHINE
+stateDiagram-v2
+    [*] --> pending: P-01 bootstrap
+
+    pending --> sent: P-03 onboard\n(template link sent)
+
+    sent --> supplier_action_required: V-02 invalid path\n(validation failed)
+    sent --> submitted: WFA-04 / WFA-03\n(supplier submits)
+
+    supplier_action_required --> submitted: WFA-04 / WFA-03\n(supplier resubmits)
+
+    submitted --> validated: V-01 + V-02\n(programmatic validation)
+
+    validated --> pending_review: V-02 valid path\n(task created for analyst)
+
+    pending_review --> approved: WFA-06\n(analyst approves)
+    pending_review --> supplier_action_required: WFA-06\n(analyst requests rework)
+
+    approved --> [*]
+
+    note right of pending_review
+        Analyst reviews on
+        Approval form page.
+        Downloads files offline.
+    end note
+
+    note right of supplier_action_required
+        Supplier receives email
+        with analyst notes and
+        refreshed template link.
+    end note
+
+    // PIPELINE2_DETAIL
+flowchart TD
+    SUP["🖱 Supplier uploads file"]
+
+    WFA04["WFA-04: Submit File Upload"]
+    WFA04_REQ["get_records: WFA_SupplierRequest"]
+    WFA04_UPL["add_record: RUN_Upload"]
+    WFA04_PATH["CONNECTOR: build_storage_path"]
+    WFA04_STORE["FileStorage: store file"]
+    WFA04_STAGE["STAGE → Validating"]
+
+    V01["V-01: Validate Input"]
+    V01_LOAD["Load frozen config:\nCFG_Field, CFG_Rule,\nCFG_Lookup, CFG_ErrorTranslation"]
+    V01_ENGINE["CONNECTOR: validate_upload"]
+    V01_RESULT["add_record: RUN_ValidationResult"]
+
+    V02["V-02: Route Results"]
+    V02_LOAD["Load: RUN_ValidationResult\nRUN_Upload, WFA_SupplierRequest"]
+    V02_BRANCH{"Validation\nresult?"}
+
+    V02_FAIL_RPT["py_eval → CSV report\nFileStorage: store report"]
+    V02_FAIL_UPD["update WFA_SupplierRequest:\nstatus → supplier_action_required\n+ row counts + report link"]
+    V02_FAIL_STG["STAGE → Corrections needed\nHUMAN_REVIEW task"]
+
+    V02_PASS_LNK["FileStorage: get_shareable_link\n(submitted file + report)"]
+    V02_PASS_UPD["update WFA_SupplierRequest:\nstatus → pending_review\n+ row counts + links"]
+    V02_PASS_STG["STAGE → Review"]
+    V02_PASS_TSK["Create workflow task\nassigned to analyst"]
+    V02_PASS_EML["Email analyst:\nsubmission ready for review"]
+
+    ANALYST["👤 Analyst opens\nApproval form page"]
+    REVIEW["Reviews data offline\nDownloads submitted file\nDownloads validation report\nViews review history"]
+
+    WFA06["WFA-06: Handle Decision"]
+    WFA06_BRANCH{"Decision?"}
+
+    WFA06_APP_COPY["FileStorage: copy file\n→ approved/ snapshot"]
+    WFA06_APP_UPD["update WFA_SupplierRequest:\nstatus → approved\napproved_at, approved_file_id"]
+    WFA06_APP_NOTE["add_record: RUN_ReviewNote\nreview_action = approved"]
+
+    WFA06_REW_LINK["FileStorage: refresh\ntemplate shareable link"]
+    WFA06_REW_UPD["update WFA_SupplierRequest:\nstatus → supplier_action_required\ntemplate_file_id = new link"]
+    WFA06_REW_NOTE["add_record: RUN_ReviewNote\nreview_action = rework"]
+    WFA06_REW_EML["Email supplier:\nnotes + template link"]
+
+    SUP --> WFA04
+    WFA04 --> WFA04_REQ --> WFA04_UPL --> WFA04_PATH --> WFA04_STORE --> WFA04_STAGE
+    WFA04_STAGE -->|ASYNC| V01
+
+    V01 --> V01_LOAD --> V01_ENGINE --> V01_RESULT
+    V01_RESULT -->|ASYNC| V02
+
+    V02 --> V02_LOAD --> V02_BRANCH
+
+    V02_BRANCH -->|INVALID| V02_FAIL_RPT --> V02_FAIL_UPD --> V02_FAIL_STG
+    V02_FAIL_STG -.->|"Supplier sees errors,\ncorrects and resubmits"| SUP
+
+    V02_BRANCH -->|PASSED| V02_PASS_LNK --> V02_PASS_UPD --> V02_PASS_STG --> V02_PASS_TSK --> V02_PASS_EML
+
+    V02_PASS_EML --> ANALYST --> REVIEW --> WFA06 --> WFA06_BRANCH
+
+    WFA06_BRANCH -->|Approved| WFA06_APP_COPY --> WFA06_APP_UPD --> WFA06_APP_NOTE
+    WFA06_APP_NOTE -.-> DONE(("✅ Complete"))
+
+    WFA06_BRANCH -->|"Rework\nRequested"| WFA06_REW_LINK --> WFA06_REW_UPD --> WFA06_REW_NOTE --> WFA06_REW_EML
+    WFA06_REW_EML -.->|"Supplier\nresubmits"| SUP
+
+    style WFA04 fill:#2ecc71,color:#fff
+    style V01 fill:#e67e22,color:#fff
+    style V02 fill:#e67e22,color:#fff
+    style WFA06 fill:#9b59b6,color:#fff
+    style ANALYST fill:#3498db,color:#fff
+    style REVIEW fill:#3498db,color:#fff
+    style WFA06_APP_COPY fill:#27ae60,color:#fff
+    style WFA06_APP_UPD fill:#27ae60,color:#fff
+    style WFA06_APP_NOTE fill:#27ae60,color:#fff
+    style WFA06_REW_LINK fill:#e74c3c,color:#fff
+    style WFA06_REW_UPD fill:#e74c3c,color:#fff
+    style WFA06_REW_NOTE fill:#e74c3c,color:#fff
+    style WFA06_REW_EML fill:#e74c3c,color:#fff
+    style V02_FAIL_RPT fill:#e74c3c,color:#fff
+    style V02_FAIL_UPD fill:#e74c3c,color:#fff
+    style V02_FAIL_STG fill:#e74c3c,color:#fff
+
+    // PIPELINES
+## Pipeline 1 — New Data Collection Request
+
+```mermaid
+flowchart TD
+    GAS["⚡ GAS Webhook POST"]
+    B01["B-01: Receive Request\n(WEBHOOK)"]
+    B01_VAL["py_eval: Validate payload"]
+    B01_CHK["get_records:\nHOME_Requests\n(existing config?)"]
+    B01_NEW["add_record:\nHOME_Requests\n(new request)"]
+    B01_UPD["add_record:\nHOME_Requests\n(CONFIG_UPDATE)"]
+    B01_VALID{"Payload\nvalid?"}
+    B01_EXIST{"Existing\nrecord?"}
+
+    B02["B-02: Route Request\n(CALLABLE)"]
+    B02_FIND["get_records:\nHOME_Requests\n(by request_id)"]
+    B02_SEP{"Separate\nworkspace?"}
+    B02_PATH["build_storage_path\n(canonical derivation)"]
+    B02_DIR["FileStorage:\nensure_dir_exists"]
+    B02_WFA["add_record:\nWFA_TemplateProject"]
+    B02_HR["update_record:\nHOME_Requests → ACTIVE"]
+    B02_FAIL["update_record:\nHOME_Requests → FAILED\n(not implemented)"]
+
+    P01["P-01: Provision Project\n(CALLABLE)"]
+    P01_PARSE["CONNECTOR:\nparse_config_file"]
+    P01_FORM["CONNECTOR:\nextract_form_fields"]
+    P01_BATCH["Batch write:\nCFG_Field, CFG_Rule,\nCFG_Lookup, CFG_Variant,\nCFG_FormSlot, etc."]
+    P01_TMPL["Build XLSX templates\n(calls P-02a per variant)"]
+    P01_BOOT["Bootstrap:\nWFA_SupplierRequest\nWFA_SupplierUser"]
+
+    P02A["P-02a: Build XLSX\n(CALLABLE)\npy_eval: openpyxl"]
+
+    P03["P-03: Onboard Suppliers\n(CALLABLE)"]
+    P03_SEND["Per supplier:\ngenerate shareable link\nstamp template_file_id\nstatus → sent"]
+    P03_STAGE["STAGE → Data entry"]
+
+    GAS --> B01
+    B01 --> B01_VAL --> B01_CHK
+    B01_CHK --> B01_EXIST
+    B01_EXIST -->|No| B01_NEW --> B01_VALID
+    B01_EXIST -->|Yes| B01_UPD
+
+    B01_VALID -->|Yes| B02
+    B01_VALID -->|No| B01_STOP["Log: REJECTED"]
+
+    B01_UPD -->|"ASYNC\n⚠ CRIT-2:\nworkato_file_storage_path\n≠ project_storage_path"| P01
+
+    B02 --> B02_FIND --> B02_SEP
+    B02_SEP -->|No| B02_PATH --> B02_DIR --> B02_WFA
+    B02_WFA -->|"⚠ CRIT-1:\nproject_storage_path\nfrom wrong variable"| B02_HR
+    B02_HR -->|ASYNC| P01
+    B02_SEP -->|Yes| B02_FAIL
+
+    P01 --> P01_PARSE --> P01_FORM --> P01_BATCH
+    P01_BATCH --> P01_TMPL
+    P01_TMPL -->|"SYNC per variant"| P02A
+    P02A -->|"base64 XLSX"| P01_TMPL
+    P01_TMPL --> P01_BOOT
+    P01_BOOT -->|ASYNC| P03
+    P03 --> P03_SEND --> P03_STAGE
+
+    P03_STAGE -.->|"Supplier has\ntemplate + portal"| DONE1(("✓"))
+
+    style B01 fill:#4a90d9,color:#fff
+    style B02 fill:#4a90d9,color:#fff
+    style P01 fill:#7b68ee,color:#fff
+    style P02A fill:#7b68ee,color:#fff
+    style P03 fill:#7b68ee,color:#fff
+    style B02_WFA fill:#ff6b6b,color:#fff
+    style B01_UPD fill:#ff6b6b,color:#fff
+    style B02_FAIL fill:#999,color:#fff
+```
+
+## Pipeline 2 — Supplier File Upload + Validation + Analyst Review
+
+```mermaid
+flowchart TD
+    SUP["🖱 Supplier uploads file\nvia WFA page"]
+
+    WFA04["WFA-04: Submit File Upload\n(PAGE_EVENT)"]
+    WFA04_REQ["get_records:\nWFA_SupplierRequest"]
+    WFA04_UPL["add_record:\nRUN_Upload\n(status=received)"]
+    WFA04_PATH["CONNECTOR:\nbuild_storage_path"]
+    WFA04_STORE["FileStorage:\nstore uploaded file"]
+    WFA04_STAGE["STAGE → Validating"]
+
+    V01["V-01: Validate Input\n(CALLABLE)"]
+    V01_LOAD["Load frozen config:\nRUN_Upload\nWFA_SupplierRequest\nCFG_Field, CFG_Rule\nCFG_Lookup, CFG_ErrorTranslation"]
+    V01_ENGINE["CONNECTOR:\nvalidate_upload\n(core engine)"]
+    V01_RESULT["add_record:\nRUN_ValidationResult"]
+
+    V02["V-02: Route Results\n(CALLABLE)"]
+    V02_LOAD["Load context:\nRUN_ValidationResult\nRUN_Upload\nWFA_SupplierRequest"]
+    V02_BRANCH{"Validation\nresult?"}
+
+    V02_FAIL_RPT["py_eval → CSV report\nFileStorage: store report"]
+    V02_FAIL_UPD["update WFA_SupplierRequest:\nstatus → supplier_action_required\n+ row counts + report link"]
+    V02_FAIL_STG["STAGE → Corrections needed"]
+    V02_FAIL_REV["HUMAN_REVIEW task"]
+
+    V02_PASS_LNK["FileStorage:\nget_shareable_link\n(submitted file)"]
+    V02_PASS_UPD["update WFA_SupplierRequest:\nstatus → pending_review\n+ row counts + links"]
+    V02_PASS_STG["STAGE → Review"]
+    V02_PASS_TSK["Create workflow task\n(assign to analyst)"]
+    V02_PASS_EML["Send analyst\nnotification email"]
+
+    ANALYST["👤 Analyst reviews\non Approval form page"]
+    WFA06["WFA-06: Handle Decision\n(TASK_COMPLETED)"]
+    WFA06_BRANCH{"Decision?"}
+
+    WFA06_APP["Copy file → approved/\nupdate status → approved\nstamp approved_at\nwrite RUN_ReviewNote"]
+    WFA06_REW["Refresh template link (TTL)\nstatus → supplier_action_required\nwrite RUN_ReviewNote\nemail supplier with notes"]
+
+    SUP --> WFA04
+    WFA04 --> WFA04_REQ --> WFA04_UPL --> WFA04_PATH
+    WFA04_PATH --> WFA04_STORE --> WFA04_STAGE
+    WFA04_STAGE -->|ASYNC| V01
+
+    V01 --> V01_LOAD --> V01_ENGINE --> V01_RESULT
+    V01_RESULT -->|ASYNC| V02
+
+    V02 --> V02_LOAD --> V02_BRANCH
+
+    V02_BRANCH -->|"INVALID"| V02_FAIL_RPT
+    V02_FAIL_RPT --> V02_FAIL_UPD --> V02_FAIL_STG --> V02_FAIL_REV
+    V02_FAIL_REV -.->|"Supplier sees\nerror report"| SUP
+
+    V02_BRANCH -->|"PASSED"| V02_PASS_LNK
+    V02_PASS_LNK --> V02_PASS_UPD --> V02_PASS_STG --> V02_PASS_TSK --> V02_PASS_EML
+
+    V02_PASS_EML --> ANALYST --> WFA06 --> WFA06_BRANCH
+
+    WFA06_BRANCH -->|Approved| WFA06_APP
+    WFA06_APP -.-> DONE2(("✓"))
+
+    WFA06_BRANCH -->|"Rework\nrequested"| WFA06_REW
+    WFA06_REW -.->|"Supplier\nresubmits"| SUP
+
+    style WFA04 fill:#2ecc71,color:#fff
+    style V01 fill:#e67e22,color:#fff
+    style V02 fill:#e67e22,color:#fff
+    style WFA06 fill:#9b59b6,color:#fff
+    style ANALYST fill:#3498db,color:#fff
+    style WFA06_APP fill:#27ae60,color:#fff
+    style WFA06_REW fill:#e74c3c,color:#fff
+    style V02_FAIL_RPT fill:#e74c3c,color:#fff
+```
+
+## Pipeline 3 — Supplier Manual Entry
+
+```mermaid
+flowchart TD
+    SUP["🖱 Supplier fills\nWFA form"]
+
+    WFA01["WFA-01: Advance to Started\n(PAGE_EVENT)"]
+    WFA01_STG["STAGE → Started"]
+
+    WFA02["WFA-02: Save Worker Entry\n(PAGE_EVENT)"]
+    WFA02_LOAD["get_records:\nWFA_SupplierRequest\nCFG_FormSlot\nRUN_ManualEntry"]
+    WFA02_WRITE["py_eval → transform slots\nwrite RUN_ManualEntry rows\nclear slot fields"]
+
+    WFA03["WFA-03: Submit Manual Input\n(PAGE_EVENT)"]
+    WFA03_LOAD["get_records:\nWFA_SupplierRequest\nRUN_ManualEntry"]
+    WFA03_UPL["add_record:\nRUN_Upload\n(status=received)"]
+
+    V01["V-01: Validate Input\n(CALLABLE)"]
+    V02["V-02: Route Results\n(CALLABLE)"]
+
+    SUP -->|"Opens request"| WFA01 --> WFA01_STG
+    SUP -->|"Saves each row"| WFA02 --> WFA02_LOAD --> WFA02_WRITE
+    SUP -->|"Clicks submit"| WFA03 --> WFA03_LOAD --> WFA03_UPL
+
+    WFA03_UPL -->|"ASYNC\n⚠ HIGH-1: missing\nproject_storage_path"| V01
+    V01 -->|ASYNC| V02
+    V02 -.->|"Same flow as\nPipeline 2"| MERGE(("→ P2"))
+
+    style WFA01 fill:#2ecc71,color:#fff
+    style WFA02 fill:#2ecc71,color:#fff
+    style WFA03 fill:#2ecc71,color:#fff
+    style V01 fill:#e67e22,color:#fff
+    style V02 fill:#e67e22,color:#fff
+    style WFA03_UPL fill:#ff6b6b,color:#fff
+```
+
+## Pipeline 4 — Late Incumbent Data Seeding
+
+```mermaid
+flowchart TD
+    ANALYST["👤 Analyst opens\nSeed Data page"]
+
+    WFA05A["WFA-05a: Project Selector\n(PAGE_EVENT)"]
+    WFA05A_Q["get_records:\nWFA_TemplateProject\n(active projects)"]
+
+    WFA05B["WFA-05b: Dropdown Selection\n(PAGE_EVENT)"]
+    WFA05B_Q["get_records:\nWFA_SupplierRequest\n(by template_project_id)"]
+    WFA05B_PY["py_eval:\ncompute seed stats\n(total, flagged, eligible)"]
+
+    WFA05C["WFA-05c: Seed Data\n(PAGE_EVENT)"]
+    WFA05C_PROJ["get_records:\nWFA_TemplateProject"]
+    WFA05C_VER["get_records:\nVER_TemplateVersion\n(by template_project_id + status)"]
+    WFA05C_PY["py_eval:\nbuild split_config"]
+
+    P02B["P-02b: Seed Incumbent Data\n(CALLABLE)"]
+    P02B_SUP["get_records:\nWFA_SupplierRequest\n(has_seeded_data=false)"]
+    P02B_VAR["get_records:\nCFG_Variant\n(by template_version_id)"]
+    P02B_MERGE["py_eval:\nmerge incumbent data\ninto template per supplier"]
+    P02B_STAMP["update WFA_SupplierRequest:\nhas_seeded_data=true\nseeded_template_file_id"]
+
+    ANALYST --> WFA05A --> WFA05A_Q
+    WFA05A_Q -->|"Populates\ndropdown"| WFA05B
+    WFA05B --> WFA05B_Q --> WFA05B_PY
+    WFA05B_PY -->|"Shows stats,\nanalyst clicks Seed"| WFA05C
+
+    WFA05C --> WFA05C_PROJ --> WFA05C_VER --> WFA05C_PY
+    WFA05C_PY -->|"skip_seed_flag_check=true\n⚠ HIGH-2: incumbent_spit_config typo"| P02B
+
+    P02B --> P02B_SUP --> P02B_VAR --> P02B_MERGE --> P02B_STAMP
+    P02B_STAMP -.-> DONE4(("✓"))
+
+    style WFA05A fill:#2ecc71,color:#fff
+    style WFA05B fill:#2ecc71,color:#fff
+    style WFA05C fill:#2ecc71,color:#fff
+    style P02B fill:#7b68ee,color:#fff
+    style ANALYST fill:#3498db,color:#fff
+```
+
+## State Machine — WFA_SupplierRequest.status_StateMachine
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: P-01 bootstrap
+
+    pending --> sent: P-03 onboard\n(template link sent)
+
+    sent --> supplier_action_required: V-02 invalid path\n(validation failed)
+    sent --> submitted: WFA-04 / WFA-03\n(supplier submits)
+
+    supplier_action_required --> submitted: WFA-04 / WFA-03\n(supplier resubmits)
+
+    submitted --> validated: V-01 + V-02\n(programmatic validation)
+
+    validated --> pending_review: V-02 valid path\n(task created for analyst)
+
+    pending_review --> approved: WFA-06\n(analyst approves)
+    pending_review --> supplier_action_required: WFA-06\n(analyst requests rework)
+
+    approved --> [*]
+
+    note right of pending_review
+        Analyst reviews on
+        Approval form page.
+        Downloads files offline.
+    end note
+
+    note right of supplier_action_required
+        Supplier receives email
+        with analyst notes and
+        refreshed template link.
+    end note
+
+    note left of validated
+        Brief transitional state.
+        May not be persisted if
+        V-02 stamps pending_review
+        directly.
+    end note
+```
+
+## Workflow Stages (WFA task system)
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> DataEntry: P-03 step 24
+    DataEntry --> Started: WFA-01 step 1
+    Started --> Validating: WFA-04 step 10
+    Validating --> CorrectionsNeeded: V-02 step 10\n(validation failed)
+    Validating --> Review: V-02 step 15\n(validation passed)
+    CorrectionsNeeded --> Validating: Supplier resubmits
+    Review --> [*]: WFA-06\n(analyst decides)
+
+    state DataEntry {
+        [*]: Template sent\nto supplier
+    }
+    state Review {
+        [*]: Approval task\nassigned to analyst
+    }
+```
+
+    
