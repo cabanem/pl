@@ -1,3 +1,210 @@
+SDC Platform — Architectural Decisions Register
+
+Compiled from the P-02b seeding design session. These decisions affect the platform broadly, not just the seeding feature.
+
+AD-01: Seeding is split-and-merge in a single recipe
+
+Context: Incumbent data arrives as a single file containing all suppliers' rows. Each supplier needs only their rows, pre-filled into their template XLSX.
+
+Decision: One recipe (P-02b) handles both partitioning the incumbent file by supplier and merging each supplier's rows into their template. No intermediate seed files are stored.
+
+Rationale: The deprecated 9a (merge) and 9b (ingest) split this across two recipes with intermediate storage. Combining them eliminates a file write per supplier and a recipe handoff. The py_eval does the partition and merge in one pass — pandas filters, openpyxl writes.
+
+Replaces: Recipes 9a and 9b (both deprecated).
+
+AD-02: GAS remains a thin POST layer
+
+Context: GAS previously handled template generation and could have handled incumbent data splitting.
+
+Decision: GAS serializes the config workbook to JSON, saves it to Drive, and fires a webhook. No business logic, no splitting, no template generation. All computation lives in Workato (connector actions and py_eval steps).
+
+Rationale: Keeps GAS maintainable, testable, and interchangeable. Business logic changes don't require Apps Script deployments.
+
+AD-03: FileStorage path as text field, not File column
+
+Context: WFA_SupplierRequest.seeded_template_file_id stores the location of the seeded template. Workato Data Tables offer both text fields and File columns.
+
+Decision: Use a text field containing the FileStorage path. The File column (500 MB, clickable preview in UI) was evaluated but not adopted.
+
+Rationale: Every other file reference in the platform (template_file_id, master_template_file_id, parsed_config_file_id) uses text fields with FileStorage paths. P-03's shareable link generation requires a FileStorage path. Using a File column would require a bridge step (download from Data Table → re-upload to FileStorage → create link) in P-03 and every future recipe that needs a shareable link. One pattern is better than two.
+
+Escape hatch: A File Column Variant Change Guide was produced in case this decision is revisited.
+
+AD-04: Canonical path construction via connector action
+
+Context: Four different root path strategies existed (trigger parameter, account property, hardcoded /clients, py_eval base_path default). Two different sanitization methods produced different slugs for the same client name.
+
+Decision: A build_storage_path action on the SDC Platform Connector is the single source of truth for FileStorage path construction. It takes raw inputs (root, client_name, template_project_id, optional subfolder and file_name) and returns slugified, consistent paths. No recipe ever runs its own gsub, re.sub, or hardcodes a directory.
+
+Rationale: One function, one slugification rule (lowercase → replace non-alphanumeric runs with hyphen → trim), one place to change if the convention evolves. Also provides parent_path/leaf_name outputs for Workato's ensure_dir_exists action, which requires the path split into directory and name.
+
+AD-05: FileStorage folder hierarchy
+
+Context: Files were dumped flat into the root or one level down with no project isolation.
+
+Decision: Standard hierarchy:
+
+/{root}/{client_slug}/{project_short}/
+  ├── /config
+  ├── /templates
+  ├── /seeded
+  ├── /uploads
+  └── /reports
+B-02 creates the project root. P-01 creates the five subfolders. Each recipe appends its subfolder to the stored project_storage_path.
+
+Rationale: Three-click navigation in the FileStorage UI: whose → which project → what kind of file. No file name collisions across projects or clients.
+
+AD-06: project_storage_path stored once, passed downstream
+
+Context: Multiple recipes need the FileStorage base path. Previously some read the account property directly, others received it as a parameter, others hardcoded paths.
+
+Decision: B-02 computes project_storage_path via build_storage_path, stores it on WFA_TemplateProject, and passes it to P-01 as a trigger parameter. Downstream recipes (P-02b, P-03, WFA-04, V-01, V-02) receive it as a parameter or read it from the project record. No recipe reads ENV_FILE_STORAGE_ROOT directly except through the connector action.
+
+Rationale: Single source of truth. If the root changes, only the account property and the connector action matter — no recipe hardcodes are affected.
+
+AD-07: Account property renamed from ENV_FILE_STORAGE_ROOT_ID to ENV_FILE_STORAGE_ROOT
+
+Context: The property stores a path (/sdc), not an ID. The _ID suffix was misleading.
+
+Decision: Rename to ENV_FILE_STORAGE_ROOT.
+
+Rationale: Naming accuracy. Prevents confusion with actual IDs (Drive file IDs, Workato internal IDs).
+
+AD-08: ENV_CLIENT_NAME replaced with datapill
+
+Context: P-03 used an ENV_CLIENT_NAME account property to build the task assignment label. This is a workspace-level property holding a project-level value.
+
+Decision: Replace with customer_name from the WFA_SupplierRequest record (already fetched in P-03 Step 1).
+
+Rationale: In a shared workspace with multiple clients, the account property can only hold one name. The datapill is per-supplier-request and always correct.
+
+AD-09: Seeding config lives on 1_customer, not 2_suppliers
+
+Context: The original config had per-supplier fields for incumbent data location (Drive file ID, data range) on the 2_suppliers sheet.
+
+Decision: Seeding config is project-scoped: one file, one sheet, one split field. These fields (incumbent_sheet_name, incumbent_split_field) live on 1_customer. The per-supplier columns F (Location of incumbent data) and G (Incumbent data range) on 2_suppliers are deprecated.
+
+Rationale: The platform's seeding model is "single file, partition by split field." Per-supplier file references are unnecessary and add configuration burden. The split field approach is extensible — compound filters can be added to the JSON spec without changing the workbook layout.
+
+AD-10: Filter spec is a JSON object, extensible without recipe changes
+
+Context: The split logic needs to support partitioning by supplier name today and compound criteria (e.g., supplier name WHERE region = "US") in the future.
+
+Decision: incumbent_split_config is stored as a JSON string:
+
+{
+  "sheet_name": "Worker Data",
+  "split_field": "Supplier Name",
+  "filters": []
+}
+The filters array accepts {"field", "op", "value"} objects. Supported operators: eq, ne, in, contains.
+
+Rationale: Adding filter criteria means updating the JSON — no recipe structural changes, no new Data Table columns, no connector changes. The py_eval iterates whatever's in the array.
+
+AD-11: P-02b supports two callers with a flag parameter
+
+Context: Seeding happens at two points — during initial provisioning (P-01 calls P-02b, only flagged suppliers) and late (analyst triggers via WFA page, all seedable suppliers).
+
+Decision: P-02b accepts skip_seed_flag_check (boolean, default false). When false (P-01 path), non-flagged suppliers are skipped inside the loop. When true (WFA-Seed path), the gate doesn't fire — all suppliers in seedable status are processed.
+
+Rationale: One recipe, two behaviors. The flag check is an if/else at the top of the foreach body — no query duplication, no separate recipes. The broad query (status IN pending, sent) is the same for both callers; only the in-loop gate differs.
+
+AD-12: has_seeded_data becomes an output, not just an input
+
+Context: has_seeded_data was originally set in the config workbook (analyst declares intent). For late seeding, the analyst never set the flag.
+
+Decision: P-02b stamps has_seeded_data = true on every supplier it successfully seeds (Step 20), regardless of its prior value.
+
+Rationale: The flag reflects reality — was this supplier seeded? — rather than just intent. This supports the WFA-Seed flow where the flag was never set, and makes dashboard queries accurate (count of seeded suppliers = count where has_seeded_data = true).
+
+AD-13: P-03 template resolution is three-tier
+
+Context: P-03 resolves which template to share with each supplier. Previously: variant template if assigned, else master template.
+
+Decision: Three-tier priority: seeded_template_file_id → variant template_file_id → master_template_file_id. If the seeded template exists, it's used — no variant lookup needed because P-02b already merged into the correct variant/master template.
+
+Rationale: The seeded template is the "final answer" for that supplier. It already contains the correct structure. Checking variant after seeding would be redundant and potentially conflicting.
+
+AD-14: B-02 calls P-01 synchronously
+
+Context: B-02 previously called P-01 asynchronously. Errors in routing (e.g., request not found in HOME_Requests) couldn't be reported to the caller.
+
+Decision: B-02 is a callable recipe function with a return schema (success, error_message). B-01 calls B-02 synchronously and inspects the result.
+
+Rationale: B-02 is lightweight — a few DB lookups, one connector action, one directory creation. The heavy work (config parsing, template building, onboarding) stays async in P-01. Sync return lets B-01 log failures and update HOME_Requests with error status.
+
+AD-15: B-02 return schema simplified
+
+Context: B-02 had two result variables (result for log lines, error_details for the actual error message) serving the same purpose in different formats.
+
+Decision: Collapse to a single return schema: success (boolean) + error_message (string). The caller (B-01) decides how to log it.
+
+Rationale: Eliminates the Step 1 variable declaration entirely. One return shape, one place to read results.
+
+AD-16: Variant count on 1_customer is a UI control, not pipeline data
+
+Context: Row 6 on 1_customer ("How many variations are there of the template?") appeared redundant with the actual variants defined on 6_variants.
+
+Decision: Keep it. The value drives spreadsheet-level conditional formatting and visibility on the 6_variants tab. It is not a source of truth for the pipeline — parse_summary.variant_count from the connector is authoritative.
+
+Rationale: The config workbook serves dual duty as a user-facing form and a data source. UI controls that improve the analyst's editing experience are worth keeping even if the pipeline doesn't need them.
+
+AD-17: Late-arriving incumbent data flows through a WFA page
+
+Context: Incumbent data may arrive after initial provisioning. The analyst needs a way to provide it without re-triggering the full pipeline.
+
+Decision: A dedicated WFA page ("Seed Incumbent Data") with a project selector dropdown, three text inputs (file ID, sheet name, split field), and a button that calls P-02b via a thin WFA-Seed recipe. The page shows eligibility stats before the analyst acts.
+
+Rationale: The analyst is already in the WFA app. A dedicated page scopes the action to exactly what's happening — no config workbook round-trip, no webhook, no re-provision. The WFA-Seed recipe is thin (lookup project, build split config JSON, call P-02b, return toast).
+
+AD-18: Status filter protects in-progress suppliers from re-seeding
+
+Context: Late seeding could overwrite a supplier's template after they've started working.
+
+Decision: P-02b's query filters to status IN (pending, sent). Suppliers with status started, submitted, or complete are never seeded. This filter applies to both the P-01 and WFA-Seed callers.
+
+Rationale: A supplier who has downloaded and started filling out their template would lose work if the file were replaced. The status boundary is conservative and clearly auditable. During initial provisioning all suppliers are pending, so the filter has no impact on that path.
+
+AD-19: Dashboards built as WFA pages, not external tools
+
+Context: Needed operational, analyst, and management visibility into project status.
+
+Decision: Three WFA pages in the existing Supplier Data Collection app — Ops (developer), Analyst (supplier tracking), Manager (portfolio view). All backed by Data Table queries against existing tables.
+
+Rationale: Data already lives in Data Tables. WFA pages read directly — no sync layer, no staleness, no maintenance. The shared workspace means all clients are visible; the Analyst and Seed pages use a project selector dropdown to scope to one client at a time.
+
+AD-20: project_status stamped by each recipe, not derived at read time
+
+Context: Project status could be derived by joining across tables (template version exists? suppliers bootstrapped? any submissions?). WFA pages don't handle complex joins well.
+
+Decision: Add project_status to WFA_TemplateProject. Each recipe stamps it as the pipeline progresses: config_pending → building → bootstrapping → onboarding → active → complete.
+
+Rationale: Every dashboard page becomes a single-table query with a string filter. No joins, no derivation, no lag. The stamping adds one field update per pipeline stage — negligible cost.
+
+AD-21: B-02 double-nesting bug identified and fixed
+
+Context: B-02 Step 18's ensure_dir_exists had directory_path and directory_name both containing the same {client}_{corr_short} value, creating {root}/Client_Name_a3b2c1d4/Client_Name_a3b2c1d4/.
+
+Decision: Replace with build_storage_path call (AD-04) followed by ensure_dir_exists using parent_path and leaf_name from the connector output.
+
+Rationale: The connector handles the path split correctly. The bug was caused by Workato's ensure_dir_exists always creating directory_name inside directory_path — a behavior that's easy to get wrong when building paths manually.
+
+AD-22: customer_name added to WFA_SupplierRequest
+
+Context: Downstream recipes (WFA-04, P-03) need the client name for file naming and task labels. Previously required a join to WFA_TemplateProject.
+
+Decision: P-01's bootstrapping py_eval (Step 54) stamps customer_name on each WFA_SupplierRequest record.
+
+Rationale: Avoids an extra DB lookup in WFA-04 and P-03. The value is static for the life of the supplier request.
+
+AD-23: ENV_CURRENT_MANIFEST_ID is overloaded (future fix)
+
+Context: ENV_CURRENT_MANIFEST_ID is used as a FileStorage filename in R-B-00 and as a Developer API package ID in B-03a. Neither is active today.
+
+Decision: Documented as a known issue. No fix now — cross-workspace provisioning (B-03a) and manifest versioning (R-B-00) are not yet active. When either is built, split into two properties.
+
+Rationale: Fixing an unused property has no ROI. The documentation ensures it's not rediscovered later.
+
 # SDC Platform — Architectural Decisions Register (Consolidated)
 
 This document extends the original ADR (AD-01 through AD-23, from the P-02b seeding session) with decisions extracted from the Control Plane Recipe Build-Out and the Validation/Manual Input design sessions.
