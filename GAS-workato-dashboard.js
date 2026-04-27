@@ -494,3 +494,101 @@ Payload._requireArgs = function(args, required, builderName) {
     }
   }
 };
+
+
+/**
+ * @file Log.gs (SDC library)
+ * Reads and writes against the workbook's _script_logs sheet.
+ *
+ * Schema: Timestamp | Status | User | Message
+ * Status values: INFO | SUCCESS | ERROR | WARNING
+ *
+ * Public:
+ *   Log.append(ss, status, message)            → void
+ *   Log.getMostRecentCorrelationId(ss)         → string | null
+ *
+ * Logging is best-effort: append failures are swallowed and warned to
+ * console rather than thrown. The workflow must never fail because the
+ * log sheet is missing or unwritable.
+ */
+
+var Log = {};
+
+var LOG_SHEET_NAME    = '_script_logs';
+var LOG_STATUS_COL    = 1;  // 0-indexed
+var LOG_MESSAGE_COL   = 3;
+var CORRELATION_PREFIX = 'Correlation ID: ';
+
+var VALID_STATUSES = Object.freeze(new Set(['INFO', 'SUCCESS', 'ERROR', 'WARNING']));
+
+// --- Public API ------------------------------------------------------
+
+/**
+ * Append a log entry. Best-effort — missing sheet or write failure is
+ * logged to console and swallowed.
+ *
+ * @param {Spreadsheet} ss
+ * @param {string}      status   - One of INFO | SUCCESS | ERROR | WARNING.
+ * @param {string}      message
+ */
+Log.append = function(ss, status, message) {
+  try {
+    if (!ss) return;
+
+    var normalizedStatus = String(status || '').toUpperCase();
+    if (!VALID_STATUSES.has(normalizedStatus)) {
+      console.warn('Log.append: invalid status "' + status + '", coercing to INFO.');
+      normalizedStatus = 'INFO';
+    }
+
+    var logSheet = ss.getSheetByName(LOG_SHEET_NAME);
+    if (!logSheet) return;
+
+    var user = '';
+    try {
+      user = Session.getActiveUser().getEmail() || 'unknown';
+    } catch (e) {
+      user = 'unknown';
+    }
+
+    logSheet.appendRow([new Date(), normalizedStatus, user, String(message || '')]);
+  } catch (e) {
+    console.warn('Log.append failed: ' + e.message);
+  }
+};
+
+/**
+ * Scan _script_logs in reverse for the most recent SUCCESS entry whose
+ * message contains a correlation ID, and return the ID. Returns null if
+ * no match found, the sheet is missing, or any read error occurs.
+ *
+ * Used by the portal-invite flow to thread the originating provision's
+ * correlation ID through to the invite webhook.
+ *
+ * @param {Spreadsheet} ss
+ * @returns {string|null}
+ */
+Log.getMostRecentCorrelationId = function(ss) {
+  try {
+    if (!ss) return null;
+
+    var logSheet = ss.getSheetByName(LOG_SHEET_NAME);
+    if (!logSheet) return null;
+
+    var data = logSheet.getDataRange().getValues();
+
+    for (var i = data.length - 1; i >= 0; i--) {
+      var status  = String(data[i][LOG_STATUS_COL]);
+      var message = String(data[i][LOG_MESSAGE_COL]);
+
+      if (status === 'SUCCESS' && message.indexOf(CORRELATION_PREFIX) !== -1) {
+        return message.split(CORRELATION_PREFIX)[1].trim();
+      }
+    }
+
+    return null;
+  } catch (e) {
+    console.warn('Log.getMostRecentCorrelationId failed: ' + e.message);
+    return null;
+  }
+};
