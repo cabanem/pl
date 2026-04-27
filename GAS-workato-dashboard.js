@@ -390,3 +390,107 @@ Webhook._truncate = function(s, max) {
   s = String(s || '');
   return s.length > max ? s.substring(0, max) + '…' : s;
 };
+
+
+
+/**
+ * @file Payload.gs (SDC library)
+ * Webhook payload builders. One builder per webhook contract.
+ *
+ * Builders own the wire format (snake_case) and the field-name contract.
+ * Callers pass JS-idiomatic camelCase args; builders translate.
+ *
+ * payload_version is NOT stamped here — Webhook.call owns that invariant.
+ *
+ * Public:
+ *   Payload.provision(args)    → object
+ *   Payload.validate(args)     → object
+ *   Payload.portalInvite(args) → object
+ *
+ * Each builder validates its required args and throws on missing/blank.
+ * Optional fields are normalized (e.g. boolean → 'true'/'false' string).
+ */
+
+var Payload = {};
+
+// --- Provision -------------------------------------------------------
+
+/**
+ * Build the provision webhook payload (R-1 Receive Webhook contract).
+ *
+ * @param {Object} args
+ * @param {string} args.correlationId        - UUID linking the request across systems.
+ * @param {string} args.clientName           - From 1_customer.
+ * @param {string} args.analystEmail         - From 1_customer.
+ * @param {string} args.configFileId         - The workbook's own Drive file ID (ss.getId()).
+ * @param {string} args.configJsonFileId     - The serialized JSON's Drive file ID.
+ * @param {string} [args.targetVms='']       - Optional, from 1_customer.
+ * @param {boolean} [args.separateWorkspace=false] - From 1_customer.
+ * @param {Array}  [args.templateFileIds=[]] - Reserved for future template uploads.
+ * @returns {Object} wire-format payload
+ */
+Payload.provision = function(args) {
+  Payload._requireArgs(args, ['correlationId', 'clientName', 'analystEmail',
+                               'configFileId', 'configJsonFileId'], 'provision');
+
+  return {
+    correlation_id:              args.correlationId,
+    client_name:                 args.clientName,
+    analyst_email:               args.analystEmail,
+    target_vms:                  args.targetVms || '',
+    config_file_id:              args.configFileId,
+    config_json_file_id:         args.configJsonFileId,
+    template_file_ids:           args.templateFileIds || [],
+    separate_workspace_required: Boolean(args.separateWorkspace),
+    timestamp:                   new Date().toISOString()
+  };
+};
+
+// --- Validate --------------------------------------------------------
+
+/**
+ * Build the validate webhook payload.
+ */
+Payload.validate = function(args) {
+  Payload._requireArgs(args, ['correlationId', 'configJsonFileId', 'requesterEmail'],
+                       'validate');
+
+  return {
+    correlation_id:      args.correlationId,
+    config_json_file_id: args.configJsonFileId,
+    requester_email:     args.requesterEmail,
+    timestamp:           new Date().toISOString()
+  };
+};
+
+// --- Portal invite ---------------------------------------------------
+
+/**
+ * Build the portal invite webhook payload.
+ */
+Payload.portalInvite = function(args) {
+  Payload._requireArgs(args, ['correlationId', 'userEmail', 'role'], 'portalInvite');
+
+  return {
+    correlation_id: args.correlationId,
+    user_email:     args.userEmail,
+    contact_name:   args.contactName || '',
+    role:           args.role,
+    timestamp:      new Date().toISOString()
+  };
+};
+
+// --- Private ---------------------------------------------------------
+
+Payload._requireArgs = function(args, required, builderName) {
+  if (!args) {
+    throw new Error('Payload.' + builderName + ': args object is required.');
+  }
+  for (var i = 0; i < required.length; i++) {
+    var k = required[i];
+    var v = args[k];
+    if (v === null || v === undefined || (typeof v === 'string' && v.trim() === '')) {
+      throw new Error('Payload.' + builderName + ': "' + k + '" is required and must be non-empty.');
+    }
+  }
+};
