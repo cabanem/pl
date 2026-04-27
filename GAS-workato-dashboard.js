@@ -496,16 +496,18 @@ Payload._requireArgs = function(args, required, builderName) {
 };
 
 
+
 /**
  * @file Log.gs (SDC library)
  * Reads and writes against the workbook's _script_logs sheet.
  *
- * Schema: Timestamp | Status | User | Message
+ * Schema (v1.0): Timestamp | Status | User | Message | CorrelationId
  * Status values: INFO | SUCCESS | ERROR | WARNING
  *
  * Public:
- *   Log.append(ss, status, message)            → void
- *   Log.getMostRecentCorrelationId(ss)         → string | null
+ *   Log.append(ss, status, message, correlationId)  → void
+ *   Log.getMostRecentCorrelationId(ss)              → string | null
+ *   Log.ensureSchema(ss)                            → void
  *
  * Logging is best-effort: append failures are swallowed and warned to
  * console rather than thrown. The workflow must never fail because the
@@ -514,59 +516,82 @@ Payload._requireArgs = function(args, required, builderName) {
 
 var Log = {};
 
-var LOG_SHEET_NAME    = '_script_logs';
-var LOG_STATUS_COL    = 1;  // 0-indexed
-var LOG_MESSAGE_COL   = 3;
-var CORRELATION_PREFIX = 'Correlation ID: ';
+// --- Schema ---------------------------------------------------------
+var LOG_SHEET_NAME = '_script_logs';
+
+// Column indices (0-based) and headers — single source of truth for the schema.
+var LOG_COL = Object.freeze({
+  TIMESTAMP:      0,
+  STATUS:         1,
+  USER:           2,
+  MESSAGE:        3,
+  CORRELATION_ID: 4
+});
+
+var LOG_HEADERS = Object.freeze([
+  'Timestamp', 'Status', 'User', 'Message', 'Correlation ID'
+]);
 
 var VALID_STATUSES = Object.freeze(new Set(['INFO', 'SUCCESS', 'ERROR', 'WARNING']));
 
-// --- Public API ------------------------------------------------------
+// --- Public API -----------------------------------------------------
 
 /**
  * Append a log entry. Best-effort — missing sheet or write failure is
  * logged to console and swallowed.
  *
+ * Invalid status values are coerced to INFO. The console warning includes
+ * the original value, the calling location (where available), and the
+ * message tail so the typo is easy to find when reviewing execution logs.
+ *
  * @param {Spreadsheet} ss
- * @param {string}      status   - One of INFO | SUCCESS | ERROR | WARNING.
+ * @param {string}      status          - One of INFO | SUCCESS | ERROR | WARNING.
  * @param {string}      message
+ * @param {string}      [correlationId] - Optional; threaded through the run.
  */
-Log.append = function(ss, status, message) {
+Log.append = function(ss, status, message, correlationId) {
   try {
     if (!ss) return;
 
+    var rawStatus        = status;
     var normalizedStatus = String(status || '').toUpperCase();
+
     if (!VALID_STATUSES.has(normalizedStatus)) {
-      console.warn('Log.append: invalid status "' + status + '", coercing to INFO.');
+      var msgTail = String(message || '').substring(0, 80);
+      console.warn(
+        'Log.append: invalid status "' + rawStatus + '" coerced to INFO. ' +
+        'Valid values: INFO | SUCCESS | ERROR | WARNING. ' +
+        'Message starts: "' + msgTail + '". ' +
+        'Fix the calling code to use one of the valid status values.'
+      );
       normalizedStatus = 'INFO';
     }
 
     var logSheet = ss.getSheetByName(LOG_SHEET_NAME);
     if (!logSheet) return;
 
-    var user = '';
+    var user = 'unknown';
     try {
       user = Session.getActiveUser().getEmail() || 'unknown';
     } catch (e) {
-      user = 'unknown';
+      // Identity unavailable in some trigger contexts — fall through.
     }
 
-    logSheet.appendRow([new Date(), normalizedStatus, user, String(message || '')]);
+    logSheet.appendRow([
+      new Date(),
+      normalizedStatus,
+      user,
+      String(message || ''),
+      String(correlationId || '')
+    ]);
   } catch (e) {
     console.warn('Log.append failed: ' + e.message);
   }
 };
 
 /**
- * Scan _script_logs in reverse for the most recent SUCCESS entry whose
- * message contains a correlation ID, and return the ID. Returns null if
- * no match found, the sheet is missing, or any read error occurs.
- *
- * Used by the portal-invite flow to thread the originating provision's
- * correlation ID through to the invite webhook.
- *
- * @param {Spreadsheet} ss
- * @returns {string|null}
+ * Return the most recent correlation ID from a SUCCESS log entry, or null.
+ * Reads the CorrelationId column directly — no message parsing.
  */
 Log.getMostRecentCorrelationId = function(ss) {
   try {
@@ -578,17 +603,142 @@ Log.getMostRecentCorrelationId = function(ss) {
     var data = logSheet.getDataRange().getValues();
 
     for (var i = data.length - 1; i >= 0; i--) {
-      var status  = String(data[i][LOG_STATUS_COL]);
-      var message = String(data[i][LOG_MESSAGE_COL]);
+      var row = data[i];
+      var status        = String(row[LOG_COL.STATUS] || '');
+      var correlationId = String(row[LOG_COL.CORRELATION_ID] || '').trim();
 
-      if (status === 'SUCCESS' && message.indexOf(CORRELATION_PREFIX) !== -1) {
-        return message.split(CORRELATION_PREFIX)[1].trim();
+      if (status === 'SUCCESS' && correlationId !== '') {
+        return correlationId;
       }
     }
-
     return null;
   } catch (e) {
     console.warn('Log.getMostRecentCorrelationId failed: ' + e.message);
     return null;
   }
+};
+
+/**
+ * Self-heal the _script_logs schema. Idempotent. Safe to call from onOpen.
+ *
+ * Behavior:
+ *   - If the sheet doesn't exist, no-op (workbook setup is a different concern).
+ *   - If headers are missing, writes the canonical header row.
+ *   - If the CorrelationId column is missing, appends it.
+ *   - Existing log rows below header are left intact (correlation_id will
+ *     be empty for pre-v1.0 entries; that's expected).
+ */
+Log.ensureSchema = function(ss) {
+  try {
+    if (!ss) return;
+    var logSheet = ss.getSheetByName(LOG_SHEET_NAME);
+    if (!logSheet) return;
+
+    var lastCol = logSheet.getLastColumn();
+    var needed  = LOG_HEADERS.length;
+
+    // Pad columns if the sheet is narrower than the canonical schema.
+    if (lastCol < needed) {
+      var toAdd = needed - lastCol;
+      logSheet.insertColumnsAfter(Math.max(lastCol, 1), toAdd);
+    }
+
+    // Read row 1 (headers). Empty/mismatched → rewrite canonical headers.
+    var headerRange  = logSheet.getRange(1, 1, 1, needed);
+    var currentHeaders = headerRange.getValues()[0].map(function(v) { return String(v).trim(); });
+
+    var needsRewrite = false;
+    for (var i = 0; i < needed; i++) {
+      if (currentHeaders[i] !== LOG_HEADERS[i]) { needsRewrite = true; break; }
+    }
+    if (needsRewrite) {
+      headerRange.setValues([LOG_HEADERS.slice()]);
+      console.log('Log.ensureSchema: wrote canonical headers to ' + LOG_SHEET_NAME);
+    }
+  } catch (e) {
+    console.warn('Log.ensureSchema failed: ' + e.message);
+  }
+};
+
+
+
+/**
+ * @file Util.gs (SDC library)
+ * Small, pure (or near-pure) primitives used across the library and
+ * available to consumers. Nothing here knows about the SDC domain;
+ * if it does, it belongs in a domain namespace.
+ *
+ * Public:
+ *   Util.coerceTruthy(value)            → boolean
+ *   Util.isValidEmailShape(email)       → boolean
+ *   Util.newCorrelationId()             → string
+ *   Util.findValueByLabel(sheet, label) → * | null
+ */
+
+var Util = {};
+
+var TRUTHY_VALUES = Object.freeze(new Set(['true', '1', 'yes']));
+
+/**
+ * Coerce a cell value to boolean. Recognizes native true, and the strings
+ * "true" / "1" / "yes" (case-insensitive, trimmed). Everything else → false.
+ */
+Util.coerceTruthy = function(value) {
+  if (value === true) return true;
+  if (value === false || value === null || value === undefined || value === '') return false;
+  return TRUTHY_VALUES.has(String(value).trim().toLowerCase());
+};
+
+/**
+ * Lightweight email shape validator. Catches blanks, missing @, missing TLD.
+ * Not a full RFC 5322 validator — that's a different problem.
+ */
+Util.isValidEmailShape = function(email) {
+  if (typeof email !== 'string') return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+};
+
+/**
+ * Generate a new correlation ID for tracing a request across the SDC stack.
+ * Currently a UUID; centralized here so future changes (prefixes, traceparent
+ * compatibility, alternate ID schemes) are a single-function update.
+ */
+Util.newCorrelationId = function() {
+  return Utilities.getUuid();
+};
+
+/**
+ * Search a sheet for a label string and return the first non-empty value
+ * found in the up-to-three columns to its right.
+ *
+ * Designed for the 1_customer layout: labels in column B, values in C
+ * (with D/E as fallbacks for two-column-wide value cells or merged cells).
+ *
+ * Treats 0 and false as valid values — only null, undefined, and '' are blank.
+ *
+ * @param {Sheet}  sheet
+ * @param {string} label - Matched case-insensitively after trim.
+ * @returns {*} Value or null.
+ */
+Util.findValueByLabel = function(sheet, label) {
+  if (!sheet || !label) return null;
+
+  var data   = sheet.getDataRange().getValues();
+  var target = String(label).toLowerCase().trim();
+
+  var notBlank = function(v) { return v !== null && v !== undefined && v !== ''; };
+
+  for (var i = 0; i < data.length; i++) {
+    var row = data[i];
+    for (var j = 0; j < row.length; j++) {
+      if (String(row[j]).toLowerCase().trim() === target) {
+        var maxOffset = Math.min(3, row.length - j - 1);
+        for (var k = 1; k <= maxOffset; k++) {
+          if (notBlank(row[j + k])) return row[j + k];
+        }
+        return null;
+      }
+    }
+  }
+  return null;
 };
