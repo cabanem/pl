@@ -1199,3 +1199,623 @@ PrimaryKey._applyProtection = function(sheet, cfg) {
   sheet.hideColumns(pkCol);
   console.log('Protected and hid PK column in "' + cfg.sheetName + '".');
 };
+
+
+/**
+ * @file Migrations.gs (SDC library)
+ * Workbook schema migration framework.
+ *
+ * For v1.0 this is structurally complete but functionally a no-op —
+ * there are no prior schema versions to migrate FROM. The plumbing is
+ * here on purpose so v2.0 can add a real migration step without
+ * retrofitting the framework.
+ *
+ * How it works:
+ *   - The chain is a list of {from, to, run} entries, ordered.
+ *   - Migrations.run walks the chain from the workbook's current schema
+ *     to SDC_SCHEMA_VERSION, applying each step in turn.
+ *   - Each step's run(ss) function does the structural work (rename a
+ *     sheet, add a column, rewrite a setting) and returns a summary.
+ *   - On success, schema_version in _developer_settings is bumped.
+ *   - On dryRun, the chain is reported but no changes are written.
+ *
+ * Container shim:
+ *   onOpen detects a schema mismatch via Migrations.isMigrationNeeded(ss)
+ *   and adds a "Migrate workbook schema" menu item that calls
+ *   Migrations.run(ss). Workbooks self-detect the upgrade prompt; no
+ *   manual coordination across N workbooks.
+ *
+ * Public:
+ *   Migrations.run(ss, options)        → { ok, fromVersion, toVersion, applied, skipped, message }
+ *   Migrations.isMigrationNeeded(ss)   → boolean
+ *   Migrations.currentWorkbookVersion(ss) → string
+ */
+
+var Migrations = {};
+
+// --- Migration chain -------------------------------------------------
+
+/**
+ * Ordered list of migration steps. Each step:
+ *   - from:    schema version this step migrates FROM (e.g., '1.0')
+ *   - to:      schema version this step migrates TO   (e.g., '1.1')
+ *   - run(ss): performs the migration. Returns { changed: [...], notes: [...] }.
+ *              Throws on unrecoverable failure.
+ *
+ * Empty for v1.0 — there is nothing to migrate from. Future entries
+ * land here in chronological order. Migrations.run walks them in order
+ * to compose multi-step upgrades (e.g., 1.0 → 1.1 → 2.0).
+ */
+var MIGRATION_CHAIN = [
+  // No migrations defined yet. v1.0 is the baseline.
+  //
+  // Example future shape (do not uncomment until needed):
+  //
+  // {
+  //   from: '1.0',
+  //   to:   '1.1',
+  //   run:  function(ss) {
+  //     // Add a new structural sheet, rewrite a setting, etc.
+  //     return { changed: ['Added _new_structural_sheet'], notes: [] };
+  //   }
+  // }
+];
+
+// --- Public API ------------------------------------------------------
+
+/**
+ * Run all applicable migrations to bring the workbook to SDC_SCHEMA_VERSION.
+ *
+ * @param {Spreadsheet} ss
+ * @param {Object}      [options]
+ * @param {boolean}     [options.dryRun=false] - When true, report the chain
+ *                                                that would run but make no changes.
+ * @returns {{
+ *   ok: boolean,
+ *   fromVersion: string,
+ *   toVersion: string,
+ *   applied: Array<{from: string, to: string, changed: string[], notes: string[]}>,
+ *   skipped: Array<{from: string, to: string, reason: string}>,
+ *   message: string
+ * }}
+ */
+Migrations.run = function(ss, options) {
+  if (!ss) throw new Error('Migrations.run: ss is required.');
+  var opts   = options || {};
+  var dryRun = Boolean(opts.dryRun);
+
+  var fromVersion = Migrations.currentWorkbookVersion(ss);
+  var toVersion   = SDC_SCHEMA_VERSION;
+
+  var applied = [];
+  var skipped = [];
+
+  // Build the path: every chain entry whose `from` >= current workbook
+  // version, in order, terminating when we reach SDC_SCHEMA_VERSION.
+  var path = Migrations._planPath(fromVersion, toVersion);
+
+  if (path.length === 0) {
+    return {
+      ok:          true,
+      fromVersion: fromVersion,
+      toVersion:   toVersion,
+      applied:     [],
+      skipped:     [],
+      message:     fromVersion === toVersion
+        ? 'Workbook is already at schema v' + toVersion + '. No migration needed.'
+        : 'No migration path from v' + fromVersion + ' to v' + toVersion +
+          '. Workbook may need manual remediation or a newer library version.'
+    };
+  }
+
+  // Apply each step in order.
+  for (var i = 0; i < path.length; i++) {
+    var step = path[i];
+
+    if (dryRun) {
+      applied.push({
+        from:    step.from,
+        to:      step.to,
+        changed: ['(dry run — not executed)'],
+        notes:   []
+      });
+      continue;
+    }
+
+    try {
+      var result = step.run(ss);
+      applied.push({
+        from:    step.from,
+        to:      step.to,
+        changed: (result && result.changed) || [],
+        notes:   (result && result.notes)   || []
+      });
+      Migrations._stampSchemaVersion(ss, step.to);
+    } catch (e) {
+      skipped.push({
+        from:   step.from,
+        to:     step.to,
+        reason: e.message
+      });
+      // Stop the chain on first failure — partial migration is worse
+      // than no migration. The schema_version reflects whatever was
+      // last successfully applied.
+      break;
+    }
+  }
+
+  var ok = skipped.length === 0;
+  return {
+    ok:          ok,
+    fromVersion: fromVersion,
+    toVersion:   ok ? toVersion : Migrations.currentWorkbookVersion(ss),
+    applied:     applied,
+    skipped:     skipped,
+    message:     Migrations._buildMessage(fromVersion, toVersion, applied, skipped, dryRun)
+  };
+};
+
+/**
+ * Returns true when the workbook's declared schema version differs from
+ * the library's expected major version. Cheap — used by onOpen to decide
+ * whether to surface the migration menu item.
+ */
+Migrations.isMigrationNeeded = function(ss) {
+  try {
+    if (!ss) return false;
+    var workbookVersion = Migrations.currentWorkbookVersion(ss);
+    var wMajor = parseInt(String(workbookVersion).split('.')[0], 10);
+    var lMajor = parseInt(String(SDC_SCHEMA_VERSION).split('.')[0], 10);
+    return wMajor !== lMajor || workbookVersion !== SDC_SCHEMA_VERSION;
+  } catch (e) {
+    // If we can't read the version (e.g., _developer_settings missing),
+    // don't surface the migration menu — the workbook has bigger problems
+    // and Config.build will fail loudly with a clearer message.
+    return false;
+  }
+};
+
+/**
+ * Read the workbook's declared schema version from _developer_settings.
+ * Defaults to '1.0' when the meta.schema_version row is absent — this
+ * matches Config.build's behavior so pre-v1.0 workbooks (which don't
+ * declare a version) are treated as v1.0.
+ */
+Migrations.currentWorkbookVersion = function(ss) {
+  if (!ss) throw new Error('Migrations.currentWorkbookVersion: ss is required.');
+
+  var devSheet = ss.getSheetByName('_developer_settings');
+  if (!devSheet) {
+    throw new Error("'_developer_settings' tab is missing from the workbook.");
+  }
+
+  var data = devSheet.getDataRange().getValues();
+  var row  = data.find(function(r) { return r[1] === 'meta' && r[2] === 'schema_version'; });
+  return row ? String(row[3]) : '1.0';
+};
+
+// --- Private helpers -------------------------------------------------
+
+/**
+ * Walk the chain from `fromVersion` to `toVersion`, returning the ordered
+ * subset of MIGRATION_CHAIN entries that compose the path. Returns []
+ * if no path exists or none is needed.
+ */
+Migrations._planPath = function(fromVersion, toVersion) {
+  if (fromVersion === toVersion) return [];
+
+  var path    = [];
+  var current = fromVersion;
+
+  // Up to MIGRATION_CHAIN.length hops — guards against malformed chains
+  // creating infinite loops if from/to entries are misordered.
+  for (var hop = 0; hop < MIGRATION_CHAIN.length + 1; hop++) {
+    if (current === toVersion) return path;
+
+    var next = MIGRATION_CHAIN.find(function(step) { return step.from === current; });
+    if (!next) return [];   // no path forward from `current`
+
+    path.push(next);
+    current = next.to;
+  }
+
+  // Reached hop limit without converging on toVersion — chain is malformed
+  // or doesn't lead to the library's expected version.
+  return [];
+};
+
+/**
+ * Write the new schema_version into _developer_settings. Adds the row
+ * if missing, updates it in place if present.
+ */
+Migrations._stampSchemaVersion = function(ss, version) {
+  var devSheet = ss.getSheetByName('_developer_settings');
+  if (!devSheet) {
+    throw new Error("Cannot stamp schema_version: '_developer_settings' is missing.");
+  }
+
+  var data = devSheet.getDataRange().getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][1] === 'meta' && data[i][2] === 'schema_version') {
+      // Row index is 0-based in `data`, 1-based in setRange — and column 4
+      // (the value column) is index 3 in the array, column 4 in the sheet.
+      devSheet.getRange(i + 1, 4).setValue(version);
+      return;
+    }
+  }
+
+  // Not found — append it. Column layout matches the existing developer
+  // settings convention: A=description (optional), B=category, C=key, D=value.
+  devSheet.appendRow(['', 'meta', 'schema_version', version]);
+};
+
+Migrations._buildMessage = function(fromVersion, toVersion, applied, skipped, dryRun) {
+  var lines = [];
+  lines.push((dryRun ? 'DRY RUN — ' : '') +
+             'Schema migration: v' + fromVersion + ' → v' + toVersion);
+
+  if (applied.length > 0) {
+    lines.push('');
+    lines.push('Applied:');
+    applied.forEach(function(a) {
+      lines.push('  v' + a.from + ' → v' + a.to);
+      a.changed.forEach(function(c) { lines.push('    • ' + c); });
+    });
+  }
+
+  if (skipped.length > 0) {
+    lines.push('');
+    lines.push('Skipped (chain stopped at first failure):');
+    skipped.forEach(function(s) {
+      lines.push('  v' + s.from + ' → v' + s.to + ': ' + s.reason);
+    });
+  }
+
+  if (applied.length === 0 && skipped.length === 0) {
+    lines.push('');
+    lines.push('No migration steps to apply.');
+  }
+
+  return lines.join('\n');
+};
+
+
+/**
+ * @file Version.gs (SDC library)
+ * Version constants for the SDC library. Single source of truth for
+ * all three version axes:
+ *
+ *   LIBRARY — semver of the library code itself. Bumps on any release.
+ *   PAYLOAD — webhook contract version. Bumps when payload SHAPE changes
+ *             (renames, type changes). Stamped onto every webhook by
+ *             Webhook.call. R-1 reads this to handshake.
+ *   SCHEMA  — workbook schema version the library expects. Bumps when
+ *             the structural shape of the workbook changes (sheets,
+ *             columns, label strings). Migrations.run reconciles
+ *             workbooks to this version.
+ *
+ * These three axes version independently. A library bump is not a
+ * payload bump is not a schema bump.
+ *
+ * Consumer access: SDC.Version.LIBRARY, SDC.Version.PAYLOAD, SDC.Version.SCHEMA
+ * Library-internal access: SDC_LIBRARY_VERSION, SDC_PAYLOAD_VERSION, SDC_SCHEMA_VERSION
+ *
+ * Both forms point at the same value; the bare aliases exist because
+ * library-internal code reads them in lots of places and SDC.Version.X
+ * is awkward when you're already inside the library.
+ */
+
+var Version = Object.freeze({
+  LIBRARY: '1.0.0',
+  PAYLOAD: '1.0',
+  SCHEMA:  '1.0'
+});
+
+// Library-internal aliases — used by Config, Drive, Webhook, Migrations.
+var SDC_LIBRARY_VERSION = Version.LIBRARY;
+var SDC_PAYLOAD_VERSION = Version.PAYLOAD;
+var SDC_SCHEMA_VERSION  = Version.SCHEMA;
+
+
+/**
+ * @file Validate.gs (SDC library)
+ * Validate orchestrator — the "Validate configuration" flow.
+ *
+ * Pipeline (mirrors provision through serialization, then diverges):
+ *   Config.build → Preflight.run(requireCustomerData: false) →
+ *   PrimaryKey.backfill → Drive.serializeConfig('validate') →
+ *   Drive.shareWithIntegrationAccount → Payload.validate →
+ *   Webhook.call (returns parsed validation result)
+ *
+ * Differs from provision in three ways:
+ *   1. Customer-data preflight is skipped (validation does not require
+ *      a complete 1_customer; it can sanity-check a partial config).
+ *   2. Audit-share to authorizedEditors is skipped (validate files are
+ *      transient debug artifacts, not the production source of truth).
+ *   3. The webhook returns a parsed JSON body which is surfaced via
+ *      Result.data so the container can render it in the modal dialog.
+ *
+ * Note: this flow stamps PKs into the workbook (PrimaryKey.backfill
+ * writes to the sheet). That mutation is documented in the success
+ * message so users running validate know any unstamped IDs were filled
+ * in as part of the check.
+ *
+ * Public:
+ *   Validate.run(ss) → Result
+ */
+
+var Validate = {};
+
+Validate.run = function(ss) {
+  if (!ss) throw new Error('Validate.run: ss is required.');
+
+  var correlationId = Util.newCorrelationId();
+  var log = function(status, msg) { Log.append(ss, status, msg, correlationId); };
+
+  log('INFO', 'Starting validation...');
+
+  try {
+    var config = Validate._stage('config', function() {
+      return Config.build(ss);
+    });
+
+    var pf = Validate._stage('preflight', function() {
+      return Preflight.run(ss, config, {
+        webhookUrl:          config.webhook.validateUrl,
+        webhookLabel:        'validateUrl',
+        requireCustomerData: false
+      });
+    });
+
+    var pkResult = Validate._stage('primary-key-backfill', function() {
+      return PrimaryKey.backfill(ss);
+    });
+    if (pkResult.totalStamped > 0) {
+      log('INFO', 'Stamped ' + pkResult.totalStamped + ' new field IDs across ' +
+                  Object.keys(pkResult.stamped).filter(function(k) {
+                    return pkResult.stamped[k] > 0;
+                  }).join(', ') + '.');
+    }
+
+    var configJsonFileId = Validate._stage('serialize', function() {
+      return Drive.serializeConfig(ss, config, { purpose: 'validate' });
+    });
+    log('INFO', 'Validate config serialized. File ID: ' + configJsonFileId);
+
+    Validate._stage('share-with-workato', function() {
+      Drive.shareWithIntegrationAccount(configJsonFileId, pf.integrationAccountEmail);
+    });
+
+    // Note: shareWithEditors deliberately skipped — validate files are
+    // transient and don't need audit-share distribution.
+
+    var requesterEmail = '';
+    try {
+      requesterEmail = Session.getActiveUser().getEmail() || 'unknown';
+    } catch (e) {
+      requesterEmail = 'unknown';
+    }
+
+    var payload = Payload.validate({
+      correlationId:    correlationId,
+      configJsonFileId: configJsonFileId,
+      requesterEmail:   requesterEmail
+    });
+
+    var response = Validate._stage('webhook', function() {
+      return Webhook.call(config.webhook.validateUrl, payload);
+    });
+
+    if (!response.parsed) {
+      var err = new Error('Validation webhook returned a non-JSON body: ' +
+                          String(response.body || '').substring(0, 200));
+      err.stage = 'webhook-response';
+      throw err;
+    }
+
+    log('SUCCESS', 'Validation complete. Returned: ' + JSON.stringify(response.parsed).substring(0, 200));
+
+    return Validate._success(correlationId, configJsonFileId, pkResult, response.parsed);
+  } catch (e) {
+    var stage = e.stage || 'unknown';
+    log('ERROR', 'Validation failed at ' + stage + ': ' + e.message);
+    return Validate._failure(correlationId, stage, e);
+  }
+};
+
+// --- Private helpers -------------------------------------------------
+
+Validate._stage = function(stageName, fn) {
+  try {
+    return fn();
+  } catch (e) {
+    if (!e.stage) e.stage = stageName;
+    throw e;
+  }
+};
+
+Validate._success = function(correlationId, configJsonFileId, pkResult, validationResult) {
+  var stampNote = '';
+  if (pkResult.totalStamped > 0) {
+    stampNote = '\n\nNote: ' + pkResult.totalStamped + ' unstamped field ID(s) were ' +
+                'filled in as part of this check.';
+  }
+
+  return {
+    ok:            true,
+    flow:          'validate',
+    correlationId: correlationId,
+    message:       'Validation complete.' + stampNote,
+    data: {
+      configJsonFileId: configJsonFileId,
+      stampedRows:      pkResult.totalStamped,
+      validationResult: validationResult
+    },
+    error: null
+  };
+};
+
+Validate._failure = function(correlationId, stage, error) {
+  return {
+    ok:            false,
+    flow:          'validate',
+    correlationId: correlationId,
+    message:       'Validation failed at ' + stage + ':\n\n' + error.message,
+    data:          null,
+    error: {
+      stage:   stage,
+      message: error.message
+    }
+  };
+};
+
+/**
+ * @file Portal.gs (SDC library)
+ * Portal-invite orchestrator — the "Request portal access" flow.
+ *
+ * Slim by design. Does not serialize config or touch Drive. Recovers
+ * the most recent SUCCESS correlation ID from _script_logs so the
+ * invite can be tied back to its originating provision in Workato.
+ *
+ * Pipeline:
+ *   Config.build → Portal._preflight → Log.getMostRecentCorrelationId →
+ *   Payload.portalInvite → Webhook.call
+ *
+ * Uses an ad-hoc preflight (Portal._preflight) instead of Preflight.run.
+ * Preflight.run is "can I serialize and ship config?" — Portal isn't
+ * doing that, and the checks differ in kind (no connector sheet
+ * verification, no integration account share verification).
+ *
+ * The correlation ID for THIS invite is reused from the originating
+ * provision — invites carry the provision's correlation ID, not a
+ * fresh one. That's intentional: the whole point of the invite is to
+ * reference the provision it follows.
+ *
+ * Public:
+ *   Portal.run(ss) → Result
+ */
+
+var Portal = {};
+
+Portal.run = function(ss) {
+  if (!ss) throw new Error('Portal.run: ss is required.');
+
+  // Recover the originating provision's correlation ID up-front.
+  // If absent, the rest of the flow is moot; fail fast with a clear message.
+  var correlationId = Log.getMostRecentCorrelationId(ss);
+
+  // We still need SOME ID for the failure log path (when correlationId
+  // is null). Use a fresh one for that purpose only — it won't end up
+  // in any payload because we'll fail before constructing one.
+  var logCorrelationId = correlationId || Util.newCorrelationId();
+  var log = function(status, msg) { Log.append(ss, status, msg, logCorrelationId); };
+
+  log('INFO', 'Starting portal invite...');
+
+  try {
+    var config = Portal._stage('config', function() {
+      return Config.build(ss);
+    });
+
+    Portal._stage('preflight', function() {
+      Portal._preflight(config);
+    });
+
+    if (!correlationId) {
+      var err = new Error(
+        'No completed workspace initialization found in _script_logs. ' +
+        'Run "Start supplier data collection" first.'
+      );
+      err.stage = 'correlation-lookup';
+      throw err;
+    }
+
+    var userEmail = '';
+    try {
+      userEmail = Session.getActiveUser().getEmail();
+    } catch (e) {
+      // Falls through to the empty-string check below.
+    }
+    if (!userEmail) {
+      var emailErr = new Error(
+        'Could not resolve your email address. Ensure you are signed in with a Google account.'
+      );
+      emailErr.stage = 'identity';
+      throw emailErr;
+    }
+
+    var payload = Payload.portalInvite({
+      correlationId: correlationId,   // reused from originating provision
+      userEmail:     userEmail,
+      role:          'analyst'
+    });
+
+    Portal._stage('webhook', function() {
+      return Webhook.call(config.webhook.portalInviteUrl, payload);
+    });
+
+    log('INFO', 'Portal invite sent for: ' + userEmail);
+
+    return Portal._success(correlationId, userEmail);
+  } catch (e) {
+    var stage = e.stage || 'unknown';
+    log('ERROR', 'Portal invite failed at ' + stage + ': ' + e.message);
+    return Portal._failure(logCorrelationId, stage, e);
+  }
+};
+
+// --- Private helpers -------------------------------------------------
+
+/**
+ * Ad-hoc preflight for the portal-invite flow. Lighter than Preflight.run
+ * because we are not serializing config or sharing files — we just need
+ * the portal-invite webhook URL configured.
+ *
+ * Throws on first failure with a stage-tagged Error.
+ */
+Portal._preflight = function(config) {
+  if (!config.webhook.portalInviteUrl) {
+    var err = new Error(
+      'Portal invite URL not configured. ' +
+      'Check _developer_settings → webhook.portalInviteUrl.'
+    );
+    err.stage = 'preflight';
+    throw err;
+  }
+};
+
+Portal._stage = function(stageName, fn) {
+  try {
+    return fn();
+  } catch (e) {
+    if (!e.stage) e.stage = stageName;
+    throw e;
+  }
+};
+
+Portal._success = function(correlationId, userEmail) {
+  return {
+    ok:            true,
+    flow:          'portalInvite',
+    correlationId: correlationId,
+    message:       'Portal access request sent for:\n' + userEmail,
+    data: {
+      userEmail: userEmail
+    },
+    error: null
+  };
+};
+
+Portal._failure = function(correlationId, stage, error) {
+  return {
+    ok:            false,
+    flow:          'portalInvite',
+    correlationId: correlationId,
+    message:       'Portal invite failed at ' + stage + ':\n\n' + error.message,
+    data:          null,
+    error: {
+      stage:   stage,
+      message: error.message
+    }
+  };
+};
