@@ -20,6 +20,9 @@
  *                        ++ bug fixes: VALIDATE_FILE_PREFIX defined,
  *                        getSheetByName(name) arg restored, UrlFetchApp.fetch,
  *                        getContentText() parens.
+ * @modified 2026-04-27  ++ extracted runPreflight_ helper; consolidated
+ *                        repeated alert+log+return blocks across
+ *                        initializeOrUpdateWorkspace and validateConfiguration.
  */
 
 
@@ -184,54 +187,25 @@ function initializeOrUpdateWorkspace() {
 
   appendLog('INFO', 'Starting workspace initialization…');
 
-  // Preflight: verify all connector sheets exist
-  const missing = [...CONNECTOR_SHEETS].filter(name => !ss.getSheetByName(name));
-  if (missing.length > 0) {
-    const msg = 'Missing required sheets: ' + missing.join(', ');
-    appendLog('ERROR', msg);
-    ui.alert('Error', msg, ui.ButtonSet.OK);
+  let pf;
+  try {
+    pf = runPreflight_(CONFIG, {
+      webhookUrl:          CONFIG.webhook.url,
+      webhookLabel:        'fileExportUrl',
+      requireCustomerData: true
+    });
+  } catch (e) {
+    appendLog('ERROR', e.message);
+    ui.alert('Error', e.message, ui.ButtonSet.OK);
     return;
   }
 
-  // Validate prerequisites
-  const customerSheet = ss.getSheetByName(CONFIG.sheets.customer);
-  if (!customerSheet) {
-    const msg = `Sheet "${CONFIG.sheets.customer}" not found.`;
-    appendLog('ERROR', msg);
-    ui.alert('Error', msg, ui.ButtonSet.OK);
-    return;
-  }
-
-  const webhookUrl = CONFIG.webhook.url;
-  if (!webhookUrl) {
-    const msg = 'Webhook URL not configured. Check _developer_settings → webhook.fileExportUrl.';
-    appendLog('ERROR', msg);
-    ui.alert('Error', msg, ui.ButtonSet.OK);
-    return;
-  }
-
-  const workatoOAuthEmail = CONFIG.sharing.workatoOAuthEmail;
-  if (!workatoOAuthEmail || !isValidEmailShape_(workatoOAuthEmail)) {
-    const msg = 'Workato OAuth account email is missing or malformed. ' +
-                'Check _developer_settings → sharing.workatoOAuthEmail. ' +
-                'This is the corporate mailbox Workato authenticates as — without it, ' +
-                'Workato cannot read the config file.';
-    appendLog('ERROR', msg);
-    ui.alert('Error', msg, ui.ButtonSet.OK);
-    return;
-  }
-
-  const clientName        = findValueByLabel(customerSheet, CONFIG.labels.customerName);
-  const analystEmail      = findValueByLabel(customerSheet, CONFIG.labels.analystEmail);
-  const targetVms         = findValueByLabel(customerSheet, CONFIG.labels.targetVMS);
-  const separateWorkspace = findValueByLabel(customerSheet, CONFIG.labels.separateWorkspace);
-
-  if (!clientName || !analystEmail) {
-    const msg = 'Customer name and analyst email are required in the 1_customer tab.';
-    appendLog('ERROR', msg);
-    ui.alert('Error', msg, ui.ButtonSet.OK);
-    return;
-  }
+  const webhookUrl        = CONFIG.webhook.url;
+  const workatoOAuthEmail = pf.workatoOAuthEmail;
+  const clientName        = pf.clientName;
+  const analystEmail      = pf.analystEmail;
+  const targetVms         = pf.targetVms;
+  const separateWorkspace = pf.separateWorkspace;
 
   //  1: Serialize config to Drive
   ss.toast('Serializing configuration…', 'Status');
@@ -720,33 +694,20 @@ function validateConfiguration() {
 
   appendLog('INFO', 'Starting validation...');
 
-  // Preflight check: verify all connector sheets exist
-  const missing = [...CONNECTOR_SHEETS].filter(name => !ss.getSheetByName(name));
-  if (missing.length > 0) {
-    const msg = 'Missing required sheets: ' + missing.join(', ');
-    appendLog('ERROR', msg);
-    ui.alert('Error', msg, ui.ButtonSet.OK);
+  let pf;
+  try {
+    pf = runPreflight_(CONFIG, {
+      webhookUrl:   CONFIG.webhook.validateUrl,
+      webhookLabel: 'validateUrl'
+    });
+  } catch (e) {
+    appendLog('ERROR', e.message);
+    ui.alert('Error', e.message, ui.ButtonSet.OK);
     return;
   }
 
   const validateWebhookUrl = CONFIG.webhook.validateUrl;
-  if (!validateWebhookUrl) {
-    ui.alert(
-      'Error',
-      'Validation webhook URL not configured.\nCheck _developer_settings → webhook.validateUrl.',
-      ui.ButtonSet.OK
-    );
-    return;
-  }
-
-  const workatoOAuthEmail = CONFIG.sharing.workatoOAuthEmail;
-  if (!workatoOAuthEmail || !isValidEmailShape_(workatoOAuthEmail)) {
-    const msg = 'Workato OAuth account email is missing or malformed. ' +
-                'Check _developer_settings → sharing.workatoOAuthEmail.';
-    appendLog('ERROR', msg);
-    ui.alert('Error', msg, ui.ButtonSet.OK);
-    return;
-  }
+  const workatoOAuthEmail  = pf.workatoOAuthEmail;
 
   // 1. Serialize to Drive (persist w/validate-only naming)
   ss.toast('Validating configuration...', 'Status');
@@ -873,6 +834,85 @@ function findValueByLabel(sheet, label) {
     }
   }
   return null;
+}
+
+/**
+ * Runs the common preflight checks for any flow that serializes config and
+ * hands it to Workato. Throws on the first failure with a user-facing
+ * message; returns resolved data on success.
+ *
+ * Throw-on-failure (rather than alert-and-return) keeps the contract
+ * consistent with resolveDestinationFolder_ and shareFileWithIntegrationAccount_,
+ * and lets each orchestrator handle UI/logging in one place via a single
+ * try/catch.
+ *
+ * Checks performed:
+ *   1. All CONNECTOR_SHEETS exist in the workbook.
+ *   2. The customer sheet (per CONFIG.sheets.customer) is present.
+ *   3. The supplied webhook URL is non-empty.
+ *   4. CONFIG.sharing.workatoOAuthEmail is present and email-shaped.
+ *   5. (Optional) Customer name and analyst email are populated in 1_customer.
+ *
+ * @param {Object} CONFIG - Output of buildConfig().
+ * @param {Object} options
+ * @param {string} options.webhookUrl   - The webhook URL value to validate (caller resolves).
+ * @param {string} options.webhookLabel - User-facing _developer_settings key for error messages
+ *                                        (e.g. 'fileExportUrl', 'validateUrl').
+ * @param {boolean} [options.requireCustomerData=false] - When true, also pull and validate
+ *                                                        customer fields from 1_customer.
+ * @returns {Object} { customerSheet, workatoOAuthEmail, [clientName, analystEmail,
+ *                     targetVms, separateWorkspace] }
+ * @throws  Error with a user-facing message on any preflight failure.
+ * @private
+ */
+function runPreflight_(CONFIG, options) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // 1. All connector sheets present
+  const missing = [...CONNECTOR_SHEETS].filter(name => !ss.getSheetByName(name));
+  if (missing.length > 0) {
+    throw new Error('Missing required sheets: ' + missing.join(', '));
+  }
+
+  // 2. Customer sheet present
+  const customerSheet = ss.getSheetByName(CONFIG.sheets.customer);
+  if (!customerSheet) {
+    throw new Error(`Sheet "${CONFIG.sheets.customer}" not found.`);
+  }
+
+  // 3. Webhook URL configured
+  if (!options.webhookUrl) {
+    throw new Error(
+      `Webhook URL not configured. Check _developer_settings → webhook.${options.webhookLabel}.`
+    );
+  }
+
+  // 4. Workato OAuth account email present and well-formed
+  const workatoOAuthEmail = CONFIG.sharing.workatoOAuthEmail;
+  if (!workatoOAuthEmail || !isValidEmailShape_(workatoOAuthEmail)) {
+    throw new Error(
+      'Workato OAuth account email is missing or malformed. ' +
+      'Check _developer_settings → sharing.workatoOAuthEmail. ' +
+      'Workato cannot read the config file without this share.'
+    );
+  }
+
+  // 5. Optional: customer data fields (provision path only)
+  let customerData = {};
+  if (options.requireCustomerData) {
+    customerData = {
+      clientName:        findValueByLabel(customerSheet, CONFIG.labels.customerName),
+      analystEmail:      findValueByLabel(customerSheet, CONFIG.labels.analystEmail),
+      targetVms:         findValueByLabel(customerSheet, CONFIG.labels.targetVMS),
+      separateWorkspace: findValueByLabel(customerSheet, CONFIG.labels.separateWorkspace)
+    };
+
+    if (!customerData.clientName || !customerData.analystEmail) {
+      throw new Error('Customer name and analyst email are required in the 1_customer tab.');
+    }
+  }
+
+  return Object.assign({ customerSheet, workatoOAuthEmail }, customerData);
 }
 
 
