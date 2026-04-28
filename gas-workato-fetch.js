@@ -1,180 +1,246 @@
 /**
- * Recipe sync — writes metadata to a Sheet, structured JSON to Drive.
+ * Recipe trimmer — context_reduction profile v0.1
  *
- * Designed as a container-bound script attached to a Google Sheet. The
- * active spreadsheet is the index; Drive holds the canonicalized recipe
- * code so it stays diffable.
+ * Pure function over the structured recipe shape returned by
+ * getStructuredRecipes({ includeCode: true }). No I/O. Does not mutate
+ * the input. Output is the same recursive structure with fields removed
+ * per the profile in trim_profile_spec.md.
  *
- * Setup (one-time):
- *   1. Set Script Properties:
- *        WORKATO_API_TOKEN
- *        WORKATO_BASE_URL          (optional; defaults to EU)
- *        RECIPE_DRIVE_FOLDER_ID    (folder where JSON files are written)
- *   2. Add this file plus workato_recipes.js and canonical_hash.js to the
- *      script project.
- *   3. Reload the sheet to pick up the custom menu.
+ * Composition (recommended order):
+ *
+ *     const recipes = getStructuredRecipes({ includeCode: true });
+ *     const trimmed = recipes.map(trimRecipe);
+ *     const canonical = trimmed.map(canonicalize);
+ *     const cacheKey = canonicalHash({
+ *       profile: TRIM_PROFILE.version,
+ *       code:    canonical[i].code
+ *     });
+ *
+ * Trim before canonicalize: canonicalization is cheaper on smaller trees.
+ * Hash includes the profile version so v0.1 and v0.2 outputs don't collide.
  */
 
-const RECIPE_SHEET_NAME = 'Recipes';
-const RECIPE_HEADERS = [
-  'id',
-  'name',
-  'folder_id',
-  'running',
-  'trigger_application',
-  'action_applications',
-  'step_count',
-  'logical_hash',
-  'last_run_at',
-  'updated_at',
-  'last_synced_at',
-  'workato_link',
-  'json_file'
-];
+
+/* -------------------------------------------------------------------------- */
+/* Profile config — the single edit surface for v0.1 → v0.2 tuning            */
+/* -------------------------------------------------------------------------- */
+
+const TRIM_PROFILE = {
+  version: '0.1',
+
+  // Top-level recipe envelope keys to strip.
+  envelopeStrip: [
+    'user_id',
+    'copy_count',
+    'webhook_url',
+    'webhook_subscribe_url',
+    'lifetime_task_count',
+    'last_run_at',
+    'job_succeeded_count',
+    'job_failed_count',
+    'parameters_count',
+    'created_at',
+    'updated_at',
+    'config'   // see spec note; default-strip, override per-call if needed
+  ],
+
+  // Step-node keys to strip wherever they appear in the code tree.
+  stepStrip: [
+    'as',
+    'uuid',
+    'recipe_step_uuid',
+    'unfinished',
+    'extended_input_schema',
+    'extended_output_schema',
+    'dynamic_pick_list_selection',
+    'dynamicPickListSelection',
+    'visible_config_fields',
+    'hidden_config_fields',
+    'toggle_cfg',
+    'toggleCfg'
+  ]
+};
+
+// Datapills are leaves. Pattern matches strings like "#{_dp('data.x.y')}".
+const DATAPILL_PATTERN = /^#\{_dp\(.*\)\}$/;
+
+// Auto-generated default descriptions to drop ("Step 1", "Step 23", ...).
+const AUTO_DESCRIPTION_PATTERN = /^Step\s+\d+$/;
 
 
 /* -------------------------------------------------------------------------- */
-/* Menu                                                                       */
+/* Public API                                                                 */
 /* -------------------------------------------------------------------------- */
-
-function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu('Workato')
-    .addItem('Sync recipes (metadata only)', 'syncRecipesMetadata')
-    .addItem('Sync recipes (full structure)', 'syncRecipesFull')
-    .addToUi();
-}
-
-
-/* -------------------------------------------------------------------------- */
-/* Entry points                                                               */
-/* -------------------------------------------------------------------------- */
-
-/** Fast: metadata only, no per-recipe detail calls, no Drive writes. */
-function syncRecipesMetadata() {
-  const recipes = getStructuredRecipes(); // from workato_recipes.js
-  writeSheet_(recipes, /* withCode */ false);
-}
-
-/** Full: detail call per recipe, canonical JSON written to Drive, hashes in sheet. */
-function syncRecipesFull() {
-  const recipes = getStructuredRecipes({ includeCode: true });
-  writeSheet_(recipes, /* withCode */ true);
-}
-
-
-/* -------------------------------------------------------------------------- */
-/* Sheet writer                                                               */
-/* -------------------------------------------------------------------------- */
-
-function writeSheet_(recipes, withCode) {
-  const ss    = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(RECIPE_SHEET_NAME) || ss.insertSheet(RECIPE_SHEET_NAME);
-  const baseUrl = (PropertiesService.getScriptProperties().getProperty('WORKATO_BASE_URL')
-                   || 'https://app.eu.workato.com').replace(/\/$/, '');
-
-  const folder  = withCode ? getOrThrowDriveFolder_() : null;
-  const now     = new Date();
-
-  const rows = recipes.map(function (r) {
-    let stepCount    = '';
-    let logicalHash  = '';
-    let jsonFileLink = '';
-
-    if (withCode && r.code) {
-      stepCount   = countSteps_(r.code);
-      logicalHash = recipeLogicalHash(r.code); // from canonical_hash.js
-      const file  = writeRecipeJsonFile_(folder, r);
-      jsonFileLink = `=HYPERLINK("${file.getUrl()}","${file.getName()}")`;
-    }
-
-    const workatoLink = `=HYPERLINK("${baseUrl}/recipes/${r.id}","open in Workato")`;
-
-    return [
-      r.id,
-      r.name,
-      r.folder_id,
-      r.running,
-      r.trigger_application || '',
-      (r.action_applications || []).join(', '),
-      stepCount,
-      logicalHash,
-      r.last_run_at || '',
-      r.updated_at || '',
-      now,
-      workatoLink,
-      jsonFileLink
-    ];
-  });
-
-  // Reset and write everything in two range calls (fast).
-  sheet.clear();
-  sheet.getRange(1, 1, 1, RECIPE_HEADERS.length).setValues([RECIPE_HEADERS])
-       .setFontWeight('bold');
-
-  if (rows.length) {
-    sheet.getRange(2, 1, rows.length, RECIPE_HEADERS.length).setValues(rows);
-  }
-  sheet.setFrozenRows(1);
-  sheet.autoResizeColumns(1, RECIPE_HEADERS.length);
-
-  SpreadsheetApp.getActive().toast(
-    `Synced ${rows.length} recipes${withCode ? ' (with code)' : ''}`,
-    'Workato sync',
-    5
-  );
-}
-
-
-/* -------------------------------------------------------------------------- */
-/* Drive writer                                                               */
-/* -------------------------------------------------------------------------- */
-
-function getOrThrowDriveFolder_() {
-  const id = PropertiesService.getScriptProperties().getProperty('RECIPE_DRIVE_FOLDER_ID');
-  if (!id) {
-    throw new Error('Set RECIPE_DRIVE_FOLDER_ID in Script Properties before running a full sync.');
-  }
-  return DriveApp.getFolderById(id);
-}
 
 /**
- * Write one canonicalized JSON file per recipe. Filename uses the recipe id
- * so re-syncing overwrites in place — keeps Drive version history intact.
+ * Trim a single recipe object (shape: output of getStructuredRecipes).
+ *
+ * @param {Object} recipe
+ * @param {Object} [profile=TRIM_PROFILE]
+ * @returns {Object}
  */
-function writeRecipeJsonFile_(folder, recipe) {
-  const filename = `recipe_${recipe.id}.json`;
-  const payload  = canonicalJson({   // from canonical_hash.js
-    id:                  recipe.id,
-    name:                recipe.name,
-    folder_id:           recipe.folder_id,
-    trigger_application: recipe.trigger_application,
-    action_applications: recipe.action_applications,
-    code:                recipe.code,
-    config:              recipe.config
+function trimRecipe(recipe, profile) {
+  profile = profile || TRIM_PROFILE;
+  if (!recipe || typeof recipe !== 'object') return recipe;
+
+  const skip = new Set(profile.envelopeStrip);
+  const out  = {};
+
+  Object.keys(recipe).forEach(function (key) {
+    if (skip.has(key)) return;
+    if (key === 'code') {
+      out.code = trimStepNode_(recipe.code, profile);
+    } else {
+      out[key] = recipe[key];
+    }
   });
 
-  const existing = folder.getFilesByName(filename);
-  if (existing.hasNext()) {
-    const file = existing.next();
-    file.setContent(payload); // creates a new Drive revision
-    return file;
-  }
-  return folder.createFile(filename, payload, MimeType.PLAIN_TEXT);
+  return out;
+}
+
+
+/**
+ * Trim + reduction stats. Useful during empirical tuning.
+ *
+ * @returns {{ trimmed: Object, stats: Object }}
+ */
+function trimWithStats(recipe, profile) {
+  profile = profile || TRIM_PROFILE;
+
+  const before  = JSON.stringify(recipe).length;
+  const trimmed = trimRecipe(recipe, profile);
+  const after   = JSON.stringify(trimmed).length;
+  const pct     = before === 0 ? 0 : ((before - after) / before) * 100;
+
+  return {
+    trimmed: trimmed,
+    stats: {
+      profile_version: profile.version,
+      bytes_before:    before,
+      bytes_after:     after,
+      reduction_pct:   Math.round(pct * 10) / 10,
+      flag: pct < 30  ? 'low_reduction'   // recipe was already mostly user content
+           : pct > 80 ? 'high_reduction'  // suspiciously aggressive — spot check
+           : 'normal'                      // expected 40–70% band
+    }
+  };
+}
+
+
+/**
+ * Batch helper for the empirical-tuning step in the spec.
+ * Returns a flat array suitable for writing to a Sheet or eyeballing.
+ *
+ * @param {Array<Object>} recipes
+ * @returns {Array<Object>}
+ */
+function trimAndReport(recipes, profile) {
+  return (recipes || []).map(function (r) {
+    const result = trimWithStats(r, profile);
+    return {
+      id:             r.id,
+      name:           r.name,
+      bytes_before:   result.stats.bytes_before,
+      bytes_after:    result.stats.bytes_after,
+      reduction_pct:  result.stats.reduction_pct,
+      flag:           result.stats.flag
+    };
+  });
 }
 
 
 /* -------------------------------------------------------------------------- */
-/* Tree helpers                                                               */
+/* Internals                                                                  */
 /* -------------------------------------------------------------------------- */
 
-/** Total number of step nodes in a recipe code tree (excludes the root trigger). */
-function countSteps_(codeNode) {
-  if (!codeNode || typeof codeNode !== 'object') return 0;
-  let count = 0;
-  const blocks = Array.isArray(codeNode.block) ? codeNode.block : [];
-  for (let i = 0; i < blocks.length; i++) {
-    count += 1 + countSteps_(blocks[i]);
+/** Recursively trim a step node. Preserves block array order and length. */
+function trimStepNode_(node, profile) {
+  if (node === null || node === undefined)  return node;
+  if (typeof node !== 'object')             return node;
+  if (Array.isArray(node)) {
+    return node.map(function (n) { return trimStepNode_(n, profile); });
   }
-  return count;
+
+  const skip = new Set(profile.stepStrip);
+  const out  = {};
+
+  Object.keys(node).forEach(function (key) {
+    if (skip.has(key)) return;
+    const value = node[key];
+
+    if (key === 'block' && Array.isArray(value)) {
+      // block is positionally meaningful — walk children, never drop or reorder.
+      out.block = value.map(function (child) {
+        return trimStepNode_(child, profile);
+      });
+      return;
+    }
+
+    if (key === 'input' && value && typeof value === 'object') {
+      const trimmedInput = trimInput_(value);
+      // Drop the input key entirely if everything inside was empty/preview.
+      if (!isEmpty_(trimmedInput)) out.input = trimmedInput;
+      return;
+    }
+
+    if (key === 'description') {
+      if (isMeaningfulDescription_(value)) out.description = value;
+      return;
+    }
+
+    out[key] = value;
+  });
+
+  return out;
+}
+
+
+/**
+ * Trim an `input` object: strip schema preview keys, drop empty values,
+ * pass datapill strings through verbatim, recurse into nested structures.
+ */
+function trimInput_(value) {
+  if (value === null || value === undefined) return value;
+
+  if (typeof value === 'string') {
+    // Datapills and ordinary strings: pass through. Empty strings are filtered
+    // upstream by isEmpty_.
+    return value;
+  }
+
+  if (typeof value !== 'object') return value;
+
+  if (Array.isArray(value)) {
+    return value
+      .map(trimInput_)
+      .filter(function (v) { return !isEmpty_(v); });
+  }
+
+  const out = {};
+  Object.keys(value).forEach(function (key) {
+    // Schema/preview blobs are conventionally underscore-prefixed.
+    if (key.charAt(0) === '_') return;
+
+    const trimmedValue = trimInput_(value[key]);
+    if (!isEmpty_(trimmedValue)) out[key] = trimmedValue;
+  });
+  return out;
+}
+
+
+function isEmpty_(value) {
+  if (value === null || value === undefined)                return true;
+  if (value === '')                                          return true;
+  if (Array.isArray(value) && value.length === 0)            return true;
+  if (typeof value === 'object' && Object.keys(value).length === 0) return true;
+  return false;
+}
+
+
+function isMeaningfulDescription_(desc) {
+  if (typeof desc !== 'string') return false;
+  const trimmed = desc.trim();
+  if (trimmed === '')                          return false;
+  if (AUTO_DESCRIPTION_PATTERN.test(trimmed))  return false;
+  return true;
 }
