@@ -1,221 +1,300 @@
 /**
- * Trim measurement — deterministic stats over a set of recipes.
+ * Trim measurement — Sheet writer + Drive snapshot persistence.
  *
- * Pure functions. No I/O. Designed to produce reproducible numbers that
- * can be compared across runs and across trim profile versions.
+ * Container-bound. Renders trim distribution reports into the active
+ * spreadsheet and persists full report JSON to Drive so historical
+ * comparisons survive sheet edits.
  *
- * Determinism guarantees:
+ * Sheets written:
+ *   - "Trim Latest"     — per-recipe detail of the most recent run (overwrite)
+ *   - "Trim Snapshots"  — append-only log of every run, with summary stats
+ *                         and a hyperlink to the full report JSON in Drive
+ *   - "Trim Comparison" — output of the most recent comparison (overwrite)
  *
- *   1. Byte counts are measured on the *canonical* JSON serialization,
- *      not on JSON.stringify directly. Same input → same bytes, regardless
- *      of insertion order.
- *
- *   2. Per-recipe output hashes use canonicalHash, so "did this recipe's
- *      trim output change between profile v0.1 and v0.2?" is a single
- *      equality check.
- *
- *   3. Distribution stats (median, p90, p95) use a fixed, documented
- *      percentile method (linear interpolation, type 7 — same as numpy
- *      and R defaults) so they're reproducible across reimplementations.
- *
- *   4. The profile itself is hashed and the hash is included in every
- *      report. If someone edits TRIM_PROFILE and forgets to bump
- *      .version, the config hash will diverge from the version label and
- *      the mismatch is detectable.
- *
- * Depends on: recipe_trimmer.js, canonical_hash.js
+ * Setup:
+ *   1. Add this file alongside recipe_sync.js, recipe_trimmer.js,
+ *      trim_measurement.js, workato_recipes.js, canonical_hash.js.
+ *   2. Optionally set TRIM_DRIVE_FOLDER_ID in Script Properties; falls
+ *      back to RECIPE_DRIVE_FOLDER_ID.
+ *   3. Update onOpen() in recipe_sync.js to add the trim menu items
+ *      (see snippet at the bottom of this file).
  */
 
 
+const TRIM_LATEST_SHEET     = 'Trim Latest';
+const TRIM_SNAPSHOTS_SHEET  = 'Trim Snapshots';
+const TRIM_COMPARISON_SHEET = 'Trim Comparison';
+
+const TRIM_LATEST_HEADERS = [
+  'id', 'name', 'bytes_before', 'bytes_after',
+  'reduction_pct', 'flag', 'trimmed_hash', 'profile_version'
+];
+
+const TRIM_SNAPSHOTS_HEADERS = [
+  'run_at', 'profile_version', 'profile_hash', 'recipe_count',
+  'bytes_before_total', 'bytes_after_total',
+  'median_pct', 'p90_pct', 'p95_pct',
+  'low_count', 'normal_count', 'high_count',
+  'snapshot_file_id', 'snapshot_file'
+];
+
+
 /* -------------------------------------------------------------------------- */
-/* Per-recipe measurement                                                     */
+/* Public entry points (wire to menu)                                         */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Deterministic measurement for a single recipe.
- *
- * @param {Object} recipe  - structured recipe (output of getStructuredRecipes)
- * @param {Object} [profile]
- * @returns {Object} measurement record
+ * Fetch recipes, measure trim distribution, write to Sheet, persist to Drive.
  */
-function measureRecipeTrim(recipe, profile) {
-  profile = profile || TRIM_PROFILE;
+function measureTrimAndWrite() {
+  const recipes = getStructuredRecipes({ includeCode: true });
+  const report  = measureTrimDistribution(recipes);
 
-  const before        = canonicalJson(recipe);             // canonical → reproducible bytes
-  const trimmed       = trimRecipe(recipe, profile);
-  const after         = canonicalJson(trimmed);
+  const file = saveTrimReportToDrive_(report);
+  writeTrimLatestSheet_(report);
+  appendTrimSnapshotRow_(report, file);
 
-  const bytesBefore   = before.length;
-  const bytesAfter    = after.length;
-  const reductionPct  = bytesBefore === 0
-                          ? 0
-                          : Math.round(((bytesBefore - bytesAfter) / bytesBefore) * 1000) / 10;
+  SpreadsheetApp.getActive().toast(
+    `Measured ${report.recipe_count} recipes — median ${report.reduction_pct.median}%`,
+    'Trim measurement', 5
+  );
+}
 
-  return {
-    id:                 recipe.id,
-    name:               recipe.name,
-    bytes_before:       bytesBefore,
-    bytes_after:        bytesAfter,
-    reduction_pct:      reductionPct,
-    flag:               classifyReduction_(reductionPct),
-    trimmed_hash:       canonicalHash(trimmed),            // for cross-version comparison
-    profile_version:    profile.version
-  };
+
+/**
+ * Compare the two most recent snapshots in the Trim Snapshots log.
+ * Reads full reports from Drive (by file id stored in the log) and
+ * renders the comparison into the Trim Comparison sheet.
+ */
+function compareLastTwoTrimSnapshots() {
+  const ids = readRecentSnapshotFileIds_(2);
+  if (ids.length < 2) {
+    SpreadsheetApp.getActive().toast(
+      'Need at least two snapshots to compare. Run "Measure trim" twice.',
+      'Trim comparison', 5
+    );
+    return;
+  }
+
+  // ids[0] is most recent (newest). compareTrimReports(A, B) treats A=before, B=after.
+  const reportB = readTrimReportFromDrive_(ids[0]);
+  const reportA = readTrimReportFromDrive_(ids[1]);
+  const comparison = compareTrimReports(reportA, reportB);
+
+  writeTrimComparisonSheet_(comparison);
+
+  SpreadsheetApp.getActive().toast(
+    `${reportA.profile_version} → ${reportB.profile_version}: ${comparison.recipes_changed.length} changed`,
+    'Trim comparison', 5
+  );
 }
 
 
 /* -------------------------------------------------------------------------- */
-/* Distribution measurement                                                   */
+/* Sheet writers                                                              */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Deterministic distribution stats over a set of recipes.
- *
- * @param {Array<Object>} recipes
- * @param {Object} [profile]
- * @returns {Object} report
- */
-function measureTrimDistribution(recipes, profile) {
-  profile = profile || TRIM_PROFILE;
+function writeTrimLatestSheet_(report) {
+  const sheet = getOrCreateSheet_(TRIM_LATEST_SHEET);
+  sheet.clear();
+  sheet.getRange(1, 1, 1, TRIM_LATEST_HEADERS.length)
+       .setValues([TRIM_LATEST_HEADERS])
+       .setFontWeight('bold');
 
-  const measurements = (recipes || []).map(function (r) {
-    return measureRecipeTrim(r, profile);
+  const rows = report.measurements.map(function (m) {
+    return [
+      m.id, m.name, m.bytes_before, m.bytes_after,
+      m.reduction_pct, m.flag, m.trimmed_hash, m.profile_version
+    ];
   });
 
-  const reductions = measurements.map(function (m) { return m.reduction_pct; });
+  if (rows.length) {
+    sheet.getRange(2, 1, rows.length, TRIM_LATEST_HEADERS.length).setValues(rows);
+  }
+  sheet.setFrozenRows(1);
+  sheet.autoResizeColumns(1, TRIM_LATEST_HEADERS.length);
+}
 
-  const flagCounts = { low_reduction: 0, normal: 0, high_reduction: 0 };
-  measurements.forEach(function (m) { flagCounts[m.flag] += 1; });
 
-  return {
-    profile_version:  profile.version,
-    profile_hash:     canonicalHash(profile),  // detects unbumped edits
-    measured_at:      new Date().toISOString(),
-    recipe_count:     measurements.length,
+function appendTrimSnapshotRow_(report, file) {
+  const sheet = getOrCreateSheet_(TRIM_SNAPSHOTS_SHEET);
 
-    bytes_before_total: sum_(measurements.map(function (m) { return m.bytes_before; })),
-    bytes_after_total:  sum_(measurements.map(function (m) { return m.bytes_after;  })),
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, TRIM_SNAPSHOTS_HEADERS.length)
+         .setValues([TRIM_SNAPSHOTS_HEADERS])
+         .setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
 
-    reduction_pct: {
-      min:    min_(reductions),
-      max:    max_(reductions),
-      mean:   round1_(mean_(reductions)),
-      median: round1_(percentile_(reductions, 50)),
-      p90:    round1_(percentile_(reductions, 90)),
-      p95:    round1_(percentile_(reductions, 95))
-    },
+  sheet.appendRow([
+    report.measured_at,
+    report.profile_version,
+    report.profile_hash,
+    report.recipe_count,
+    report.bytes_before_total,
+    report.bytes_after_total,
+    report.reduction_pct.median,
+    report.reduction_pct.p90,
+    report.reduction_pct.p95,
+    report.flag_counts.low_reduction,
+    report.flag_counts.normal,
+    report.flag_counts.high_reduction,
+    file.getId(),
+    `=HYPERLINK("${file.getUrl()}","${file.getName()}")`
+  ]);
+}
 
-    flag_counts: flagCounts,
-    measurements: measurements   // per-recipe rows for drill-down
-  };
+
+function writeTrimComparisonSheet_(comparison) {
+  const sheet = getOrCreateSheet_(TRIM_COMPARISON_SHEET);
+  sheet.clear();
+
+  let row = 1;
+
+  // Title
+  sheet.getRange(row, 1)
+       .setValue(`Comparison: ${comparison.profile_a} → ${comparison.profile_b}`)
+       .setFontWeight('bold').setFontSize(14);
+  row += 2;
+
+  // Distribution delta
+  sheet.getRange(row, 1).setValue('Distribution delta').setFontWeight('bold');
+  row++;
+  sheet.getRange(row, 1, 3, 2).setValues([
+    ['median', comparison.distribution_delta.median],
+    ['p90',    comparison.distribution_delta.p90],
+    ['p95',    comparison.distribution_delta.p95]
+  ]);
+  row += 4;
+
+  // Flag count delta
+  sheet.getRange(row, 1).setValue('Flag count delta').setFontWeight('bold');
+  row++;
+  sheet.getRange(row, 1, 3, 2).setValues([
+    ['low_reduction',  comparison.flag_count_delta.low_reduction],
+    ['normal',         comparison.flag_count_delta.normal],
+    ['high_reduction', comparison.flag_count_delta.high_reduction]
+  ]);
+  row += 4;
+
+  // Recipes changed
+  sheet.getRange(row, 1)
+       .setValue(`Recipes changed (${comparison.recipes_changed.length})`)
+       .setFontWeight('bold');
+  row++;
+  const changedHeaders = [
+    'id', 'name', 'reduction_before', 'reduction_after',
+    'reduction_delta', 'flag_before', 'flag_after'
+  ];
+  sheet.getRange(row, 1, 1, changedHeaders.length)
+       .setValues([changedHeaders]).setFontWeight('bold');
+  row++;
+  if (comparison.recipes_changed.length) {
+    const changedRows = comparison.recipes_changed.map(function (c) {
+      return [c.id, c.name, c.reduction_before, c.reduction_after,
+              c.reduction_delta, c.flag_before, c.flag_after];
+    });
+    sheet.getRange(row, 1, changedRows.length, changedHeaders.length)
+         .setValues(changedRows);
+    row += changedRows.length;
+  }
+  row += 1;
+
+  // Added / removed (compact)
+  if (comparison.recipes_added.length) {
+    sheet.getRange(row, 1)
+         .setValue(`Recipes added (${comparison.recipes_added.length})`)
+         .setFontWeight('bold');
+    row++;
+    const addedRows = comparison.recipes_added.map(function (r) {
+      return [r.id, r.name];
+    });
+    sheet.getRange(row, 1, addedRows.length, 2).setValues(addedRows);
+    row += addedRows.length + 1;
+  }
+
+  if (comparison.recipes_removed.length) {
+    sheet.getRange(row, 1)
+         .setValue(`Recipes removed (${comparison.recipes_removed.length})`)
+         .setFontWeight('bold');
+    row++;
+    const removedRows = comparison.recipes_removed.map(function (r) {
+      return [r.id, r.name];
+    });
+    sheet.getRange(row, 1, removedRows.length, 2).setValues(removedRows);
+  }
+
+  sheet.autoResizeColumns(1, changedHeaders.length);
 }
 
 
 /* -------------------------------------------------------------------------- */
-/* Snapshot comparison                                                        */
+/* Drive persistence                                                          */
 /* -------------------------------------------------------------------------- */
+
+function saveTrimReportToDrive_(report) {
+  const folder   = getTrimDriveFolder_();
+  const safeTs   = report.measured_at.replace(/[:.]/g, '-');
+  const filename = `trim_snapshot_v${report.profile_version}_${safeTs}.json`;
+  return folder.createFile(filename, canonicalJson(report), MimeType.PLAIN_TEXT);
+}
+
+function readTrimReportFromDrive_(fileId) {
+  const blob = DriveApp.getFileById(fileId).getBlob().getDataAsString();
+  return JSON.parse(blob);
+}
 
 /**
- * Compare two distribution reports (e.g. v0.1 vs v0.2 of the trim profile).
- * Surfaces which recipes' trim output actually changed, plus distribution
- * deltas.
- *
- * @param {Object} reportA
- * @param {Object} reportB
- * @returns {Object} comparison
+ * Read the most recent N file ids from the Trim Snapshots log.
+ * Returned newest-first.
  */
-function compareTrimReports(reportA, reportB) {
-  const aById = indexBy_(reportA.measurements, 'id');
-  const bById = indexBy_(reportB.measurements, 'id');
+function readRecentSnapshotFileIds_(n) {
+  const sheet = SpreadsheetApp.getActive().getSheetByName(TRIM_SNAPSHOTS_SHEET);
+  if (!sheet || sheet.getLastRow() < 2) return [];
 
-  const ids = unique_(Object.keys(aById).concat(Object.keys(bById)));
-  const changed = [];
-  const added   = [];
-  const removed = [];
+  const fileIdCol = TRIM_SNAPSHOTS_HEADERS.indexOf('snapshot_file_id') + 1;
+  const lastRow   = sheet.getLastRow();
+  const startRow  = Math.max(2, lastRow - n + 1);
+  const numRows   = lastRow - startRow + 1;
 
-  ids.forEach(function (id) {
-    const a = aById[id];
-    const b = bById[id];
-    if (a && !b) { removed.push(a); return; }
-    if (b && !a) { added.push(b);   return; }
-    if (a.trimmed_hash !== b.trimmed_hash) {
-      changed.push({
-        id:                 id,
-        name:               b.name,
-        reduction_before:   a.reduction_pct,
-        reduction_after:    b.reduction_pct,
-        reduction_delta:    round1_(b.reduction_pct - a.reduction_pct),
-        flag_before:        a.flag,
-        flag_after:         b.flag
-      });
-    }
-  });
-
-  return {
-    profile_a:        reportA.profile_version,
-    profile_b:        reportB.profile_version,
-    distribution_delta: {
-      median: round1_(reportB.reduction_pct.median - reportA.reduction_pct.median),
-      p90:    round1_(reportB.reduction_pct.p90    - reportA.reduction_pct.p90),
-      p95:    round1_(reportB.reduction_pct.p95    - reportA.reduction_pct.p95)
-    },
-    flag_count_delta: {
-      low_reduction:  reportB.flag_counts.low_reduction  - reportA.flag_counts.low_reduction,
-      normal:         reportB.flag_counts.normal         - reportA.flag_counts.normal,
-      high_reduction: reportB.flag_counts.high_reduction - reportA.flag_counts.high_reduction
-    },
-    recipes_changed: changed,
-    recipes_added:   added,
-    recipes_removed: removed
-  };
+  const ids = sheet.getRange(startRow, fileIdCol, numRows, 1).getValues()
+                   .map(function (r) { return r[0]; })
+                   .filter(function (v) { return !!v; });
+  return ids.reverse(); // newest first
 }
 
 
 /* -------------------------------------------------------------------------- */
-/* Internals — math + helpers                                                 */
+/* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Linear-interpolation percentile (type 7 — numpy/R default).
- * Documented choice so reimplementations produce identical numbers.
- */
-function percentile_(values, p) {
-  if (!values || values.length === 0) return 0;
-  const sorted = values.slice().sort(function (a, b) { return a - b; });
-  if (sorted.length === 1) return sorted[0];
-
-  const rank   = (p / 100) * (sorted.length - 1);
-  const lower  = Math.floor(rank);
-  const upper  = Math.ceil(rank);
-  const weight = rank - lower;
-
-  if (lower === upper) return sorted[lower];
-  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+function getTrimDriveFolder_() {
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty('TRIM_DRIVE_FOLDER_ID')
+          || props.getProperty('RECIPE_DRIVE_FOLDER_ID');
+  if (!id) {
+    throw new Error('Set TRIM_DRIVE_FOLDER_ID or RECIPE_DRIVE_FOLDER_ID in Script Properties.');
+  }
+  return DriveApp.getFolderById(id);
 }
 
-function classifyReduction_(pct) {
-  if (pct < 30) return 'low_reduction';
-  if (pct > 80) return 'high_reduction';
-  return 'normal';
+function getOrCreateSheet_(name) {
+  const ss = SpreadsheetApp.getActive();
+  return ss.getSheetByName(name) || ss.insertSheet(name);
 }
 
-function sum_(arr)    { return arr.reduce(function (a, b) { return a + b; }, 0); }
-function mean_(arr)   { return arr.length ? sum_(arr) / arr.length : 0; }
-function min_(arr)    { return arr.length ? Math.min.apply(null, arr) : 0; }
-function max_(arr)    { return arr.length ? Math.max.apply(null, arr) : 0; }
-function round1_(n)   { return Math.round(n * 10) / 10; }
 
-function indexBy_(arr, key) {
-  const out = {};
-  (arr || []).forEach(function (item) { out[item[key]] = item; });
-  return out;
-}
-
-function unique_(arr) {
-  const seen = {};
-  const out  = [];
-  arr.forEach(function (v) {
-    if (!seen[v]) { seen[v] = true; out.push(v); }
-  });
-  return out;
-}
+/* -------------------------------------------------------------------------- */
+/* onOpen update — paste this over the existing onOpen in recipe_sync.js      */
+/* -------------------------------------------------------------------------- */
+//
+// function onOpen() {
+//   SpreadsheetApp.getUi()
+//     .createMenu('Workato')
+//       .addItem('Sync recipes (metadata only)', 'syncRecipesMetadata')
+//       .addItem('Sync recipes (full structure)', 'syncRecipesFull')
+//       .addSeparator()
+//       .addItem('Measure trim',                  'measureTrimAndWrite')
+//       .addItem('Compare last two snapshots',    'compareLastTwoTrimSnapshots')
+//     .addToUi();
+// }
