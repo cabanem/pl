@@ -1,246 +1,221 @@
 /**
- * Recipe trimmer — context_reduction profile v0.1
+ * Trim measurement — deterministic stats over a set of recipes.
  *
- * Pure function over the structured recipe shape returned by
- * getStructuredRecipes({ includeCode: true }). No I/O. Does not mutate
- * the input. Output is the same recursive structure with fields removed
- * per the profile in trim_profile_spec.md.
+ * Pure functions. No I/O. Designed to produce reproducible numbers that
+ * can be compared across runs and across trim profile versions.
  *
- * Composition (recommended order):
+ * Determinism guarantees:
  *
- *     const recipes = getStructuredRecipes({ includeCode: true });
- *     const trimmed = recipes.map(trimRecipe);
- *     const canonical = trimmed.map(canonicalize);
- *     const cacheKey = canonicalHash({
- *       profile: TRIM_PROFILE.version,
- *       code:    canonical[i].code
- *     });
+ *   1. Byte counts are measured on the *canonical* JSON serialization,
+ *      not on JSON.stringify directly. Same input → same bytes, regardless
+ *      of insertion order.
  *
- * Trim before canonicalize: canonicalization is cheaper on smaller trees.
- * Hash includes the profile version so v0.1 and v0.2 outputs don't collide.
+ *   2. Per-recipe output hashes use canonicalHash, so "did this recipe's
+ *      trim output change between profile v0.1 and v0.2?" is a single
+ *      equality check.
+ *
+ *   3. Distribution stats (median, p90, p95) use a fixed, documented
+ *      percentile method (linear interpolation, type 7 — same as numpy
+ *      and R defaults) so they're reproducible across reimplementations.
+ *
+ *   4. The profile itself is hashed and the hash is included in every
+ *      report. If someone edits TRIM_PROFILE and forgets to bump
+ *      .version, the config hash will diverge from the version label and
+ *      the mismatch is detectable.
+ *
+ * Depends on: recipe_trimmer.js, canonical_hash.js
  */
 
 
 /* -------------------------------------------------------------------------- */
-/* Profile config — the single edit surface for v0.1 → v0.2 tuning            */
-/* -------------------------------------------------------------------------- */
-
-const TRIM_PROFILE = {
-  version: '0.1',
-
-  // Top-level recipe envelope keys to strip.
-  envelopeStrip: [
-    'user_id',
-    'copy_count',
-    'webhook_url',
-    'webhook_subscribe_url',
-    'lifetime_task_count',
-    'last_run_at',
-    'job_succeeded_count',
-    'job_failed_count',
-    'parameters_count',
-    'created_at',
-    'updated_at',
-    'config'   // see spec note; default-strip, override per-call if needed
-  ],
-
-  // Step-node keys to strip wherever they appear in the code tree.
-  stepStrip: [
-    'as',
-    'uuid',
-    'recipe_step_uuid',
-    'unfinished',
-    'extended_input_schema',
-    'extended_output_schema',
-    'dynamic_pick_list_selection',
-    'dynamicPickListSelection',
-    'visible_config_fields',
-    'hidden_config_fields',
-    'toggle_cfg',
-    'toggleCfg'
-  ]
-};
-
-// Datapills are leaves. Pattern matches strings like "#{_dp('data.x.y')}".
-const DATAPILL_PATTERN = /^#\{_dp\(.*\)\}$/;
-
-// Auto-generated default descriptions to drop ("Step 1", "Step 23", ...).
-const AUTO_DESCRIPTION_PATTERN = /^Step\s+\d+$/;
-
-
-/* -------------------------------------------------------------------------- */
-/* Public API                                                                 */
+/* Per-recipe measurement                                                     */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Trim a single recipe object (shape: output of getStructuredRecipes).
+ * Deterministic measurement for a single recipe.
  *
- * @param {Object} recipe
- * @param {Object} [profile=TRIM_PROFILE]
- * @returns {Object}
+ * @param {Object} recipe  - structured recipe (output of getStructuredRecipes)
+ * @param {Object} [profile]
+ * @returns {Object} measurement record
  */
-function trimRecipe(recipe, profile) {
-  profile = profile || TRIM_PROFILE;
-  if (!recipe || typeof recipe !== 'object') return recipe;
-
-  const skip = new Set(profile.envelopeStrip);
-  const out  = {};
-
-  Object.keys(recipe).forEach(function (key) {
-    if (skip.has(key)) return;
-    if (key === 'code') {
-      out.code = trimStepNode_(recipe.code, profile);
-    } else {
-      out[key] = recipe[key];
-    }
-  });
-
-  return out;
-}
-
-
-/**
- * Trim + reduction stats. Useful during empirical tuning.
- *
- * @returns {{ trimmed: Object, stats: Object }}
- */
-function trimWithStats(recipe, profile) {
+function measureRecipeTrim(recipe, profile) {
   profile = profile || TRIM_PROFILE;
 
-  const before  = JSON.stringify(recipe).length;
-  const trimmed = trimRecipe(recipe, profile);
-  const after   = JSON.stringify(trimmed).length;
-  const pct     = before === 0 ? 0 : ((before - after) / before) * 100;
+  const before        = canonicalJson(recipe);             // canonical → reproducible bytes
+  const trimmed       = trimRecipe(recipe, profile);
+  const after         = canonicalJson(trimmed);
+
+  const bytesBefore   = before.length;
+  const bytesAfter    = after.length;
+  const reductionPct  = bytesBefore === 0
+                          ? 0
+                          : Math.round(((bytesBefore - bytesAfter) / bytesBefore) * 1000) / 10;
 
   return {
-    trimmed: trimmed,
-    stats: {
-      profile_version: profile.version,
-      bytes_before:    before,
-      bytes_after:     after,
-      reduction_pct:   Math.round(pct * 10) / 10,
-      flag: pct < 30  ? 'low_reduction'   // recipe was already mostly user content
-           : pct > 80 ? 'high_reduction'  // suspiciously aggressive — spot check
-           : 'normal'                      // expected 40–70% band
-    }
+    id:                 recipe.id,
+    name:               recipe.name,
+    bytes_before:       bytesBefore,
+    bytes_after:        bytesAfter,
+    reduction_pct:      reductionPct,
+    flag:               classifyReduction_(reductionPct),
+    trimmed_hash:       canonicalHash(trimmed),            // for cross-version comparison
+    profile_version:    profile.version
   };
 }
 
 
+/* -------------------------------------------------------------------------- */
+/* Distribution measurement                                                   */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Batch helper for the empirical-tuning step in the spec.
- * Returns a flat array suitable for writing to a Sheet or eyeballing.
+ * Deterministic distribution stats over a set of recipes.
  *
  * @param {Array<Object>} recipes
- * @returns {Array<Object>}
+ * @param {Object} [profile]
+ * @returns {Object} report
  */
-function trimAndReport(recipes, profile) {
-  return (recipes || []).map(function (r) {
-    const result = trimWithStats(r, profile);
-    return {
-      id:             r.id,
-      name:           r.name,
-      bytes_before:   result.stats.bytes_before,
-      bytes_after:    result.stats.bytes_after,
-      reduction_pct:  result.stats.reduction_pct,
-      flag:           result.stats.flag
-    };
+function measureTrimDistribution(recipes, profile) {
+  profile = profile || TRIM_PROFILE;
+
+  const measurements = (recipes || []).map(function (r) {
+    return measureRecipeTrim(r, profile);
   });
+
+  const reductions = measurements.map(function (m) { return m.reduction_pct; });
+
+  const flagCounts = { low_reduction: 0, normal: 0, high_reduction: 0 };
+  measurements.forEach(function (m) { flagCounts[m.flag] += 1; });
+
+  return {
+    profile_version:  profile.version,
+    profile_hash:     canonicalHash(profile),  // detects unbumped edits
+    measured_at:      new Date().toISOString(),
+    recipe_count:     measurements.length,
+
+    bytes_before_total: sum_(measurements.map(function (m) { return m.bytes_before; })),
+    bytes_after_total:  sum_(measurements.map(function (m) { return m.bytes_after;  })),
+
+    reduction_pct: {
+      min:    min_(reductions),
+      max:    max_(reductions),
+      mean:   round1_(mean_(reductions)),
+      median: round1_(percentile_(reductions, 50)),
+      p90:    round1_(percentile_(reductions, 90)),
+      p95:    round1_(percentile_(reductions, 95))
+    },
+
+    flag_counts: flagCounts,
+    measurements: measurements   // per-recipe rows for drill-down
+  };
 }
 
 
 /* -------------------------------------------------------------------------- */
-/* Internals                                                                  */
+/* Snapshot comparison                                                        */
 /* -------------------------------------------------------------------------- */
-
-/** Recursively trim a step node. Preserves block array order and length. */
-function trimStepNode_(node, profile) {
-  if (node === null || node === undefined)  return node;
-  if (typeof node !== 'object')             return node;
-  if (Array.isArray(node)) {
-    return node.map(function (n) { return trimStepNode_(n, profile); });
-  }
-
-  const skip = new Set(profile.stepStrip);
-  const out  = {};
-
-  Object.keys(node).forEach(function (key) {
-    if (skip.has(key)) return;
-    const value = node[key];
-
-    if (key === 'block' && Array.isArray(value)) {
-      // block is positionally meaningful — walk children, never drop or reorder.
-      out.block = value.map(function (child) {
-        return trimStepNode_(child, profile);
-      });
-      return;
-    }
-
-    if (key === 'input' && value && typeof value === 'object') {
-      const trimmedInput = trimInput_(value);
-      // Drop the input key entirely if everything inside was empty/preview.
-      if (!isEmpty_(trimmedInput)) out.input = trimmedInput;
-      return;
-    }
-
-    if (key === 'description') {
-      if (isMeaningfulDescription_(value)) out.description = value;
-      return;
-    }
-
-    out[key] = value;
-  });
-
-  return out;
-}
-
 
 /**
- * Trim an `input` object: strip schema preview keys, drop empty values,
- * pass datapill strings through verbatim, recurse into nested structures.
+ * Compare two distribution reports (e.g. v0.1 vs v0.2 of the trim profile).
+ * Surfaces which recipes' trim output actually changed, plus distribution
+ * deltas.
+ *
+ * @param {Object} reportA
+ * @param {Object} reportB
+ * @returns {Object} comparison
  */
-function trimInput_(value) {
-  if (value === null || value === undefined) return value;
+function compareTrimReports(reportA, reportB) {
+  const aById = indexBy_(reportA.measurements, 'id');
+  const bById = indexBy_(reportB.measurements, 'id');
 
-  if (typeof value === 'string') {
-    // Datapills and ordinary strings: pass through. Empty strings are filtered
-    // upstream by isEmpty_.
-    return value;
-  }
+  const ids = unique_(Object.keys(aById).concat(Object.keys(bById)));
+  const changed = [];
+  const added   = [];
+  const removed = [];
 
-  if (typeof value !== 'object') return value;
-
-  if (Array.isArray(value)) {
-    return value
-      .map(trimInput_)
-      .filter(function (v) { return !isEmpty_(v); });
-  }
-
-  const out = {};
-  Object.keys(value).forEach(function (key) {
-    // Schema/preview blobs are conventionally underscore-prefixed.
-    if (key.charAt(0) === '_') return;
-
-    const trimmedValue = trimInput_(value[key]);
-    if (!isEmpty_(trimmedValue)) out[key] = trimmedValue;
+  ids.forEach(function (id) {
+    const a = aById[id];
+    const b = bById[id];
+    if (a && !b) { removed.push(a); return; }
+    if (b && !a) { added.push(b);   return; }
+    if (a.trimmed_hash !== b.trimmed_hash) {
+      changed.push({
+        id:                 id,
+        name:               b.name,
+        reduction_before:   a.reduction_pct,
+        reduction_after:    b.reduction_pct,
+        reduction_delta:    round1_(b.reduction_pct - a.reduction_pct),
+        flag_before:        a.flag,
+        flag_after:         b.flag
+      });
+    }
   });
+
+  return {
+    profile_a:        reportA.profile_version,
+    profile_b:        reportB.profile_version,
+    distribution_delta: {
+      median: round1_(reportB.reduction_pct.median - reportA.reduction_pct.median),
+      p90:    round1_(reportB.reduction_pct.p90    - reportA.reduction_pct.p90),
+      p95:    round1_(reportB.reduction_pct.p95    - reportA.reduction_pct.p95)
+    },
+    flag_count_delta: {
+      low_reduction:  reportB.flag_counts.low_reduction  - reportA.flag_counts.low_reduction,
+      normal:         reportB.flag_counts.normal         - reportA.flag_counts.normal,
+      high_reduction: reportB.flag_counts.high_reduction - reportA.flag_counts.high_reduction
+    },
+    recipes_changed: changed,
+    recipes_added:   added,
+    recipes_removed: removed
+  };
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Internals — math + helpers                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Linear-interpolation percentile (type 7 — numpy/R default).
+ * Documented choice so reimplementations produce identical numbers.
+ */
+function percentile_(values, p) {
+  if (!values || values.length === 0) return 0;
+  const sorted = values.slice().sort(function (a, b) { return a - b; });
+  if (sorted.length === 1) return sorted[0];
+
+  const rank   = (p / 100) * (sorted.length - 1);
+  const lower  = Math.floor(rank);
+  const upper  = Math.ceil(rank);
+  const weight = rank - lower;
+
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+}
+
+function classifyReduction_(pct) {
+  if (pct < 30) return 'low_reduction';
+  if (pct > 80) return 'high_reduction';
+  return 'normal';
+}
+
+function sum_(arr)    { return arr.reduce(function (a, b) { return a + b; }, 0); }
+function mean_(arr)   { return arr.length ? sum_(arr) / arr.length : 0; }
+function min_(arr)    { return arr.length ? Math.min.apply(null, arr) : 0; }
+function max_(arr)    { return arr.length ? Math.max.apply(null, arr) : 0; }
+function round1_(n)   { return Math.round(n * 10) / 10; }
+
+function indexBy_(arr, key) {
+  const out = {};
+  (arr || []).forEach(function (item) { out[item[key]] = item; });
   return out;
 }
 
-
-function isEmpty_(value) {
-  if (value === null || value === undefined)                return true;
-  if (value === '')                                          return true;
-  if (Array.isArray(value) && value.length === 0)            return true;
-  if (typeof value === 'object' && Object.keys(value).length === 0) return true;
-  return false;
-}
-
-
-function isMeaningfulDescription_(desc) {
-  if (typeof desc !== 'string') return false;
-  const trimmed = desc.trim();
-  if (trimmed === '')                          return false;
-  if (AUTO_DESCRIPTION_PATTERN.test(trimmed))  return false;
-  return true;
+function unique_(arr) {
+  const seen = {};
+  const out  = [];
+  arr.forEach(function (v) {
+    if (!seen[v]) { seen[v] = true; out.push(v); }
+  });
+  return out;
 }
