@@ -1,42 +1,31 @@
 /**
- * Trim measurement — Sheet writer + Drive snapshot persistence.
+ * Recipe Drive cache — read-side operations on the canonical recipe JSON
+ * files written by syncRecipesFull (recipe_sync.js).
  *
- * Container-bound. Renders trim distribution reports into the active
- * spreadsheet and persists full report JSON to Drive so historical
- * comparisons survive sheet edits.
+ * Lets the trim / measure / inspect loop run against locally-cached recipes
+ * without spending Workato API bandwidth. After one full sync, all
+ * subsequent trim tuning is free of UrlFetchApp quota cost.
  *
- * Sheets written:
- *   - "Trim Latest"     — per-recipe detail of the most recent run (overwrite)
- *   - "Trim Snapshots"  — append-only log of every run, with summary stats
- *                         and a hyperlink to the full report JSON in Drive
- *   - "Trim Comparison" — output of the most recent comparison (overwrite)
+ * Files read:    recipe_{id}.json     (in RECIPE_DRIVE_FOLDER_ID)
+ * Files written: trimmed_recipe_{id}.json
+ *                (in {RECIPE_DRIVE_FOLDER_ID}/trimmed/ — for inspection)
  *
  * Setup:
- *   1. Add this file alongside recipe_sync.js, recipe_trimmer.js,
- *      trim_measurement.js, workato_recipes.js, canonical_hash.js.
- *   2. Optionally set TRIM_DRIVE_FOLDER_ID in Script Properties; falls
- *      back to RECIPE_DRIVE_FOLDER_ID.
- *   3. Update onOpen() in recipe_sync.js to add the trim menu items
- *      (see snippet at the bottom of this file).
+ *   - Run "Sync recipes (full structure)" once to populate the cache.
+ *   - All operations in this file then run on the cache.
+ *
+ * Depends on: recipe_sync.js (for getOrThrowDriveFolder_),
+ *             recipe_trimmer.js, trim_measurement.js,
+ *             trim_measurement_sheet.js, canonical_hash.js.
+ *
+ * Note on shape alignment:
+ *   The cached recipe shape is whatever writeRecipeJsonFile_ chose to
+ *   persist (currently: id, name, folder_id, trigger_application,
+ *   action_applications, code, config). If you want additional envelope
+ *   fields visible to the trim — e.g. description, running — extend the
+ *   payload in recipe_sync.js. The trim measurement here works on
+ *   whatever shape is in the cache.
  */
-
-
-const TRIM_LATEST_SHEET     = 'Trim Latest';
-const TRIM_SNAPSHOTS_SHEET  = 'Trim Snapshots';
-const TRIM_COMPARISON_SHEET = 'Trim Comparison';
-
-const TRIM_LATEST_HEADERS = [
-  'id', 'name', 'bytes_before', 'bytes_after',
-  'reduction_pct', 'flag', 'trimmed_hash', 'profile_version'
-];
-
-const TRIM_SNAPSHOTS_HEADERS = [
-  'run_at', 'profile_version', 'profile_hash', 'recipe_count',
-  'bytes_before_total', 'bytes_after_total',
-  'median_pct', 'p90_pct', 'p95_pct',
-  'low_count', 'normal_count', 'high_count',
-  'snapshot_file_id', 'snapshot_file'
-];
 
 
 /* -------------------------------------------------------------------------- */
@@ -44,223 +33,117 @@ const TRIM_SNAPSHOTS_HEADERS = [
 /* -------------------------------------------------------------------------- */
 
 /**
- * Fetch recipes, measure trim distribution, write to Sheet, persist to Drive.
+ * Same outputs as measureTrimAndWrite, but reads recipes from Drive cache
+ * instead of the Workato API. Zero bandwidth cost.
  */
-function measureTrimAndWrite() {
-  const recipes = getStructuredRecipes({ includeCode: true });
-  const report  = measureTrimDistribution(recipes);
+function measureTrimFromDrive() {
+  const recipes = loadRecipesFromDrive();
+  if (recipes.length === 0) {
+    SpreadsheetApp.getActive().toast(
+      'No recipe_*.json files in cache. Run "Sync recipes (full structure)" first.',
+      'Trim measurement', 5
+    );
+    return;
+  }
 
-  const file = saveTrimReportToDrive_(report);
+  const report = measureTrimDistribution(recipes);
+  const file   = saveTrimReportToDrive_(report);
   writeTrimLatestSheet_(report);
   appendTrimSnapshotRow_(report, file);
 
   SpreadsheetApp.getActive().toast(
-    `Measured ${report.recipe_count} recipes — median ${report.reduction_pct.median}%`,
+    `Measured ${report.recipe_count} cached recipes — median ${report.reduction_pct.median}%`,
     'Trim measurement', 5
   );
 }
 
 
 /**
- * Compare the two most recent snapshots in the Trim Snapshots log.
- * Reads full reports from Drive (by file id stored in the log) and
- * renders the comparison into the Trim Comparison sheet.
+ * Trim every cached recipe and write the trimmed result to a "trimmed"
+ * subfolder for visual inspection. Useful during empirical tuning — lets
+ * you eyeball what the model would actually see, side by side with the
+ * untrimmed source.
  */
-function compareLastTwoTrimSnapshots() {
-  const ids = readRecentSnapshotFileIds_(2);
-  if (ids.length < 2) {
+function writeTrimmedRecipesToDrive() {
+  const recipes = loadRecipesFromDrive();
+  if (recipes.length === 0) {
     SpreadsheetApp.getActive().toast(
-      'Need at least two snapshots to compare. Run "Measure trim" twice.',
-      'Trim comparison', 5
+      'No recipe_*.json files in cache. Run "Sync recipes (full structure)" first.',
+      'Trim', 5
     );
     return;
   }
 
-  // ids[0] is most recent (newest). compareTrimReports(A, B) treats A=before, B=after.
-  const reportB = readTrimReportFromDrive_(ids[0]);
-  const reportA = readTrimReportFromDrive_(ids[1]);
-  const comparison = compareTrimReports(reportA, reportB);
+  const subfolder = getOrCreateTrimmedSubfolder_();
+  let written = 0;
 
-  writeTrimComparisonSheet_(comparison);
+  recipes.forEach(function (recipe) {
+    const trimmed  = trimRecipe(recipe);
+    const filename = `trimmed_recipe_${recipe.id}.json`;
+    const payload  = canonicalJson(trimmed);
+
+    const existing = subfolder.getFilesByName(filename);
+    if (existing.hasNext()) {
+      existing.next().setContent(payload);   // new Drive revision
+    } else {
+      subfolder.createFile(filename, payload, MimeType.PLAIN_TEXT);
+    }
+    written++;
+  });
 
   SpreadsheetApp.getActive().toast(
-    `${reportA.profile_version} → ${reportB.profile_version}: ${comparison.recipes_changed.length} changed`,
-    'Trim comparison', 5
+    `Wrote ${written} trimmed recipes to "trimmed" subfolder.`,
+    'Trim', 5
   );
 }
 
 
-/* -------------------------------------------------------------------------- */
-/* Sheet writers                                                              */
-/* -------------------------------------------------------------------------- */
-
-function writeTrimLatestSheet_(report) {
-  const sheet = getOrCreateSheet_(TRIM_LATEST_SHEET);
-  sheet.clear();
-  sheet.getRange(1, 1, 1, TRIM_LATEST_HEADERS.length)
-       .setValues([TRIM_LATEST_HEADERS])
-       .setFontWeight('bold');
-
-  const rows = report.measurements.map(function (m) {
-    return [
-      m.id, m.name, m.bytes_before, m.bytes_after,
-      m.reduction_pct, m.flag, m.trimmed_hash, m.profile_version
-    ];
-  });
-
-  if (rows.length) {
-    sheet.getRange(2, 1, rows.length, TRIM_LATEST_HEADERS.length).setValues(rows);
+/**
+ * Convenience: read one cached recipe by id. Useful from the script editor
+ * for ad-hoc inspection — e.g. trimRecipe(loadRecipeFromDrive('2006728')).
+ */
+function loadRecipeFromDrive(recipeId) {
+  const folder   = getOrThrowDriveFolder_();
+  const filename = `recipe_${recipeId}.json`;
+  const files    = folder.getFilesByName(filename);
+  if (!files.hasNext()) {
+    throw new Error(`No cached recipe found: ${filename}`);
   }
-  sheet.setFrozenRows(1);
-  sheet.autoResizeColumns(1, TRIM_LATEST_HEADERS.length);
-}
-
-
-function appendTrimSnapshotRow_(report, file) {
-  const sheet = getOrCreateSheet_(TRIM_SNAPSHOTS_SHEET);
-
-  if (sheet.getLastRow() === 0) {
-    sheet.getRange(1, 1, 1, TRIM_SNAPSHOTS_HEADERS.length)
-         .setValues([TRIM_SNAPSHOTS_HEADERS])
-         .setFontWeight('bold');
-    sheet.setFrozenRows(1);
-  }
-
-  sheet.appendRow([
-    report.measured_at,
-    report.profile_version,
-    report.profile_hash,
-    report.recipe_count,
-    report.bytes_before_total,
-    report.bytes_after_total,
-    report.reduction_pct.median,
-    report.reduction_pct.p90,
-    report.reduction_pct.p95,
-    report.flag_counts.low_reduction,
-    report.flag_counts.normal,
-    report.flag_counts.high_reduction,
-    file.getId(),
-    `=HYPERLINK("${file.getUrl()}","${file.getName()}")`
-  ]);
-}
-
-
-function writeTrimComparisonSheet_(comparison) {
-  const sheet = getOrCreateSheet_(TRIM_COMPARISON_SHEET);
-  sheet.clear();
-
-  let row = 1;
-
-  // Title
-  sheet.getRange(row, 1)
-       .setValue(`Comparison: ${comparison.profile_a} → ${comparison.profile_b}`)
-       .setFontWeight('bold').setFontSize(14);
-  row += 2;
-
-  // Distribution delta
-  sheet.getRange(row, 1).setValue('Distribution delta').setFontWeight('bold');
-  row++;
-  sheet.getRange(row, 1, 3, 2).setValues([
-    ['median', comparison.distribution_delta.median],
-    ['p90',    comparison.distribution_delta.p90],
-    ['p95',    comparison.distribution_delta.p95]
-  ]);
-  row += 4;
-
-  // Flag count delta
-  sheet.getRange(row, 1).setValue('Flag count delta').setFontWeight('bold');
-  row++;
-  sheet.getRange(row, 1, 3, 2).setValues([
-    ['low_reduction',  comparison.flag_count_delta.low_reduction],
-    ['normal',         comparison.flag_count_delta.normal],
-    ['high_reduction', comparison.flag_count_delta.high_reduction]
-  ]);
-  row += 4;
-
-  // Recipes changed
-  sheet.getRange(row, 1)
-       .setValue(`Recipes changed (${comparison.recipes_changed.length})`)
-       .setFontWeight('bold');
-  row++;
-  const changedHeaders = [
-    'id', 'name', 'reduction_before', 'reduction_after',
-    'reduction_delta', 'flag_before', 'flag_after'
-  ];
-  sheet.getRange(row, 1, 1, changedHeaders.length)
-       .setValues([changedHeaders]).setFontWeight('bold');
-  row++;
-  if (comparison.recipes_changed.length) {
-    const changedRows = comparison.recipes_changed.map(function (c) {
-      return [c.id, c.name, c.reduction_before, c.reduction_after,
-              c.reduction_delta, c.flag_before, c.flag_after];
-    });
-    sheet.getRange(row, 1, changedRows.length, changedHeaders.length)
-         .setValues(changedRows);
-    row += changedRows.length;
-  }
-  row += 1;
-
-  // Added / removed (compact)
-  if (comparison.recipes_added.length) {
-    sheet.getRange(row, 1)
-         .setValue(`Recipes added (${comparison.recipes_added.length})`)
-         .setFontWeight('bold');
-    row++;
-    const addedRows = comparison.recipes_added.map(function (r) {
-      return [r.id, r.name];
-    });
-    sheet.getRange(row, 1, addedRows.length, 2).setValues(addedRows);
-    row += addedRows.length + 1;
-  }
-
-  if (comparison.recipes_removed.length) {
-    sheet.getRange(row, 1)
-         .setValue(`Recipes removed (${comparison.recipes_removed.length})`)
-         .setFontWeight('bold');
-    row++;
-    const removedRows = comparison.recipes_removed.map(function (r) {
-      return [r.id, r.name];
-    });
-    sheet.getRange(row, 1, removedRows.length, 2).setValues(removedRows);
-  }
-
-  sheet.autoResizeColumns(1, changedHeaders.length);
+  return JSON.parse(files.next().getBlob().getDataAsString());
 }
 
 
 /* -------------------------------------------------------------------------- */
-/* Drive persistence                                                          */
+/* Bulk read                                                                  */
 /* -------------------------------------------------------------------------- */
-
-function saveTrimReportToDrive_(report) {
-  const folder   = getTrimDriveFolder_();
-  const safeTs   = report.measured_at.replace(/[:.]/g, '-');
-  const filename = `trim_snapshot_v${report.profile_version}_${safeTs}.json`;
-  return folder.createFile(filename, canonicalJson(report), MimeType.PLAIN_TEXT);
-}
-
-function readTrimReportFromDrive_(fileId) {
-  const blob = DriveApp.getFileById(fileId).getBlob().getDataAsString();
-  return JSON.parse(blob);
-}
 
 /**
- * Read the most recent N file ids from the Trim Snapshots log.
- * Returned newest-first.
+ * Read all recipe_*.json files from the cache folder.
+ *
+ * Returns recipes in the same shape as getStructuredRecipes({ includeCode: true })
+ * — restricted to whatever fields writeRecipeJsonFile_ persists.
+ *
+ * @returns {Array<Object>}
  */
-function readRecentSnapshotFileIds_(n) {
-  const sheet = SpreadsheetApp.getActive().getSheetByName(TRIM_SNAPSHOTS_SHEET);
-  if (!sheet || sheet.getLastRow() < 2) return [];
+function loadRecipesFromDrive() {
+  const folder  = getOrThrowDriveFolder_();
+  const files   = folder.getFiles();
+  const recipes = [];
 
-  const fileIdCol = TRIM_SNAPSHOTS_HEADERS.indexOf('snapshot_file_id') + 1;
-  const lastRow   = sheet.getLastRow();
-  const startRow  = Math.max(2, lastRow - n + 1);
-  const numRows   = lastRow - startRow + 1;
+  while (files.hasNext()) {
+    const file = files.next();
+    const name = file.getName();
+    if (!/^recipe_.*\.json$/.test(name)) continue;
 
-  const ids = sheet.getRange(startRow, fileIdCol, numRows, 1).getValues()
-                   .map(function (r) { return r[0]; })
-                   .filter(function (v) { return !!v; });
-  return ids.reverse(); // newest first
+    try {
+      const text = file.getBlob().getDataAsString();
+      recipes.push(JSON.parse(text));
+    } catch (err) {
+      Logger.log(`Failed to parse ${name}: ${err.message}`);
+    }
+  }
+
+  return recipes;
 }
 
 
@@ -268,19 +151,10 @@ function readRecentSnapshotFileIds_(n) {
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-function getTrimDriveFolder_() {
-  const props = PropertiesService.getScriptProperties();
-  const id = props.getProperty('TRIM_DRIVE_FOLDER_ID')
-          || props.getProperty('RECIPE_DRIVE_FOLDER_ID');
-  if (!id) {
-    throw new Error('Set TRIM_DRIVE_FOLDER_ID or RECIPE_DRIVE_FOLDER_ID in Script Properties.');
-  }
-  return DriveApp.getFolderById(id);
-}
-
-function getOrCreateSheet_(name) {
-  const ss = SpreadsheetApp.getActive();
-  return ss.getSheetByName(name) || ss.insertSheet(name);
+function getOrCreateTrimmedSubfolder_() {
+  const parent   = getOrThrowDriveFolder_();
+  const existing = parent.getFoldersByName('trimmed');
+  return existing.hasNext() ? existing.next() : parent.createFolder('trimmed');
 }
 
 
@@ -291,10 +165,12 @@ function getOrCreateSheet_(name) {
 // function onOpen() {
 //   SpreadsheetApp.getUi()
 //     .createMenu('Workato')
-//       .addItem('Sync recipes (metadata only)', 'syncRecipesMetadata')
-//       .addItem('Sync recipes (full structure)', 'syncRecipesFull')
+//       .addItem('Sync recipes (metadata only)',   'syncRecipesMetadata')
+//       .addItem('Sync recipes (full structure)',  'syncRecipesFull')
 //       .addSeparator()
-//       .addItem('Measure trim',                  'measureTrimAndWrite')
-//       .addItem('Compare last two snapshots',    'compareLastTwoTrimSnapshots')
+//       .addItem('Measure trim (from cache)',      'measureTrimFromDrive')
+//       .addItem('Measure trim (refetch from API)','measureTrimAndWrite')
+//       .addItem('Write trimmed recipes to Drive', 'writeTrimmedRecipesToDrive')
+//       .addItem('Compare last two snapshots',     'compareLastTwoTrimSnapshots')
 //     .addToUi();
 // }
