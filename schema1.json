@@ -1,0 +1,2318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sdc.local/schemas/data-collection.json",
+  "title": "SDC Data Collection Project",
+  "description": "SDC platform \u2014 SDC Data Collection Project. Auto-generated from Workato data-table exports. One $def per table. Cross-project refs resolve via $id.",
+  "type": "object",
+  "properties": {},
+  "x-generated": true,
+  "$defs": {
+    "CFG_ErrorTranslation": {
+      "type": "object",
+      "title": "CFG_ErrorTranslation",
+      "x-workato-table-name": "CFG_ErrorTranslation",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "error_translation_id": {
+          "type": "string",
+          "description": "Business PK (UUID).",
+          "x-workato-field-id": "05765539-999d-4ce6-bb27-06ba150b6615"
+        },
+        "template_version_id": {
+          "type": "string",
+          "description": "FK \u2192 VER_TemplateVersion.template_version_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/VER_TemplateVersion",
+            "target_field": "template_version_id"
+          },
+          "x-workato-field-id": "86440bae-6d04-4a85-86b7-4755467d4e08",
+          "x-immutable": true
+        },
+        "error_code": {
+          "type": "string",
+          "description": "Application-defined error code. Must match sql_error_code values used in the validation SQL.",
+          "x-workato-field-id": "c4b76ad0-73ed-4659-8138-298022d69319"
+        },
+        "human_readable_message": {
+          "type": "string",
+          "description": "Supplier-facing error text. May include placeholders defined in required_placeholders.",
+          "x-workato-field-id": "2b555369-379f-4dfe-a276-6e233642d933"
+        },
+        "required_placeholders": {
+          "type": "string",
+          "description": "Placeholder tokens used in human_readable_message (e.g., 'field_name,expected_value'). Empty string if none.",
+          "x-workato-field-id": "1b2953dc-1b07-4f75-a4ae-e6141d17e144"
+        }
+      },
+      "required": [
+        "error_translation_id",
+        "template_version_id",
+        "error_code",
+        "human_readable_message",
+        "required_placeholders"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "CFG_Field": {
+      "type": "object",
+      "title": "CFG_Field",
+      "x-workato-table-name": "CFG_Field",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "field_id": {
+          "type": "string",
+          "description": "Business PK (UUID).",
+          "x-workato-field-id": "25dffea2-ade1-4669-8b04-dfbfeeacfb84"
+        },
+        "template_version_id": {
+          "type": "string",
+          "description": "FK \u2192 VER_TemplateVersion.template_version_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/VER_TemplateVersion",
+            "target_field": "template_version_id"
+          },
+          "x-workato-field-id": "0e0c8bd5-a176-4e25-9558-36af5a3b4a85",
+          "x-immutable": true
+        },
+        "field_name": {
+          "type": "string",
+          "description": "Column name in the upload template. Immutable within a version.",
+          "x-workato-field-id": "f9afaedb-e878-4aad-9c9b-43b417403020",
+          "x-immutable": true
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable field description.",
+          "x-workato-field-id": "bf38715d-d786-448b-a172-c986a81bf151"
+        },
+        "data_type": {
+          "type": "string",
+          "description": "Expected type: string | integer | date | decimal | boolean.",
+          "enum": [
+            "string",
+            "integer",
+            "date",
+            "decimal",
+            "boolean"
+          ],
+          "x-workato-field-id": "2af6cd17-8aa4-4f92-8009-5f7ac281f7f4"
+        },
+        "data_format": {
+          "type": "string",
+          "description": "Expected data shape (e.g., 'MM/DD/YYYY', 'ISO-8601').",
+          "x-workato-field-id": "da38fd5f-d982-4a32-875a-9b9c0d44d624"
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether the field must have a value.",
+          "default": false,
+          "x-workato-field-id": "3580ae49-615b-4de1-89cd-a3b0f8634d89",
+          "x-workato-type": "boolean"
+        },
+        "must_be_empty": {
+          "type": "boolean",
+          "description": "If true, this field must be blank in submissions. Used for system-managed or read-only columns.",
+          "default": false,
+          "x-workato-field-id": "215cc810-a95d-4c7a-b79c-b0c954b7fe31",
+          "x-workato-type": "boolean"
+        },
+        "column_unique": {
+          "type": "boolean",
+          "description": "Whether values must be unique across all rows.",
+          "default": false,
+          "x-workato-field-id": "4e566040-4ae7-4d16-af22-69feeb3f2585",
+          "x-workato-type": "boolean"
+        },
+        "data_cleaning_flags": {
+          "type": "string",
+          "description": "Serialized cleaning directives (e.g., 'trim,uppercase').",
+          "x-workato-field-id": "192c5a90-c8f6-4541-8c64-8317bc850fd1"
+        },
+        "position": {
+          "type": "integer",
+          "description": "Column display/processing order.",
+          "x-workato-field-id": "6034a8c7-06b9-4281-93ed-cb80cd1094bb",
+          "x-workato-type": "integer"
+        },
+        "lookup_name": {
+          "type": "string",
+          "description": "Soft join \u2192 CFG_Lookup.lookup_name (scoped by shared template_version_id). Name-based by convention.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Lookup",
+            "target_field": "lookup_name",
+            "soft_join": true,
+            "rationale": "Name-based join, not UUID-based. Resolved at runtime by shared value."
+          },
+          "x-workato-field-id": "23c452eb-6e87-48dd-bf61-7eab2803af94"
+        },
+        "depends_on": {
+          "type": "string",
+          "description": "FK \u2192 CFG_Field.field_id of the parent field in a cascading dropdown.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Field",
+            "target_field": "field_id",
+            "self_reference": true
+          },
+          "x-workato-field-id": "033f97a0-0db4-4254-946d-3196ea03b6c3"
+        },
+        "field_length_validation": {
+          "type": "string",
+          "description": "Character count limits for text fields (e.g., 'min:1,max:50').",
+          "x-workato-field-id": "df4e6a13-978c-4936-927b-49e4cda8f6fc"
+        },
+        "numeric_field_validation": {
+          "type": "string",
+          "description": "Mathematical boundaries for numeric fields (e.g., 'min:0,max:999999').",
+          "x-workato-field-id": "9f790fc5-e111-41fe-b0b8-460195f4ac39"
+        },
+        "date_field_validation": {
+          "type": "string",
+          "description": "Chronological boundaries for date fields (e.g., 'min:2020-01-01,max:today').",
+          "x-workato-field-id": "5e532348-efa0-450c-b6e4-1ba0e30b17e9"
+        },
+        "field_input_validation": {
+          "type": "string",
+          "description": "Input validation as a regular expression.",
+          "x-workato-field-id": "0491ed45-652f-4f01-bce2-9509c8f9374e"
+        },
+        "strict": {
+          "type": "boolean",
+          "description": "Does a single-field validation failure reject the entire row? Defaults to false if null.",
+          "x-workato-field-id": "2efefc0e-b9d0-4ec7-8057-62ce0854fe57",
+          "x-workato-type": "boolean"
+        },
+        "visible": {
+          "type": "boolean",
+          "description": "Whether this field appears on the WFA intake form. Used by CFG_FormSlot generation.",
+          "default": false,
+          "x-workato-field-id": "112e55c9-22b6-4b35-8f24-ca0cc98b464d",
+          "x-workato-type": "boolean"
+        },
+        "control_type": {
+          "type": "string",
+          "description": "WFA widget type (e.g., text, dropdown, date). Derived from data_type and lookup_name during form slot generation.",
+          "x-workato-field-id": "54db21c9-fc7b-42a9-afb4-e4533c857d1b"
+        }
+      },
+      "required": [
+        "field_id",
+        "template_version_id",
+        "field_name",
+        "data_type",
+        "required",
+        "must_be_empty",
+        "column_unique",
+        "position"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "CFG_FormSlot": {
+      "type": "object",
+      "title": "CFG_FormSlot",
+      "x-workato-table-name": "CFG_FormSlot",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "form_slot_id": {
+          "type": "string",
+          "description": "Business PK (UUID).",
+          "x-workato-field-id": "b9262437-a0ba-4bda-9b80-deba8f266cbf"
+        },
+        "template_version_id": {
+          "type": "string",
+          "description": "FK \u2192 VER_TemplateVersion.template_version_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/VER_TemplateVersion",
+            "target_field": "template_version_id"
+          },
+          "x-workato-field-id": "12bb350a-3c87-4868-ace3-adefe795f4e7",
+          "x-immutable": true
+        },
+        "field_id": {
+          "type": "string",
+          "description": "FK \u2192 CFG_Field.field_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Field",
+            "target_field": "field_id"
+          },
+          "x-workato-field-id": "35e733bc-30b2-4175-8c7a-f210222202aa",
+          "x-immutable": true
+        },
+        "field_name": {
+          "type": "string",
+          "description": "Display label shown to the supplier. Copied from CFG_Field.field_name.",
+          "x-workato-field-id": "535ddb25-efed-4f4b-8618-4cb11d0507c7"
+        },
+        "slot_name": {
+          "type": "string",
+          "description": "Maps to the corresponding slot field on WFA_SupplierRequest (e.g., 'slot_text_01'). Used as the lookup key when saving manual entries.",
+          "x-fk": {
+            "$ref": "#/$defs/WFA_SupplierRequest",
+            "target_field": "slot_name",
+            "soft_join": true,
+            "rationale": "Name-based join, not UUID-based. Resolved at runtime by shared value.",
+            "note": "Maps logical slot_name to a fixed slot column on WFA_SupplierRequest (e.g. slot_text_01)."
+          },
+          "x-workato-field-id": "fbcede7c-2dc7-4c9d-9a70-1caedf7eacc2"
+        },
+        "control_type": {
+          "type": "string",
+          "description": "WFA widget type (e.g., text | number | dropdown | date | checkbox).",
+          "enum": [
+            "text",
+            "number",
+            "dropdown",
+            "date",
+            "checkbox"
+          ],
+          "x-workato-field-id": "ad90e437-7f11-4769-be11-a7730c760b5d"
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether the WFA form enforces this field as required. Independent of CFG_Field.required (validation level).",
+          "default": false,
+          "x-workato-field-id": "aa01f582-e9a2-4bba-9f84-ad9d531c065a",
+          "x-workato-type": "boolean"
+        },
+        "lookup_name": {
+          "type": "string",
+          "description": "Soft join \u2192 CFG_lookup.lookup_name. Populates dropdown options when the widget type (control_type) is dropdown.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Lookup",
+            "target_field": "lookup_name",
+            "soft_join": true,
+            "rationale": "Name-based join, not UUID-based. Resolved at runtime by shared value."
+          },
+          "x-workato-field-id": "4c44b2f8-3721-4c19-87f8-a0256efe49b9"
+        },
+        "position": {
+          "type": "integer",
+          "description": "Display order on the form",
+          "x-workato-field-id": "85722175-0800-4a08-9fe0-e2371315b03d",
+          "x-workato-type": "integer"
+        }
+      },
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "CFG_Lookup": {
+      "type": "object",
+      "title": "CFG_Lookup",
+      "x-workato-table-name": "CFG_Lookup",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "lookup_id": {
+          "type": "string",
+          "description": "Business PK (UUID).",
+          "x-workato-field-id": "b179afe4-7735-4abd-a6b8-904b2b62641a"
+        },
+        "template_version_id": {
+          "type": "string",
+          "description": "FK \u2192 VER_TemplateVersion.template_version_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/VER_TemplateVersion",
+            "target_field": "template_version_id"
+          },
+          "x-workato-field-id": "72c36cbf-b5d7-47ab-9c2a-eb724345368a",
+          "x-immutable": true
+        },
+        "lookup_name": {
+          "type": "string",
+          "description": "Logical group name. Joined from CFG_Field.lookup_name. Immutable within a version.",
+          "x-workato-field-id": "70783ca2-3952-43d3-9d64-b0779ffef1c5",
+          "x-immutable": true
+        },
+        "valid_value": {
+          "type": "string",
+          "description": "Acceptable value for this lookup option.",
+          "x-workato-field-id": "a0d649cd-b813-4670-80f3-55bea9cbc739"
+        },
+        "parent_value": {
+          "type": "string",
+          "description": "When the parent field (identified by CFG_Field.depends_on) has this value, this option is available in the dependent dropdown.",
+          "x-workato-field-id": "38b1210e-b194-43a4-a6ad-6c5db28adc49"
+        },
+        "project_specific": {
+          "type": "boolean",
+          "description": "If true, this value is client-specific and excluded from the reusable template snapshot.",
+          "x-workato-field-id": "a5d1004a-b5ef-4d79-a65f-d2880aa6b98f",
+          "x-workato-type": "boolean"
+        }
+      },
+      "required": [
+        "lookup_id",
+        "template_version_id",
+        "lookup_name",
+        "valid_value"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "CFG_Rule": {
+      "type": "object",
+      "title": "CFG_Rule",
+      "x-workato-table-name": "CFG_Rule",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "rule_id": {
+          "type": "string",
+          "description": "Business PK (UUID).",
+          "x-workato-field-id": "e7fb7054-d057-43b8-82b1-8be63416dac8"
+        },
+        "field_id": {
+          "type": "string",
+          "description": "FK \u2192 CFG_Field.field_id. The primary field this rule validates. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Field",
+            "target_field": "field_id"
+          },
+          "x-workato-field-id": "ee5c21dc-e4fa-4aac-b643-35c0f51aa9fb",
+          "x-immutable": true
+        },
+        "target_field": {
+          "type": "string",
+          "description": "Denormalized display name of the field referenced by field_id. Not a join key.",
+          "x-workato-field-id": "0f412050-55f3-4a95-aa4f-cd83d112b2fd"
+        },
+        "rule": {
+          "type": "string",
+          "description": "Verb or phrase defining the cross-field relationship (e.g., 'must_equal', 'required_when').",
+          "x-workato-field-id": "61eaa1f6-58a2-43e3-a5bf-c42ca5822ad7"
+        },
+        "condition_field": {
+          "type": "string",
+          "description": "Denormalized display name of the field referenced by condition_field_id. Not a join key.",
+          "x-workato-field-id": "82b4e72b-c043-4180-bdce-b328b2a2c368"
+        },
+        "condition_field_id": {
+          "type": "string",
+          "description": "FK \u2192 CFG_Field.field_id. The secondary field that triggers the rule or acts as a baseline for comparison.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Field",
+            "target_field": "field_id"
+          },
+          "x-workato-field-id": "f259c949-803a-451e-aae1-6d66ea54adf7"
+        },
+        "conditional_value": {
+          "type": "string",
+          "description": "Specific input value on the condition field that triggers the rule.",
+          "x-workato-field-id": "5eaf3aa6-ea10-4e0e-a7d7-b0ec7dfe65f8"
+        },
+        "error_message": {
+          "type": "string",
+          "description": "Default actionable error instruction for the output report.",
+          "x-workato-field-id": "2c764723-bc5e-4f22-818e-ecc4d516f47a"
+        },
+        "error_message_custom": {
+          "type": "string",
+          "description": "Custom actionable error instruction for the output report. Overrides error_message when present.",
+          "x-workato-field-id": "3f81a281-9dce-4555-b480-07e3cb7452f2"
+        },
+        "strict_enforcement": {
+          "type": "boolean",
+          "description": "If false, violation is a warning, not a rejection.",
+          "x-workato-field-id": "91c34a63-bd5d-4219-a6db-72813d7c7efa",
+          "x-workato-type": "boolean"
+        },
+        "template_version_id": {
+          "type": "string",
+          "description": "FK \u2192 VER_TemplateVersion.template_version_id. Required. Every rule must be version-scoped.",
+          "x-fk": {
+            "$ref": "#/$defs/VER_TemplateVersion",
+            "target_field": "template_version_id"
+          },
+          "x-workato-field-id": "01c453c7-a0d3-42aa-9128-cc25b57b114f"
+        },
+        "field_name_display": {
+          "type": "string",
+          "x-workato-type": "relation",
+          "description": "Relation \u2192 CFG_Field. Displays field_name for UI readability.",
+          "x-workato-relation": {
+            "target_table": "CFG_Field",
+            "target_field_id": "f9afaedb-e878-4aad-9c9b-43b417403020"
+          },
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Field",
+            "via": "workato-relation"
+          },
+          "x-workato-field-id": "72c6891c-4420-4b2d-b6a1-d1a422d46e43"
+        }
+      },
+      "required": [
+        "rule_id",
+        "field_id",
+        "target_field",
+        "rule",
+        "condition_field",
+        "condition_field_id",
+        "error_message",
+        "template_version_id"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "CFG_Variant": {
+      "type": "object",
+      "title": "CFG_Variant",
+      "x-workato-table-name": "CFG_Variant",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "variant_id": {
+          "type": "string",
+          "description": "Business PK (UUID).",
+          "x-workato-field-id": "a1240aff-262f-4072-a501-db2102cbac79"
+        },
+        "template_version_id": {
+          "type": "string",
+          "description": "FK \u2192 VER_TemplateVersion.template_version_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/VER_TemplateVersion",
+            "target_field": "template_version_id"
+          },
+          "x-workato-field-id": "e33e8418-8126-4166-b880-7b4306dc9053",
+          "x-immutable": true
+        },
+        "variant_name": {
+          "type": "string",
+          "description": "Human-readable label (e.g., 'UK Resources', 'US Resources'). Immutable within a version.",
+          "x-workato-field-id": "d8c1d4b4-cc41-45d9-8a37-8504101e9e5d",
+          "x-immutable": true
+        },
+        "description": {
+          "type": "string",
+          "description": "Explanation of when/why this variant is assigned.",
+          "x-workato-field-id": "b4b8d1c0-5e3b-49b3-8894-bc5d7c15c8d1"
+        },
+        "template_file_id": {
+          "type": "string",
+          "description": "Workato FileStorage ID of this variant's XLSX.",
+          "x-workato-field-id": "45478851-fa34-48af-b8a9-ef4c509edb4c"
+        }
+      },
+      "required": [
+        "variant_id",
+        "template_version_id",
+        "variant_name"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "CFG_VariantField": {
+      "type": "object",
+      "title": "CFG_VariantField",
+      "x-workato-table-name": "CFG_VariantField",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "variant_field_id": {
+          "type": "string",
+          "description": "Business PK (UUID).",
+          "x-workato-field-id": "ce0231b6-ca99-4a29-b911-9228d1e520cc"
+        },
+        "variant_id": {
+          "type": "string",
+          "description": "FK \u2192 CFG_Variant.variant_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Variant",
+            "target_field": "variant_id"
+          },
+          "x-workato-field-id": "a1c7165c-a856-496a-8643-9fb3f853706d",
+          "x-immutable": true
+        },
+        "field_id": {
+          "type": "string",
+          "description": "FK \u2192 CFG_Field.field_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Field",
+            "target_field": "field_id"
+          },
+          "x-workato-field-id": "000eb024-5254-4c51-be57-a0d3bd75cefa",
+          "x-immutable": true
+        }
+      },
+      "required": [
+        "variant_field_id",
+        "variant_id",
+        "field_id"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "RUN_FieldError": {
+      "type": "object",
+      "title": "RUN_FieldError",
+      "x-workato-table-name": "RUN_FieldError",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "field_error_id": {
+          "type": "string",
+          "description": "Business PK (UUID).",
+          "x-workato-field-id": "16b229e5-1fa6-4093-83e6-84f582b2fbc2"
+        },
+        "validation_result_id": {
+          "type": "string",
+          "description": "FK \u2192 RUN_ValidationResult.validation_result_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/RUN_ValidationResult",
+            "target_field": "validation_result_id"
+          },
+          "x-workato-field-id": "f6afffc0-8cf3-434b-8382-8b6b92029fdf",
+          "x-immutable": true
+        },
+        "field_id": {
+          "type": "string",
+          "description": "FK \u2192 CFG_Field.field_id. Anchors error to a version via CFG_Field.template_version_id.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Field",
+            "target_field": "field_id"
+          },
+          "x-workato-field-id": "f6b1a0f8-68ec-4a2d-afd9-dfa0aedf52af"
+        },
+        "row_number": {
+          "type": "integer",
+          "description": "Source row index in the submitted file.",
+          "x-workato-field-id": "0c8c5af8-65ac-43f0-b913-3a1daef95ebe",
+          "x-workato-type": "integer"
+        },
+        "submitted_value": {
+          "type": "string",
+          "description": "The value that failed. May be null for required-field violations.",
+          "x-workato-field-id": "4cb09638-6de1-4ee5-8bb9-fe4301a225e6"
+        },
+        "error_message": {
+          "type": "string",
+          "description": "Human-readable error. Source: CFG_Rule.error_message, CFG_Field validation, or CFG_ErrorTranslation.",
+          "x-workato-field-id": "8823b145-88ed-4570-8449-73e127d293d2"
+        },
+        "field_name_display": {
+          "type": "string",
+          "x-workato-type": "relation",
+          "description": "Relation \u2192 CFG_Field. Displays field_name for UI readability.",
+          "x-workato-relation": {
+            "target_table": "CFG_Field",
+            "target_field_id": "f9afaedb-e878-4aad-9c9b-43b417403020"
+          },
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Field",
+            "via": "workato-relation"
+          },
+          "x-workato-field-id": "effc9c6b-f9b3-4524-97f7-6f563d7b4311"
+        }
+      },
+      "required": [
+        "field_error_id",
+        "validation_result_id",
+        "field_id",
+        "row_number",
+        "error_message"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "RUN_ManualEntry": {
+      "type": "object",
+      "title": "RUN_ManualEntry",
+      "x-workato-table-name": "RUN_ManualEntry",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "supplier_request_id": {
+          "type": "string",
+          "x-workato-type": "relation",
+          "description": "Relation \u2192 WFA_Supplier_request. Scopes rows to a single request. Used by WFA table widget as relatedColumnId.",
+          "x-workato-relation": {
+            "target_table": "WFA_SupplierRequest",
+            "target_field_id": "98922f09-130c-47f9-8a4f-8be13524861a"
+          },
+          "x-fk": {
+            "$ref": "#/$defs/WFA_SupplierRequest",
+            "via": "workato-relation"
+          },
+          "x-workato-field-id": "8ac88e63-0c93-449a-91f5-ada1fc4ae406"
+        },
+        "manual_entry_id": {
+          "type": "string",
+          "description": "Business PK (UUID)",
+          "x-workato-field-id": "82c8f9d5-eb96-417f-b84d-0c6befb8af10"
+        },
+        "row_number": {
+          "type": "integer",
+          "description": "Worker number. Incremented for each saved worker.",
+          "x-workato-field-id": "376c902d-396e-42a8-8725-06d073358db3",
+          "x-workato-type": "integer"
+        },
+        "field_id": {
+          "type": "string",
+          "description": "FK \u2192 CFG_Field.field_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Field",
+            "target_field": "field_id"
+          },
+          "x-workato-field-id": "f4cf972b-a037-4f62-bff8-d876bf39dc4a",
+          "x-immutable": true
+        },
+        "field_name": {
+          "type": "string",
+          "description": "Denormalized from CFG_Field.field_name. Displayed as a column header in WFA table widget. Read-only for suppliers.",
+          "x-workato-field-id": "f582c4d8-784a-4fd6-84bd-f1e62c4c3eee"
+        },
+        "submitted_value": {
+          "type": "string",
+          "description": "Value entered by the supplier via the WFA form. Editable until submission.",
+          "x-workato-field-id": "dbfe11f4-7fc0-42a1-963c-b9ffbdfc59ac"
+        }
+      },
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "RUN_PipelineError": {
+      "type": "object",
+      "title": "RUN_PipelineError",
+      "x-workato-table-name": "RUN_PipelineError",
+      "x-workato-project": "Data collection",
+      "x-workato-tags": [
+        "errors"
+      ],
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "error_id": {
+          "type": "string",
+          "x-workato-field-id": "a1a38a51-95c2-4a4e-8374-0490d2180273"
+        },
+        "recipe_name": {
+          "type": "string",
+          "x-workato-field-id": "a0a8070d-52fa-4e5b-af83-c5cf40e52b72"
+        },
+        "step_number": {
+          "type": "integer",
+          "x-workato-field-id": "742edfc2-33a6-4c59-9224-07bd24e08499",
+          "x-workato-type": "integer"
+        },
+        "error_type": {
+          "type": "string",
+          "x-workato-field-id": "608f5187-9a61-40cd-940f-7879dc705c44"
+        },
+        "error_message": {
+          "type": "string",
+          "x-workato-field-id": "5ed65e61-04f4-44a6-ba2a-084eca0e5cd0"
+        },
+        "supplier_request_id": {
+          "type": "string",
+          "x-fk": {
+            "$ref": "#/$defs/WFA_SupplierRequest",
+            "target_field": "supplier_request_id"
+          },
+          "x-workato-field-id": "83ad576a-89b4-4fa7-851c-f20585f1a699"
+        },
+        "template_project_id": {
+          "type": "string",
+          "x-fk": {
+            "$ref": "#/$defs/WFA_TemplateProject",
+            "target_field": "template_project_id"
+          },
+          "x-workato-field-id": "86ae783d-003d-481a-a4fe-b61c8cdf04c6"
+        },
+        "correlation_id": {
+          "type": "string",
+          "x-fk": {
+            "$ref": "https://sdc.local/schemas/base.json#/$defs/HOME_Requests",
+            "target_field": "correlation_id",
+            "deferred_relation": true,
+            "rationale": "Cross-project reference. Resolved in two-pass provisioning."
+          },
+          "x-workato-field-id": "fa047b04-4266-4ae1-8b40-8ceb14d3bcff"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "8010ab17-759c-4e75-8e23-7b50f6860e76",
+          "x-workato-type": "date-time"
+        },
+        "alert_sent": {
+          "type": "boolean",
+          "x-workato-field-id": "92ffa58e-0b7a-4060-a43d-6f237345322f",
+          "x-workato-type": "boolean"
+        },
+        "resolved": {
+          "type": "boolean",
+          "x-workato-field-id": "94fb28c2-66c9-451b-8b08-0ac4fa96de77",
+          "x-workato-type": "boolean"
+        },
+        "resolved_at": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a4771f33-f884-4afe-af99-e4dcc96b98f3",
+          "x-workato-type": "date-time"
+        }
+      },
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "RUN_ReviewNote": {
+      "type": "object",
+      "title": "RUN_ReviewNote",
+      "x-workato-table-name": "RUN_ReviewNote",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "review_note_id": {
+          "type": "string",
+          "description": "Business PK (UUID)",
+          "x-workato-field-id": "9d4f8c1e-fbce-4d3c-b120-6d4c63f085bf"
+        },
+        "supplier_request_id": {
+          "type": "string",
+          "description": "FK \u2192 WFA_SupplierRequest. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/WFA_SupplierRequest",
+            "target_field": "supplier_request_id"
+          },
+          "x-workato-field-id": "1d5926e7-162f-48b8-b98a-8cf41aecb188",
+          "x-immutable": true
+        },
+        "author_email": {
+          "type": "string",
+          "description": "Email address of the note's author.",
+          "x-workato-field-id": "c5703251-3bf3-4275-a565-7b585f35a6a9"
+        },
+        "note_text": {
+          "type": "string",
+          "x-workato-type": "long-text",
+          "description": "Free-text note. May be empty for approvals with no comment.",
+          "x-workato-field-id": "eba8a567-f9bb-48a4-8764-ad928ed500bb"
+        },
+        "review_action": {
+          "type": "string",
+          "description": "'approved' or 'rework'. Records what the analyst decided.",
+          "enum": [
+            "approved",
+            "rework"
+          ],
+          "x-workato-field-id": "fe4001da-6282-40f4-bae1-011b7013a578"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the action. Immutable.",
+          "x-workato-field-id": "12b3dd41-4bc0-493d-8383-8c65a62b51de",
+          "x-workato-type": "date-time",
+          "x-immutable": true
+        }
+      },
+      "required": [
+        "review_note_id",
+        "supplier_request_id",
+        "author_email",
+        "review_action",
+        "created_at"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "RUN_Upload": {
+      "type": "object",
+      "title": "RUN_Upload",
+      "x-workato-table-name": "RUN_Upload",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "upload_id": {
+          "type": "string",
+          "description": "Business PK (UUID). Generated at submission time.",
+          "x-workato-field-id": "4fddb53e-6b7e-4ed9-8a34-1568e2c2c7e8"
+        },
+        "supplier_request_id": {
+          "type": "string",
+          "description": "FK \u2192 WFA_SupplierRequest.supplier_request_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/WFA_SupplierRequest",
+            "target_field": "supplier_request_id"
+          },
+          "x-workato-field-id": "2ff2e349-2022-44cd-83a7-3cf620d707ed",
+          "x-immutable": true
+        },
+        "template_version_id": {
+          "type": "string",
+          "description": "FK \u2192 VER_TemplateVersion.template_version_id. Frozen at creation. Copied from WFA_SupplierRequest.assigned_version_id.",
+          "x-fk": {
+            "$ref": "#/$defs/VER_TemplateVersion",
+            "target_field": "template_version_id"
+          },
+          "x-workato-field-id": "32f07cf8-950c-4468-a8dc-8933202d90d6"
+        },
+        "submitted_file_id": {
+          "type": "string",
+          "description": "FileStorage ID of the raw uploaded file. Immutable.",
+          "x-workato-field-id": "a036abdb-6369-41d0-aeae-08b0b440b0f5",
+          "x-immutable": true
+        },
+        "extracted_file_version_id": {
+          "type": "string",
+          "description": "FileStorage ID after extraction/normalization. Written during validation pipeline.",
+          "x-workato-field-id": "c76db493-6676-4ae4-8bbd-55b1a092a8aa"
+        },
+        "status": {
+          "type": "string",
+          "description": "Values: received | extracting | validating | validated | failed.",
+          "enum": [
+            "received",
+            "extracting",
+            "validating",
+            "validated",
+            "failed"
+          ],
+          "x-workato-field-id": "1bd6ca28-b75c-4d9a-8fbf-655e5ea263ed"
+        },
+        "submitted_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Submission timestamp. Immutable.",
+          "x-workato-field-id": "62bcdf09-631c-4324-baac-05382ea055e6",
+          "x-workato-type": "date-time",
+          "x-immutable": true
+        },
+        "valid_payload": {
+          "type": "string",
+          "x-workato-type": "long-text",
+          "description": "Validated row data as JSON. Large payloads may require monitoring for field truncation.",
+          "x-workato-field-id": "a8d4491b-7e15-4cdb-9e6c-57376b7bf09c"
+        }
+      },
+      "required": [
+        "upload_id",
+        "supplier_request_id",
+        "template_version_id",
+        "status",
+        "submitted_at"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "RUN_ValidationResult": {
+      "type": "object",
+      "title": "RUN_ValidationResult",
+      "x-workato-table-name": "RUN_ValidationResult",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "validation_result_id": {
+          "type": "string",
+          "description": "Business PK (UUID). Generated by the validation recipe.",
+          "x-workato-field-id": "34acd704-a071-4fb7-a779-bb458a128b4f"
+        },
+        "upload_id": {
+          "type": "string",
+          "description": "FK \u2192 RUN_Upload.upload_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/RUN_Upload",
+            "target_field": "upload_id"
+          },
+          "x-workato-field-id": "835c52fa-86f9-4322-a7ca-ffd2d328d976",
+          "x-immutable": true
+        },
+        "template_version_id": {
+          "type": "string",
+          "description": "FK \u2192 VER_TemplateVersion.template_version_id. Copied from RUN_Upload.template_version_id. Direct traceability.",
+          "x-fk": {
+            "$ref": "#/$defs/VER_TemplateVersion",
+            "target_field": "template_version_id"
+          },
+          "x-workato-field-id": "e15eeb3a-fb9c-40fb-afff-5f063798ec5d"
+        },
+        "status": {
+          "type": "string",
+          "description": "Values: running | passed | failed | error.",
+          "enum": [
+            "running",
+            "passed",
+            "failed",
+            "error"
+          ],
+          "x-workato-field-id": "5cac27e0-c9b4-4ce0-b53a-95f8e8150429"
+        },
+        "valid_rows": {
+          "type": "integer",
+          "description": "Count of passing rows. Write-once after validation completes.",
+          "x-workato-field-id": "764a6a5b-3353-4001-b822-b0551b533f24",
+          "x-workato-type": "integer",
+          "x-write-once": true
+        },
+        "invalid_rows": {
+          "type": "integer",
+          "description": "Count of failing rows. Write-once after validation completes.",
+          "x-workato-field-id": "3b393ed0-50d8-4ba2-bacc-6107f8863f71",
+          "x-workato-type": "integer",
+          "x-write-once": true
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Validation completion timestamp. Write-once.",
+          "x-workato-field-id": "d0bf3ca7-ec1a-4904-9f7a-4355b51107cd",
+          "x-workato-type": "date-time",
+          "x-write-once": true
+        }
+      },
+      "required": [
+        "validation_result_id",
+        "upload_id",
+        "template_version_id",
+        "status"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "SYS_EventLogs": {
+      "type": "object",
+      "title": "SYS_EventLogs",
+      "x-workato-table-name": "SYS_EventLogs",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "event_id": {
+          "type": "string",
+          "description": "Unique identifier (UUID)",
+          "x-workato-field-id": "07d2566d-5831-4460-973f-774f34f296ef"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "9eabc6cc-073c-4e10-8d53-6baba64741de",
+          "x-workato-type": "date-time"
+        },
+        "correlation_id": {
+          "type": "string",
+          "description": "Join key",
+          "x-fk": {
+            "$ref": "https://sdc.local/schemas/base.json#/$defs/HOME_Requests",
+            "target_field": "correlation_id",
+            "deferred_relation": true,
+            "rationale": "Cross-project reference. Resolved in two-pass provisioning.",
+            "note": "Cross-project audit reference. SYS_EventLogs is in 'Data collection' but written by Base recipes (B-01, B-05) as well as Data collection recipes."
+          },
+          "x-workato-field-id": "d7a99af2-a2cd-43e1-8286-f90d5d1c932e"
+        },
+        "project_id": {
+          "type": "string",
+          "x-workato-field-id": "0293cfe5-09bc-4b01-9363-5a677193f990"
+        },
+        "analyst_email": {
+          "type": "string",
+          "x-workato-field-id": "e71103d5-2a97-4a15-8a59-d6d42428ddff"
+        },
+        "source_recipe": {
+          "type": "string",
+          "description": "The recipe writing to this data table.",
+          "x-workato-field-id": "c9f15ba5-8db9-4e90-8593-377889857982"
+        },
+        "phase": {
+          "type": "string",
+          "description": "Represent business-meaningful states.  Intake phases {webhook_received, webhook_validated, webhook_rejected, request_routed};   Project setup phases {workspace_provisioned, request_marked_active};   Provisioning phases {provisioning_started, config_validated, config_invalid, config_failed_to_parse, schema_persisted, templates_generated, suppliers_bootstrapped, suppliers_migrated, incumbent_data_seeded, version_published};   Cross-cutting phases {error, recipe_completed, recipe_failed};",
+          "enum": [
+            "webhook_received",
+            "webhook_validated",
+            "webhook_rejected",
+            "request_routed",
+            "workspace_provisioned",
+            "request_marked_active",
+            "provisioning_started",
+            "config_validated",
+            "config_invalid",
+            "config_failed_to_parse",
+            "schema_persisted",
+            "templates_generated",
+            "suppliers_bootstrapped",
+            "suppliers_migrated",
+            "incumbent_data_seeded",
+            "version_published",
+            "error",
+            "recipe_completed",
+            "recipe_failed"
+          ],
+          "x-workato-field-id": "619d0909-4abc-4c83-b207-4a7c2089d70f"
+        },
+        "severity": {
+          "type": "string",
+          "description": "info | warn | error",
+          "enum": [
+            "info",
+            "warn",
+            "error"
+          ],
+          "x-workato-field-id": "ddd6d4fa-874f-408d-a705-a12fdd4795fc"
+        },
+        "human_message": {
+          "type": "string",
+          "x-workato-field-id": "93e2a102-be1b-4404-958f-d40f7a45b417"
+        },
+        "details_json": {
+          "type": "string",
+          "x-workato-field-id": "c2cb7c4f-be28-44df-acc3-27482143ec06"
+        }
+      },
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "VER_TemplateVersion": {
+      "type": "object",
+      "title": "VER_TemplateVersion",
+      "x-workato-table-name": "VER_TemplateVersion",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "template_version_id": {
+          "type": "string",
+          "description": "Business PK (UUID). Generated by at provision time.",
+          "x-workato-field-id": "c9b30ae9-b4a0-4425-9da2-4f90f171e670"
+        },
+        "template_project_id": {
+          "type": "string",
+          "description": "FK \u2192 WFA_TemplateProject.template_project_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/WFA_TemplateProject",
+            "target_field": "template_project_id"
+          },
+          "x-workato-field-id": "37b87f83-0876-4b65-b91b-962d6c90d429",
+          "x-immutable": true
+        },
+        "version_number": {
+          "type": "integer",
+          "description": "Monotonic version counter. Immutable.",
+          "x-workato-field-id": "7678d483-2942-433d-8282-afedb3635a9b",
+          "x-workato-type": "integer",
+          "x-immutable": true
+        },
+        "version_label": {
+          "type": "string",
+          "description": "Human-readable label (e.g., 'v2.1'). Write-once.",
+          "x-workato-field-id": "6a1aa314-61ab-4c16-8123-a893098e46c5",
+          "x-write-once": true
+        },
+        "status": {
+          "type": "string",
+          "description": "Values: draft | published | deprecated. Forward transitions only.",
+          "enum": [
+            "draft",
+            "published",
+            "deprecated"
+          ],
+          "x-workato-field-id": "7ce56c71-846a-4009-8de7-731c8e25e5cc"
+        },
+        "master_template_file_id": {
+          "type": "string",
+          "description": "Workato FileStorage ID for the master template file. Set at publish.",
+          "x-workato-field-id": "889329be-62ff-4058-80c5-1d64fc7a9081"
+        },
+        "manifest_id": {
+          "type": "string",
+          "description": "FK \u2192 home base Manifests.id. Ties version to its build artifact. Immutable.",
+          "x-fk": {
+            "$ref": "https://sdc.local/schemas/base.json#/$defs/HOME_Manifests",
+            "target_field": "manifest_id",
+            "deferred_relation": true,
+            "rationale": "Cross-project reference. Resolved in two-pass provisioning."
+          },
+          "x-workato-field-id": "6e5ec0e4-5dbe-44fd-9cce-f69dc437d979",
+          "x-immutable": true
+        },
+        "published_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Write-once. Set when status transitions to 'published'.",
+          "x-workato-field-id": "d9f21a8b-633e-414f-87b9-a0c60cd5d854",
+          "x-workato-type": "date-time",
+          "x-write-once": true
+        },
+        "validation_summary": {
+          "type": "string",
+          "x-workato-type": "long-text",
+          "description": "Version-level validation summary. May contain structured JSON.",
+          "x-workato-field-id": "d1a384f9-2d60-440f-a620-855d1fc1ade3"
+        }
+      },
+      "required": [
+        "template_version_id",
+        "template_project_id",
+        "version_number",
+        "status"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "WFA_Cache": {
+      "type": "object",
+      "title": "WFA_Cache",
+      "x-workato-table-name": "WFA_Cache",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "supplier_request_id": {
+          "type": "string",
+          "x-fk": {
+            "$ref": "#/$defs/WFA_SupplierRequest",
+            "target_field": "supplier_request_id",
+            "note": "FK inferred from field name; not explicitly hinted in source schema."
+          },
+          "x-workato-field-id": "16b1ce28-5445-4a27-a1de-5451ab97cb07"
+        },
+        "share_method": {
+          "type": "string",
+          "x-workato-field-id": "9c099feb-355d-4251-b728-f5cd2cbd38a6"
+        },
+        "action_type": {
+          "type": "string",
+          "x-workato-field-id": "b447b353-07b2-4ecc-882c-87056ee3d4ea"
+        },
+        "web_session_id": {
+          "type": "string",
+          "x-workato-field-id": "9f753bb9-9ea4-4c11-88e5-94ea4ca0218f"
+        },
+        "wfa_user_id": {
+          "type": "string",
+          "x-workato-field-id": "020c9cb5-c95f-4565-9e82-a3b7e0d8e566"
+        },
+        "wfa_user_email": {
+          "type": "string",
+          "x-workato-field-id": "237c2eff-ad02-4d3c-812b-59ba87521320"
+        },
+        "wfa_user_name": {
+          "type": "string",
+          "x-workato-field-id": "b892276f-218e-4671-9326-be9bddb45b97"
+        },
+        "wfa_user_status": {
+          "type": "string",
+          "x-workato-field-id": "6ea17201-8228-42a2-ae73-ed0f885e13d9"
+        },
+        "error_message": {
+          "type": "string",
+          "x-workato-field-id": "547f7409-ec31-4111-a550-ab574b4db48b"
+        }
+      },
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "WFA_SupplierRequest": {
+      "type": "object",
+      "title": "WFA_SupplierRequest",
+      "x-workato-table-name": "WFA_SupplierRequest",
+      "x-workato-project": "Data collection",
+      "x-workato-tags": [
+        "request-table"
+      ],
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "supplier_request_id": {
+          "type": "string",
+          "description": "Business PK (UUID)",
+          "x-workato-field-id": "98922f09-130c-47f9-8a4f-8be13524861a"
+        },
+        "template_project_id": {
+          "type": "string",
+          "description": "WFA_TemplateProject.template_project_id. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/WFA_TemplateProject",
+            "target_field": "template_project_id"
+          },
+          "x-workato-field-id": "e8286f04-94b0-497e-b39c-e55040402a52",
+          "x-immutable": true
+        },
+        "assigned_version_id": {
+          "type": "string",
+          "description": "FK \u2192 VER_TemplateVersion.template_version_id. IMMUTABLE. Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/VER_TemplateVersion",
+            "target_field": "template_version_id"
+          },
+          "x-workato-field-id": "fe1703bb-6423-44dd-998e-2673cb108493",
+          "x-immutable": true
+        },
+        "assigned_variant_id": {
+          "type": "string",
+          "description": "FK \u2192 CFG_Variant.variant_id. Null means use base field definitions with no visibility overrides. Immutable once set.",
+          "x-fk": {
+            "$ref": "#/$defs/CFG_Variant",
+            "target_field": "variant_id"
+          },
+          "x-workato-field-id": "aad154f7-5108-4baa-8334-587c47d0d71c",
+          "x-immutable": true
+        },
+        "correlation_id": {
+          "type": "string",
+          "description": "FK \u2192 home base Requests.correlation_id. Immutable.",
+          "x-fk": {
+            "$ref": "https://sdc.local/schemas/base.json#/$defs/HOME_Requests",
+            "target_field": "correlation_id",
+            "deferred_relation": true,
+            "rationale": "Cross-project reference. Resolved in two-pass provisioning."
+          },
+          "x-workato-field-id": "c1c6edb9-c08e-44d9-84a8-7e2083358d28",
+          "x-immutable": true
+        },
+        "supplier_name": {
+          "type": "string",
+          "description": "Display name of the supplier. Set at provision time. Immutable.",
+          "x-workato-field-id": "81eb50d6-3764-465b-8df7-afa36098b2dd",
+          "x-immutable": true
+        },
+        "primary_user_email": {
+          "type": "string",
+          "description": "Supplier contact. May be updated if contact changes.",
+          "x-workato-field-id": "a2065722-9987-447e-aefb-bf720c1276a1"
+        },
+        "assignee_email": {
+          "type": "string",
+          "description": "Analyst who owns this request. Immutable.",
+          "x-workato-field-id": "a1ca04b2-1dfd-4e3b-aa55-f11efdffd477",
+          "x-immutable": true
+        },
+        "template_file_id": {
+          "type": "string",
+          "description": "Shareable link to the supplier's XLSX template. Set at supplier onboarding, then regenerated on reminder.",
+          "x-workato-field-id": "fcb89b24-697c-45e7-8952-441e02d3347e"
+        },
+        "has_seeded_data": {
+          "type": "boolean",
+          "description": "Whether seed data was provided at request creation.",
+          "x-workato-field-id": "c2f57493-fd3b-4bb8-baee-51fa6dbaf53f",
+          "x-workato-type": "boolean"
+        },
+        "seeded_data_file_id": {
+          "type": "string",
+          "description": "FileStorage ID for pre-populated data file.",
+          "x-workato-field-id": "1bc07645-b1de-4857-8458-b292ecd25c83"
+        },
+        "seeded_template_file_id": {
+          "type": "string",
+          "description": "FileStorage ID for the seeded template sent to supplier.",
+          "x-workato-field-id": "b3f69785-1e5e-4c19-b870-9d4e7658dbb7"
+        },
+        "latest_upload_file_id": {
+          "type": "string",
+          "description": "FileStorage ID of the most recent supplier upload. Overwritten on each submission.",
+          "x-workato-field-id": "5f0d230b-4d61-46c5-b07c-58932e559843"
+        },
+        "status": {
+          "type": "string",
+          "description": "Indicates lifecycle stage. Values: pending | sent | in_progress | submitted | validated | accepted | rejected.",
+          "enum": [
+            "pending",
+            "sent",
+            "in_progress",
+            "submitted",
+            "validated",
+            "accepted",
+            "rejected"
+          ],
+          "x-workato-field-id": "eee9bd1f-3ca7-427f-9f29-19735b1d905e"
+        },
+        "last_updated_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of last status or field change.",
+          "x-workato-field-id": "705a457d-eaf6-407d-b772-b3b9bc0cbdff",
+          "x-workato-type": "date-time"
+        },
+        "slot_text_01": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "62a690fc-02de-48a2-bea7-2c77b5f935cd"
+        },
+        "slot_text_02": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "c5a0e448-65a8-4867-b2de-5f7960b5a4cb"
+        },
+        "slot_text_03": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "5839f930-c1fa-4938-988f-38b1cf3876c9"
+        },
+        "slot_text_04": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "d853d9e5-ae1c-4c2b-a19e-9cd317125d95"
+        },
+        "slot_text_05": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "c354a56a-9636-4f5d-acc7-20d1eb59fa2c"
+        },
+        "slot_text_06": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "09a8b922-7027-4f33-b830-b820bf12a6bb"
+        },
+        "slot_text_07": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "e8749e3c-c0b9-4787-a7a6-2c7d0fbd21fe"
+        },
+        "slot_text_08": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "dd489376-93b7-45a1-8018-c7df3f86b2df"
+        },
+        "slot_num_01": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "number",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "83a3149a-68ff-4fb6-a0b0-222b4f7adec3"
+        },
+        "slot_num_02": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "number",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "3b1489f0-9805-4cfc-b540-cc0f48da6a98"
+        },
+        "slot_bool_01": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "boolean",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "fae01fee-c11c-41eb-9346-19b447f42880"
+        },
+        "slot_bool_02": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "boolean",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "c51d6ab0-e30f-4995-91d1-2bd899430bab"
+        },
+        "slot_sel_01": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "790cacc1-1d98-4166-8c00-5f56ca4eb435"
+        },
+        "slot_sel_02": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "a746fc32-61d6-4d29-8130-0173b15b3eed"
+        },
+        "slot_sel_03": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "42cc179d-dff3-422d-8737-c5a62eb0aeda"
+        },
+        "slot_sel_04": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "369f72e2-d147-4cb9-8f44-5531333eb4a5"
+        },
+        "slot_date_01": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "9cafe798-7256-4127-91c8-24686b27cac5"
+        },
+        "slot_date_02": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "6d5a64b3-059b-46e8-8fee-b8a9d94e8de7"
+        },
+        "slot_date_03": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "122bc576-e8f9-4bdd-88cc-dc6dfb2be15e"
+        },
+        "slot_date_04": {
+          "type": "string",
+          "description": "Dynamic form slot. Label defined by CFG_FormSlot. Cleared after each worker save.",
+          "x-semantic-type": "string",
+          "x-slot-note": "Stored as short-text for WFA widget compatibility; semantic type enforced downstream in validation.",
+          "x-workato-field-id": "57110b8a-096b-46b6-9c47-d3123f3f9412"
+        },
+        "slot_text_01_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "5959484a-c7c2-432d-8ced-41313e4333c7"
+        },
+        "slot_text_02_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "6caaf260-ee77-4459-b196-b4900eb161a4"
+        },
+        "slot_text_03_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "fe0e325a-432f-4b54-88c4-3c027a364137"
+        },
+        "slot_text_04_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "87ba202f-3787-447e-84f2-42cc9501a414"
+        },
+        "slot_text_05_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "9f5e006a-9f8d-413a-b43a-57d648d7f970"
+        },
+        "slot_text_06_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "deada87d-6c13-4b94-a981-445beda30e6d"
+        },
+        "slot_text_07_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "db60d8a3-6b14-494e-9168-7d12f0365ed0"
+        },
+        "slot_text_08_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "de27af36-bb90-4582-80e5-a46b52ecc723"
+        },
+        "slot_num_01_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "0d6feb10-cf37-41df-8b67-685143a9eab4"
+        },
+        "slot_num_02_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "6fd55750-d170-42fa-a3de-9f6e086ea60c"
+        },
+        "slot_bool_01_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "929fe302-f736-46ae-a2e9-b87ecd8790a9"
+        },
+        "slot_bool_02_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "9b05b413-725f-4a7c-b581-dc2b90128eda"
+        },
+        "slot_sel_01_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "553ef546-9f2a-4574-9718-001077df5ebd"
+        },
+        "slot_sel_02_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "0e632f33-dc51-4fb7-b86b-19c8c0cb1e98"
+        },
+        "slot_sel_03_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "6fabcba3-5e79-4d22-88b8-5cb4b2ad2765"
+        },
+        "slot_sel_04_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "1432dd54-876d-4751-8c8c-bc584b70bc24"
+        },
+        "slot_date_01_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "9906e711-9441-42e7-92a6-23eb59ed0405"
+        },
+        "slot_date_02_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "091aba54-ea0c-4679-949e-9218907a4c6d"
+        },
+        "slot_date_03_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "ed5e58b9-34b0-4d43-a67a-f11cca3e35c8"
+        },
+        "slot_date_04_label": {
+          "type": "string",
+          "description": "Display label for the corresponding slot. Set at onboarding from CFG_FormSlot.field_name.",
+          "x-workato-field-id": "5c15f3a9-7eb3-4a1e-bf2a-9b21a9e02656"
+        },
+        "upload_from_ui": {
+          "type": "string",
+          "x-workato-type": "file",
+          "description": "Most recent file uploaded by the supplier. Overwritten  on each submission.",
+          "x-workato-field-id": "993bc6e0-b6f5-4852-af02-d61e0042676a"
+        },
+        "customer_name": {
+          "type": "string",
+          "description": "The name of the customer for which we are facilitating data collection.",
+          "x-workato-field-id": "c14187d0-5021-4873-99aa-e8431e53132f"
+        },
+        "approved_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of analyst approval. Write-once.",
+          "x-workato-field-id": "3688e621-208c-4975-9016-a272cf2b8a0e",
+          "x-workato-type": "date-time",
+          "x-write-once": true
+        },
+        "approved_file_id": {
+          "type": "string",
+          "description": "FileStorage ID of the immutable, approved data snapshot.",
+          "x-workato-field-id": "4283cd06-4794-4089-b751-bb665ff62752",
+          "x-immutable": true
+        },
+        "last_reminder_tier": {
+          "type": "integer",
+          "description": "0 = no reminder sent. 1/2/3 = tier of last reminder.",
+          "x-workato-field-id": "a63dd92e-220c-494f-8d97-de27f2328ac7",
+          "x-workato-type": "integer"
+        },
+        "last_reminder_sent_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the most recent reminder.",
+          "x-workato-field-id": "af2f8e18-aca7-4cb4-bbab-84a1b24310e0",
+          "x-workato-type": "date-time"
+        },
+        "last_valid_row_count": {
+          "type": "integer",
+          "description": "From RUN_ValidationResult.valid_rows",
+          "x-workato-field-id": "086936fc-4e1b-407b-a727-c37cf21336bf",
+          "x-workato-type": "integer"
+        },
+        "last_invalid_row_count": {
+          "type": "integer",
+          "description": "From RUN_ValidationResult.invalid_rows",
+          "x-workato-field-id": "59ab1624-58dd-4784-9206-3be2f3ba2afa",
+          "x-workato-type": "integer"
+        },
+        "last_validation_report_link": {
+          "type": "string",
+          "description": "FIleStorage shareable link to error report.",
+          "x-workato-field-id": "dccf1fb6-ab74-419a-a640-3e3d703eefc9"
+        },
+        "last_submitted_file_link": {
+          "type": "string",
+          "description": "FileStorage shareable link to raw upload.",
+          "x-workato-field-id": "13268375-3f5d-444d-8faa-b11613bee4c9"
+        },
+        "last_validation_report_path": {
+          "type": "string",
+          "description": "FileStorage path to the last validation report.",
+          "x-workato-field-id": "f364ba1f-8e62-493d-b475-9bf729bb6f17"
+        },
+        "template_access_time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "6db7701e-567e-4443-b095-8c0c88e91726",
+          "x-workato-type": "date-time"
+        },
+        "supplier_display_status": {
+          "type": "string",
+          "x-workato-field-id": "c432c33a-2473-4aca-b833-2b268d45aaec"
+        },
+        "supplier_message": {
+          "type": "string",
+          "x-workato-field-id": "60f4c904-a87d-43fd-a235-42465ed5c073"
+        },
+        "submission_attempt": {
+          "type": "integer",
+          "x-workato-field-id": "90c4b0c7-36ec-45bc-95fc-438cb69eb526",
+          "x-workato-type": "integer"
+        },
+        "current_validation_result_id": {
+          "type": "string",
+          "x-workato-type": "relation",
+          "x-fk": {
+            "$ref": "#/$defs/RUN_ValidationResult",
+            "target_field": "validation_result_id",
+            "note": "SOURCE ANOMALY: Workato schema has this relation wired to RUN_FieldError.field_id. Named target RUN_ValidationResult is almost certainly correct. Flag for repair."
+          },
+          "x-workato-relation": {
+            "target_table": "RUN_FieldError",
+            "target_field_id": "f6b1a0f8-68ec-4a2d-afd9-dfa0aedf52af"
+          },
+          "x-workato-field-id": "c4464258-28d1-4059-bb7d-60e243ea030d"
+        }
+      },
+      "required": [
+        "supplier_request_id",
+        "assigned_version_id",
+        "correlation_id",
+        "supplier_name",
+        "assignee_email",
+        "has_seeded_data",
+        "status"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "WFA_SupplierUser": {
+      "type": "object",
+      "title": "WFA_SupplierUser",
+      "x-workato-table-name": "WFA_SupplierUser",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "supplier_user_id": {
+          "type": "string",
+          "description": "Business PK (UUID).",
+          "x-workato-field-id": "fb8b8871-a468-40ea-b537-a06719bd4f84"
+        },
+        "supplier_request_id": {
+          "type": "string",
+          "description": "FK (WFA_SupplierRequest.supplier_request_id). Immutable.",
+          "x-fk": {
+            "$ref": "#/$defs/WFA_SupplierRequest",
+            "target_field": "supplier_request_id"
+          },
+          "x-workato-field-id": "9af8f043-4649-4397-a380-e5af20bc365d",
+          "x-immutable": true
+        },
+        "user_email": {
+          "type": "string",
+          "description": "Email address for portal access. WFA filters on this field to scope visibility. Must be unique per supplier_request_id.",
+          "x-workato-field-id": "231e764a-205b-45ce-a4c4-dfdb8cd4c743"
+        },
+        "contact_name": {
+          "type": "string",
+          "description": "First and last name of the supplier contact.",
+          "x-workato-field-id": "4355f399-94af-4266-9b70-350212ea4826"
+        },
+        "status": {
+          "type": "string",
+          "description": "Values: active | deactivated",
+          "enum": [
+            "active",
+            "deactivated"
+          ],
+          "x-workato-field-id": "574945b9-7f9f-4882-ae8f-6b24c91cbb9c"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Set at record creation. Immutable.",
+          "x-workato-field-id": "8a3b14b8-6d70-4f23-9a8d-f1d2768199e6",
+          "x-workato-type": "date-time",
+          "x-immutable": true
+        }
+      },
+      "required": [
+        "supplier_user_id",
+        "supplier_request_id",
+        "user_email"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    },
+    "WFA_TemplateProject": {
+      "type": "object",
+      "title": "WFA_TemplateProject",
+      "x-workato-table-name": "WFA_TemplateProject",
+      "x-workato-project": "Data collection",
+      "properties": {
+        "Record ID": {
+          "type": "string",
+          "x-workato-field-id": "11fbe9a6-a16d-4d7e-86ea-afe42ec03005",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Created time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "a5612739-5401-4ae7-bd07-782c1a6fb2d1",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "Last modified time": {
+          "type": "string",
+          "format": "date-time",
+          "x-workato-field-id": "61aae604-a95e-4519-9091-bb0bf754a67f",
+          "x-workato-type": "date-time",
+          "x-workato-readonly": true,
+          "x-workato-hidden": true
+        },
+        "template_project_id": {
+          "type": "string",
+          "description": "Business PK (UUID). Generated at provision time.",
+          "x-workato-field-id": "5ad5cf00-7ccf-4e45-9bb7-683f56d0ba3e"
+        },
+        "project_name": {
+          "type": "string",
+          "description": "Client name. Set once at provision.",
+          "x-workato-field-id": "242ab47c-f12f-4552-a0cf-c76ac64b08fb"
+        },
+        "analyst_email": {
+          "type": "string",
+          "description": "Analyst who owns this project. May change on rotation.",
+          "x-workato-field-id": "8f0e8928-e4f8-444e-95d4-ac2070e53b50"
+        },
+        "target_vms": {
+          "type": "string",
+          "description": "VMS identifier for this engagement.",
+          "x-workato-field-id": "bf73355e-55b6-4881-a36b-aff4bb76ff46"
+        },
+        "correlation_id": {
+          "type": "string",
+          "description": "FK \u2192 home base Requests.correlation_id. Immutable.",
+          "x-fk": {
+            "$ref": "https://sdc.local/schemas/base.json#/$defs/HOME_Requests",
+            "target_field": "correlation_id",
+            "deferred_relation": true,
+            "rationale": "Cross-project reference. Resolved in two-pass provisioning."
+          },
+          "x-workato-field-id": "ba970336-9a5d-4e5d-8cf5-461bc8a0d596",
+          "x-immutable": true
+        },
+        "output_drive_folder_id": {
+          "type": "string",
+          "description": "Google Drive folder ID where the generated templates are saved.",
+          "x-workato-field-id": "dfcb70a9-2d6a-4aea-a37d-cbdbb7668774"
+        },
+        "config_file_id": {
+          "type": "string",
+          "description": "Google Drive file ID of the master config spreadsheet.",
+          "x-workato-field-id": "8b563935-c463-459f-a29e-29edb7690391"
+        },
+        "parsed_config_file_id": {
+          "type": "string",
+          "description": "FileStorage ID of the frozen, parsed config JSON. Immutable once set.",
+          "x-workato-field-id": "021ef4e9-936e-4951-839d-d1f19924fecb",
+          "x-immutable": true
+        },
+        "incumbent_data_file_id": {
+          "type": "string",
+          "description": "Google Drive file ID for project-level incumbent supplier data.",
+          "x-workato-field-id": "dd469b51-52e3-47ea-b690-27bb5a966911"
+        },
+        "variant_count": {
+          "type": "integer",
+          "description": "Number of template variants. 0 = no variants.",
+          "x-workato-field-id": "296baf25-952d-4eb2-ae42-9c3249852925",
+          "x-workato-type": "integer"
+        },
+        "reminder_days_1": {
+          "type": "integer",
+          "description": "Days after initial outreach before the first reminder to non-compliant suppliers.",
+          "x-workato-field-id": "e6122468-b530-4aad-81ec-90fa8f515bc4",
+          "x-workato-type": "integer"
+        },
+        "reminder_days_2": {
+          "type": "integer",
+          "description": "Days after initial outreach before the second reminder to non-compliant suppliers.",
+          "x-workato-field-id": "db9ed46c-d0ac-4974-a8bf-6075f526b877",
+          "x-workato-type": "integer"
+        },
+        "reminder_days_3": {
+          "type": "integer",
+          "description": "Days after initial outreach before the second reminder to non-compliant suppliers.",
+          "x-workato-field-id": "205c14bc-a4e3-40ef-a0da-74eb91941599",
+          "x-workato-type": "integer"
+        },
+        "incumbent_split_config": {
+          "type": "string",
+          "x-workato-field-id": "07f47278-1091-442a-a1c5-cde9d60b7a7a"
+        },
+        "project_completion_status": {
+          "type": "string",
+          "description": "active | inactive",
+          "enum": [
+            "active",
+            "inactive"
+          ],
+          "x-workato-field-id": "a4bb4d1d-a2b1-4c92-af1c-fe7baaecc5fa"
+        },
+        "project_storage_path": {
+          "type": "string",
+          "x-workato-field-id": "9181021f-0033-43fb-a2d4-73e0e1dba8f0"
+        }
+      },
+      "required": [
+        "template_project_id",
+        "project_name",
+        "correlation_id"
+      ],
+      "x-workato-system-fields": [
+        "Record ID",
+        "Created time",
+        "Last modified time"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
