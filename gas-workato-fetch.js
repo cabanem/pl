@@ -1,136 +1,180 @@
 /**
- * Fetches structured recipe data from the Workato Platform API.
+ * Recipe sync — writes metadata to a Sheet, structured JSON to Drive.
  *
- * The list endpoint (/api/recipes) returns metadata only.
- * The detail endpoint (/api/recipes/{id}) returns the full recipe,
- * including `code` (the trigger + steps tree) and `config` (connection
- * bindings). Both are JSON-encoded *strings* inside the JSON response,
- * so they must be parsed a second time to be usable as structured data.
+ * Designed as a container-bound script attached to a Google Sheet. The
+ * active spreadsheet is the index; Drive holds the canonicalized recipe
+ * code so it stays diffable.
  *
- * @param {Object} [opts]
- * @param {number}  [opts.folderId]    - Restrict to a single folder
- * @param {boolean} [opts.runningOnly] - Only running recipes
- * @param {boolean} [opts.includeCode] - Fetch detail for each recipe
- *                                       (1 extra API call per recipe)
- * @returns {Array<Object>} Structured recipes
+ * Setup (one-time):
+ *   1. Set Script Properties:
+ *        WORKATO_API_TOKEN
+ *        WORKATO_BASE_URL          (optional; defaults to EU)
+ *        RECIPE_DRIVE_FOLDER_ID    (folder where JSON files are written)
+ *   2. Add this file plus workato_recipes.js and canonical_hash.js to the
+ *      script project.
+ *   3. Reload the sheet to pick up the custom menu.
  */
-function getStructuredRecipes(opts) {
-  opts = opts || {};
 
-  const props    = PropertiesService.getScriptProperties();
-  const apiToken = props.getProperty('WORKATO_API_TOKEN');
-  const baseUrl  = (props.getProperty('WORKATO_BASE_URL') || 'https://app.eu.workato.com')
-                     .replace(/\/$/, '');
+const RECIPE_SHEET_NAME = 'Recipes';
+const RECIPE_HEADERS = [
+  'id',
+  'name',
+  'folder_id',
+  'running',
+  'trigger_application',
+  'action_applications',
+  'step_count',
+  'logical_hash',
+  'last_run_at',
+  'updated_at',
+  'last_synced_at',
+  'workato_link',
+  'json_file'
+];
 
-  const fetchOpts = {
-    method: 'get',
-    muteHttpExceptions: true,
-    headers: {
-      'Authorization': `Bearer ${apiToken}`,
-      'Accept': 'application/json'
-    }
-  };
 
-  // ---- 1. Page through the list endpoint -----------------------------------
-  const recipes = [];
-  const perPage = 100;
-  let   page    = 1;
+/* -------------------------------------------------------------------------- */
+/* Menu                                                                       */
+/* -------------------------------------------------------------------------- */
 
-  while (true) {
-    const params = [`page=${page}`, `per_page=${perPage}`];
-    if (opts.folderId)    params.push(`folder_id=${encodeURIComponent(opts.folderId)}`);
-    if (opts.runningOnly) params.push('running=true');
-
-    const url   = `${baseUrl}/api/recipes?${params.join('&')}`;
-    const json  = fetchJson_(url, fetchOpts, 'List recipes');
-    const batch = Array.isArray(json.items) ? json.items
-                : Array.isArray(json)        ? json
-                : [];
-
-    recipes.push.apply(recipes, batch);
-    if (batch.length < perPage) break;
-    page++;
-  }
-
-  // ---- 2. Shape each recipe into a clean structured record -----------------
-  return recipes.map(function (r) {
-    const out = {
-      id:                   r.id,
-      name:                 r.name,
-      folder_id:            r.folder_id,
-      running:              r.running,
-      description:          r.description || '',
-      trigger_application:  r.trigger_application || null,
-      action_applications:  r.action_applications  || [],
-      job_succeeded_count:  r.job_succeeded_count  || 0,
-      job_failed_count:     r.job_failed_count     || 0,
-      created_at:           r.created_at,
-      updated_at:           r.updated_at,
-      last_run_at:          r.last_run_at || null
-    };
-
-    if (opts.includeCode) {
-      const detail = fetchJson_(
-        `${baseUrl}/api/recipes/${r.id}`,
-        fetchOpts,
-        `Recipe ${r.id} detail`
-      );
-      // `code` and `config` come back as JSON strings — parse them.
-      out.code   = safeParseJson_(detail.code);   // Trigger + steps tree
-      out.config = safeParseJson_(detail.config); // Connection bindings
-    }
-
-    return out;
-  });
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Workato')
+    .addItem('Sync recipes (metadata only)', 'syncRecipesMetadata')
+    .addItem('Sync recipes (full structure)', 'syncRecipesFull')
+    .addToUi();
 }
 
+
 /* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
+/* Entry points                                                               */
 /* -------------------------------------------------------------------------- */
 
-/** Fetch + JSON parse with consistent error reporting. */
-function fetchJson_(url, options, label) {
-  const response = UrlFetchApp.fetch(url, options);
-  const code     = response.getResponseCode();
-  const text     = response.getContentText();
+/** Fast: metadata only, no per-recipe detail calls, no Drive writes. */
+function syncRecipesMetadata() {
+  const recipes = getStructuredRecipes(); // from workato_recipes.js
+  writeSheet_(recipes, /* withCode */ false);
+}
 
-  if (code < 200 || code >= 300) {
-    throw new Error(`${label} failed (HTTP ${code}): ${text}`);
+/** Full: detail call per recipe, canonical JSON written to Drive, hashes in sheet. */
+function syncRecipesFull() {
+  const recipes = getStructuredRecipes({ includeCode: true });
+  writeSheet_(recipes, /* withCode */ true);
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Sheet writer                                                               */
+/* -------------------------------------------------------------------------- */
+
+function writeSheet_(recipes, withCode) {
+  const ss    = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(RECIPE_SHEET_NAME) || ss.insertSheet(RECIPE_SHEET_NAME);
+  const baseUrl = (PropertiesService.getScriptProperties().getProperty('WORKATO_BASE_URL')
+                   || 'https://app.eu.workato.com').replace(/\/$/, '');
+
+  const folder  = withCode ? getOrThrowDriveFolder_() : null;
+  const now     = new Date();
+
+  const rows = recipes.map(function (r) {
+    let stepCount    = '';
+    let logicalHash  = '';
+    let jsonFileLink = '';
+
+    if (withCode && r.code) {
+      stepCount   = countSteps_(r.code);
+      logicalHash = recipeLogicalHash(r.code); // from canonical_hash.js
+      const file  = writeRecipeJsonFile_(folder, r);
+      jsonFileLink = `=HYPERLINK("${file.getUrl()}","${file.getName()}")`;
+    }
+
+    const workatoLink = `=HYPERLINK("${baseUrl}/recipes/${r.id}","open in Workato")`;
+
+    return [
+      r.id,
+      r.name,
+      r.folder_id,
+      r.running,
+      r.trigger_application || '',
+      (r.action_applications || []).join(', '),
+      stepCount,
+      logicalHash,
+      r.last_run_at || '',
+      r.updated_at || '',
+      now,
+      workatoLink,
+      jsonFileLink
+    ];
+  });
+
+  // Reset and write everything in two range calls (fast).
+  sheet.clear();
+  sheet.getRange(1, 1, 1, RECIPE_HEADERS.length).setValues([RECIPE_HEADERS])
+       .setFontWeight('bold');
+
+  if (rows.length) {
+    sheet.getRange(2, 1, rows.length, RECIPE_HEADERS.length).setValues(rows);
   }
-  return JSON.parse(text);
+  sheet.setFrozenRows(1);
+  sheet.autoResizeColumns(1, RECIPE_HEADERS.length);
+
+  SpreadsheetApp.getActive().toast(
+    `Synced ${rows.length} recipes${withCode ? ' (with code)' : ''}`,
+    'Workato sync',
+    5
+  );
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Drive writer                                                               */
+/* -------------------------------------------------------------------------- */
+
+function getOrThrowDriveFolder_() {
+  const id = PropertiesService.getScriptProperties().getProperty('RECIPE_DRIVE_FOLDER_ID');
+  if (!id) {
+    throw new Error('Set RECIPE_DRIVE_FOLDER_ID in Script Properties before running a full sync.');
+  }
+  return DriveApp.getFolderById(id);
 }
 
 /**
- * Workato returns recipe `code` and `config` as JSON-encoded strings.
- * Parse defensively: tolerate already-parsed objects and non-JSON values.
+ * Write one canonicalized JSON file per recipe. Filename uses the recipe id
+ * so re-syncing overwrites in place — keeps Drive version history intact.
  */
-function safeParseJson_(value) {
-  if (value == null)              return null;
-  if (typeof value === 'object')  return value; // already parsed
-  try {
-    return JSON.parse(value);
-  } catch (_e) {
-    return value; // not JSON — return raw
-  }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Example callers                                                            */
-/* -------------------------------------------------------------------------- */
-
-/** Just metadata for every recipe in the workspace. */
-function listAllRecipesMetadata() {
-  const recipes = getStructuredRecipes();
-  Logger.log(`Retrieved ${recipes.length} recipes (metadata only).`);
-  return recipes;
-}
-
-/** Full structured payload for one folder — useful when iterating on a project. */
-function getFolderRecipesWithCode(folderId) {
-  const recipes = getStructuredRecipes({
-    folderId: folderId,
-    includeCode: true
+function writeRecipeJsonFile_(folder, recipe) {
+  const filename = `recipe_${recipe.id}.json`;
+  const payload  = canonicalJson({   // from canonical_hash.js
+    id:                  recipe.id,
+    name:                recipe.name,
+    folder_id:           recipe.folder_id,
+    trigger_application: recipe.trigger_application,
+    action_applications: recipe.action_applications,
+    code:                recipe.code,
+    config:              recipe.config
   });
-  Logger.log(`Retrieved ${recipes.length} recipes with parsed code/config.`);
-  return recipes;
+
+  const existing = folder.getFilesByName(filename);
+  if (existing.hasNext()) {
+    const file = existing.next();
+    file.setContent(payload); // creates a new Drive revision
+    return file;
+  }
+  return folder.createFile(filename, payload, MimeType.PLAIN_TEXT);
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Tree helpers                                                               */
+/* -------------------------------------------------------------------------- */
+
+/** Total number of step nodes in a recipe code tree (excludes the root trigger). */
+function countSteps_(codeNode) {
+  if (!codeNode || typeof codeNode !== 'object') return 0;
+  let count = 0;
+  const blocks = Array.isArray(codeNode.block) ? codeNode.block : [];
+  for (let i = 0; i < blocks.length; i++) {
+    count += 1 + countSteps_(blocks[i]);
+  }
+  return count;
 }
