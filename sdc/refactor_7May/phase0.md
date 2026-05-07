@@ -16,9 +16,9 @@ Output: `sdc-data-model-v1.md`
 
 Eighteen tables across six groups (Project, Configuration, Supplier, Runtime, Observability, plus a deliberately empty Operational group). Five invariants documented. Two items deferred forward — state machine values and naming conventions — to other workstreams.
 
-### 2. State machine design — **Next**
+### 2. State machine design — **Done**
 
-Output: `sdc-state-machine-v1.md` (not yet created)
+Output: `sdc-state-machine-v1.md`
 
 Scope: status values across SupplierRequest, Upload, ValidationResult, TemplateVersion; transition graph; derivation rule for `supplier_display_status` and `supplier_message`.
 
@@ -26,9 +26,9 @@ Approach: deep on analysis, lean on output. Open with the two-sentence test (see
 
 Expected length: one focused session, possibly bleeding into a second.
 
-### 3. Naming and prefix conventions — **Pending**
+### 3. Naming and prefix conventions — **Done**
 
-Output: `sdc-naming-conventions-v1.md` (not yet created)
+Output: `sdc-naming-conventions-v1.md`
 
 Scope: whether to use prefixes (CFG_, VER_, RUN_, etc.), simpler prefixes, or no prefixes. Field naming. Recipe naming. File and folder conventions in FileStorage and Drive.
 
