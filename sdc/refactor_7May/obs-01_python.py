@@ -1,12 +1,14 @@
 # SDC Data Collection — Stage 1 Python Steps (v1)
 #
-# Three Workato Python steps, one per section. Each section is fully self-contained
-# (imports + constants + logic) so it can be copied directly into a "Run Python script"
-# action without cross-section dependencies.
+# Three Workato Python steps, one per section. Each section is a standalone
+# script — copy a single section into one Workato "Run Python script" action.
+# Sections are not meant to be combined into one file in Workato; the section
+# dividers exist for navigation in this reference doc only.
 #
-# Convention: each script reads from `input` (a dict of declared step inputs) and ends
-# with a `result = {...}` assignment whose keys match the step's declared output fields.
-# Adapt the I/O mechanism if your workspace uses a different Python action variant.
+# Convention: each section defines `def main(input)` returning a dict whose
+# keys match the step's declared output fields. Module-level constants
+# (taxonomies, transition tables, derivation tables) sit outside `main` so
+# they're declared once and referenced by the function.
 #
 # Section 1: OBS-01 — Validate and compose EventLog row
 # Section 2: STS-01 — Validate transition legality
@@ -20,9 +22,9 @@
 # Purpose: Validate caller-provided severity and phase against the canonical sets.
 #          On valid input, compose the EventLog row payload for the next step
 #          (Data Tables → Create row in EventLog) to write.
-#          On invalid input, override severity/phase to flag the validation failure
-#          and annotate details_json. The row still gets written — discipline is
-#          enforced via auditing, not by breaking the caller.
+#          On invalid input, override severity/phase to flag the validation
+#          failure and annotate details_json. The row still gets written —
+#          discipline is enforced via auditing, not by breaking the caller.
 #
 # Inputs (declared on the Python step):
 #   severity              (string, required)
@@ -38,10 +40,10 @@
 #   resolved              (boolean, optional)
 #   resolved_at           (datetime, optional)
 #
-# Outputs (declared on the Python step — mapped to EventLog columns by the next step):
-#   event_id, timestamp, severity, source_recipe, step_number, phase, human_message,
-#   details_json, analyst_email, supplier_request_id, error_type, alert_sent,
-#   resolved, resolved_at
+# Outputs (declared on the Python step — mapped to EventLog columns by next step):
+#   event_id, timestamp, severity, source_recipe, step_number, phase,
+#   human_message, details_json, analyst_email, supplier_request_id,
+#   error_type, alert_sent, resolved, resolved_at
 
 import uuid
 import json
@@ -87,80 +89,82 @@ PHASE_TAXONOMY = {
 
 VALID_SEVERITIES = {"info", "warn", "error"}
 
-# -----------------------------------------------------------------------------
-# Read inputs
-# -----------------------------------------------------------------------------
-severity_in = (input.get("severity") or "").strip()
-phase_in = (input.get("phase") or "").strip()
-details_json_in = input.get("details_json") or ""
 
-# -----------------------------------------------------------------------------
-# Validate
-# -----------------------------------------------------------------------------
-validation_errors = []
-if severity_in not in VALID_SEVERITIES:
-    validation_errors.append({
-        "field": "severity",
-        "invalid_value": severity_in,
-        "reason": "severity_not_in_set",
-    })
-if phase_in not in PHASE_TAXONOMY:
-    validation_errors.append({
-        "field": "phase",
-        "invalid_value": phase_in,
-        "reason": "phase_not_in_taxonomy",
-    })
+def main(input):
+    # -------------------------------------------------------------------------
+    # Read inputs
+    # -------------------------------------------------------------------------
+    severity_in = (input.get("severity") or "").strip()
+    phase_in = (input.get("phase") or "").strip()
+    details_json_in = input.get("details_json") or ""
 
-# -----------------------------------------------------------------------------
-# Parse incoming details_json defensively
-# -----------------------------------------------------------------------------
-parsed_details = {}
-if details_json_in:
-    try:
-        loaded = json.loads(details_json_in)
-        if isinstance(loaded, dict):
-            parsed_details = loaded
-        else:
-            # Caller passed an array or scalar — wrap so we can still annotate
-            parsed_details = {"_original_details": loaded}
-    except (ValueError, TypeError):
-        parsed_details = {"_unparseable_details": str(details_json_in)}
+    # -------------------------------------------------------------------------
+    # Validate
+    # -------------------------------------------------------------------------
+    validation_errors = []
+    if severity_in not in VALID_SEVERITIES:
+        validation_errors.append({
+            "field": "severity",
+            "invalid_value": severity_in,
+            "reason": "severity_not_in_set",
+        })
+    if phase_in not in PHASE_TAXONOMY:
+        validation_errors.append({
+            "field": "phase",
+            "invalid_value": phase_in,
+            "reason": "phase_not_in_taxonomy",
+        })
 
-# -----------------------------------------------------------------------------
-# Compose output (apply validation overrides if needed)
-# -----------------------------------------------------------------------------
-out_severity = severity_in
-out_phase = phase_in
+    # -------------------------------------------------------------------------
+    # Parse incoming details_json defensively
+    # -------------------------------------------------------------------------
+    parsed_details = {}
+    if details_json_in:
+        try:
+            loaded = json.loads(details_json_in)
+            if isinstance(loaded, dict):
+                parsed_details = loaded
+            else:
+                # Caller passed an array or scalar — wrap so we can still annotate
+                parsed_details = {"_original_details": loaded}
+        except (ValueError, TypeError):
+            parsed_details = {"_unparseable_details": str(details_json_in)}
 
-if validation_errors:
-    out_severity = "error"
-    out_phase = "invalid_phase"
-    parsed_details["_validation_error"] = validation_errors
-    parsed_details["_original_severity"] = severity_in
-    parsed_details["_original_phase"] = phase_in
+    # -------------------------------------------------------------------------
+    # Compose output (apply validation overrides if needed)
+    # -------------------------------------------------------------------------
+    out_severity = severity_in
+    out_phase = phase_in
 
-# Re-serialize details_json (always a string for the EventLog write)
-out_details_json = json.dumps(parsed_details) if parsed_details else ""
+    if validation_errors:
+        out_severity = "error"
+        out_phase = "invalid_phase"
+        parsed_details["_validation_error"] = validation_errors
+        parsed_details["_original_severity"] = severity_in
+        parsed_details["_original_phase"] = phase_in
 
-# -----------------------------------------------------------------------------
-# Final output
-# -----------------------------------------------------------------------------
-result = {
-    "event_id": str(uuid.uuid4()),
-    "timestamp": datetime.now(timezone.utc).isoformat(),
-    "severity": out_severity,
-    "source_recipe": input.get("source_recipe") or "",
-    "step_number": int(input.get("step_number") or 0),
-    "phase": out_phase,
-    "human_message": input.get("human_message") or "",
-    "details_json": out_details_json,
-    "analyst_email": input.get("analyst_email") or "",
-    "supplier_request_id": input.get("supplier_request_id") or "",
-    "error_type": input.get("error_type") or "",
-    "alert_sent": bool(input.get("alert_sent") or False),
-    "resolved": bool(input.get("resolved") or False),
-    "resolved_at": input.get("resolved_at") or "",
-}
+    # Re-serialize details_json (always a string for the EventLog write)
+    out_details_json = json.dumps(parsed_details) if parsed_details else ""
+
+    # -------------------------------------------------------------------------
+    # Final output
+    # -------------------------------------------------------------------------
+    return {
+        "event_id": str(uuid.uuid4()),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "severity": out_severity,
+        "source_recipe": input.get("source_recipe") or "",
+        "step_number": int(input.get("step_number") or 0),
+        "phase": out_phase,
+        "human_message": input.get("human_message") or "",
+        "details_json": out_details_json,
+        "analyst_email": input.get("analyst_email") or "",
+        "supplier_request_id": input.get("supplier_request_id") or "",
+        "error_type": input.get("error_type") or "",
+        "alert_sent": bool(input.get("alert_sent") or False),
+        "resolved": bool(input.get("resolved") or False),
+        "resolved_at": input.get("resolved_at") or "",
+    }
 
 
 # =============================================================================
@@ -172,7 +176,7 @@ result = {
 #          The recipe branches on `legal` — proceed on True, return error on False.
 #
 # Inputs (declared on the Python step):
-#   prior_state      (string, required) — current SUP_SupplierRequest.status from prior search step
+#   prior_state      (string, required) — current SUP_SupplierRequest.status
 #   target_state     (string, required) — what the caller wants to transition to
 #   trigger_context  (string, required) — what's driving the transition
 #
@@ -219,24 +223,22 @@ LEGAL_TRANSITIONS = {
     # approved and cancelled are terminal — no outbound transitions.
 }
 
-# -----------------------------------------------------------------------------
-# Read inputs and look up
-# -----------------------------------------------------------------------------
-prior = (input.get("prior_state") or "").strip()
-target = (input.get("target_state") or "").strip()
-trigger = (input.get("trigger_context") or "").strip()
 
-key = (prior, target, trigger)
-is_legal = key in LEGAL_TRANSITIONS
+def main(input):
+    prior = (input.get("prior_state") or "").strip()
+    target = (input.get("target_state") or "").strip()
+    trigger = (input.get("trigger_context") or "").strip()
 
-if is_legal:
-    result = {
-        "legal": True,
-        "error_code": "",
-        "error_message": "",
-    }
-else:
-    result = {
+    key = (prior, target, trigger)
+
+    if key in LEGAL_TRANSITIONS:
+        return {
+            "legal": True,
+            "error_code": "",
+            "error_message": "",
+        }
+
+    return {
         "legal": False,
         "error_code": "illegal_transition",
         "error_message": "Transition not legal: ({0}, {1}, {2})".format(
@@ -356,26 +358,22 @@ CONTEXT_KEYS = (
     "analyst_email",
 )
 
-# -----------------------------------------------------------------------------
-# Read inputs
-# -----------------------------------------------------------------------------
-target = (input.get("target_state") or "").strip()
-trigger = (input.get("trigger_context") or "").strip()
 
-# -----------------------------------------------------------------------------
-# Lookup
-# -----------------------------------------------------------------------------
-key = (target, trigger)
+def main(input):
+    target = (input.get("target_state") or "").strip()
+    trigger = (input.get("trigger_context") or "").strip()
 
-if key not in DERIVATION_TABLE:
-    # The transition-validation step should have caught this, but be defensive.
-    result = {
-        "supplier_display_status": "",
-        "supplier_message": "",
-        "lookup_failed": True,
-        "error_message": "No derivation row for ({0}, {1})".format(target, trigger),
-    }
-else:
+    key = (target, trigger)
+
+    if key not in DERIVATION_TABLE:
+        # The transition-validation step should have caught this, but be defensive.
+        return {
+            "supplier_display_status": "",
+            "supplier_message": "",
+            "lookup_failed": True,
+            "error_message": "No derivation row for ({0}, {1})".format(target, trigger),
+        }
+
     template = DERIVATION_TABLE[key]
 
     # Build full substitution context. Every CONTEXT_KEYS entry gets a value
@@ -388,7 +386,7 @@ else:
     if context["invalid_row_count"] != "":
         context["invalid_row_count"] = str(context["invalid_row_count"])
 
-    result = {
+    return {
         "supplier_display_status": template["display_status"].format(**context),
         "supplier_message": template["message"].format(**context),
         "lookup_failed": False,
