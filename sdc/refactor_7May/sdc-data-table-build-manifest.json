@@ -1,0 +1,1487 @@
+{
+  "_meta": {
+    "schema_version": "5.0.0",
+    "description": "SDC Phase 0 rebuild manifest. 18 tables across Project, CFG_, SUP_, RUN_, and bare EventLog. Folds the v2 data model, the v1 naming-doc backports (file paths, dropped columns, renames), and the state-machine backports (current_state_entered_at, reminders_enabled, Upload status 'failed' -> 'error') into one consolidated build target. Replaces the v0 22-table workspace; not a delta on v3.1.0.",
+    "created_at": "2026-05-08",
+    "notes": {
+      "creation_order": "Tables are ordered so FK targets are created before FK sources. Relation-type display columns are in deferred_relations and applied in Pass 2 via PUT/PATCH after all tables exist.",
+      "folder_id": "Injected at runtime by the provisioning recipe. Not included in this manifest.",
+      "field_ids": "Omitted because Workato auto-generates UUIDs on creation. The recipe captures and maps them from the POST response.",
+      "string_length": "Workato Data Tables API exposes only 'string' as a type. There is no API-level 'long-text' distinction. Fields needing long-text capacity (supplier_message, valid_payload_json, validation_summary, incumbent_split_config, note_text, details_json) are flagged in hints. If Workato introduces a long-text API type, update those fields.",
+      "date_columns": "There is no API-level 'date' type. Date-only fields (due_date) are stored as date_time and recipes treat them as midnight-aligned.",
+      "enum_columns": "Workato Data Tables does not enforce enum value sets. Enums (status, severity, control_type, scope, etc.) are stored as 'string' with the valid value set listed in the hint and enforced by recipes.",
+      "default_values": "Workato Data Tables column definitions do not carry a default_value attribute. Defaults (status='pending', reminders_enabled=true, etc.) are listed in hints and enforced by the recipe that creates the row.",
+      "relation_fields": "Relation-type columns are Workato UI display helpers only. They do NOT enforce referential integrity. All real joins use the business ID string fields.",
+      "pk_naming": "Primary keys use descriptive names matching their FK usage on child tables (e.g., supplier_request_id, field_id) for self-documenting joins in the Workato recipe editor.",
+      "immutability": "Immutability and write-once constraints are recipe-enforced; the data table API has no native support. Hints flag every immutable / write-once column.",
+      "status_writer_rule": "SUP_SupplierRequest.status, current_state_entered_at, supplier_display_status, and supplier_message must only be written by STS-01. Hints repeat this on each affected column. Drift between the four fields is impossible by construction if and only if STS-01 is the single writer.",
+      "file_model": "All long-term file references are paths (`*_path`); shareable links are generated on demand by UTL-01. The naming-doc invariant is that links are not stored as state. Path is canonical; link is volatile."
+    },
+    "changelog": [
+      {
+        "version": "5.0.0",
+        "date": "2026-05-08",
+        "changes": [
+          "Phase 0 rebuild. Not a delta on v3.1.0 -- replaces it.",
+          "DROPPED TABLES: WFA_TemplateProject (replaced by Project singleton), WFA_Cache, the SYS_EventLogs / RUN_PipelineError split (unified into EventLog).",
+          "RENAMED TABLES (prefix scheme per naming-doc v1): VER_TemplateVersion -> CFG_TemplateVersion, CFG_Rule -> CFG_ValidationRule, CFG_ErrorTranslation -> CFG_ErrorMessage, WFA_SupplierRequest -> SUP_SupplierRequest, WFA_SupplierUser -> SUP_SupplierUser. Project, EventLog stay bare.",
+          "NEW TABLES: Project (workspace singleton), SUP_Supplier (extracted from v0 SupplierRequest), CFG_FormSlotMapping (slot labels move here from the 20 *_label columns on SupplierRequest), CFG_Variant, CFG_VariantField, RUN_ManualEntry, RUN_ReviewNote.",
+          "FILE COLUMN RENAMES: every *_file_id -> *_path per naming-doc invariant 8 (path canonical, link volatile). 5 columns dropped from SUP_SupplierRequest (seeded_template_file_id, latest_upload_file_id, last_submitted_file_link, last_validation_report_path, last_validation_report_link) -- recipes join down to RUN_Upload / RUN_ValidationResult instead.",
+          "FIELD RENAMES: RUN_Upload.valid_payload -> valid_payload_json, RUN_ValidationResult.{valid,invalid}_rows -> {valid,invalid}_row_count.",
+          "ENUM RENAMES: RUN_Upload.status `failed` -> `error` per state-machine backport.",
+          "STATE MACHINE BACKPORTS: SUP_SupplierRequest.current_state_entered_at, SUP_SupplierRequest.reminders_enabled, Project.default_due_days, SUP_SupplierRequest.due_date.",
+          "v2 DATA-MODEL ADDITIONS: SUP_SupplierUser.primary, CFG_ValidationRule.scope.",
+          "REMOVED: cross-project FKs (correlation_id, manifest_id, template_project_id columns), customer_name from SupplierRequest (now on Project singleton), 20 *_label columns on SupplierRequest (now on CFG_FormSlotMapping).",
+          "DEFERRED RELATIONS: 15 UI display helpers added in Pass 2."
+        ]
+      }
+    ]
+  },
+  "tables": [
+    {
+      "name": "Project",
+      "purpose": "Workspace singleton. Engagement-level configuration; the implicit context for everything else.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "project_id",
+          "optional": false,
+          "hint": "PK. UUID. Singleton workspace identifier."
+        },
+        {
+          "type": "string",
+          "name": "analyst_email",
+          "optional": false,
+          "hint": "Owning analyst for the engagement."
+        },
+        {
+          "type": "string",
+          "name": "customer_name",
+          "optional": false,
+          "hint": "End-customer name. Source of truth; replaces v0 per-row duplication on SupplierRequest."
+        },
+        {
+          "type": "string",
+          "name": "target_vms",
+          "optional": false,
+          "hint": "Downstream VMS this engagement feeds."
+        },
+        {
+          "type": "string",
+          "name": "output_drive_folder_id",
+          "optional": false,
+          "hint": "Drive folder for analyst-facing outputs."
+        },
+        {
+          "type": "string",
+          "name": "parsed_config_path",
+          "optional": false,
+          "hint": "FileStorage path to the parsed config JSON for the engagement. Renamed from parsed_config_file_id."
+        },
+        {
+          "type": "string",
+          "name": "incumbent_data_path",
+          "optional": true,
+          "hint": "FileStorage path to source incumbent dataset. Renamed from incumbent_data_file_id."
+        },
+        {
+          "type": "string",
+          "name": "seeded_data_path",
+          "optional": true,
+          "hint": "FileStorage path to source seeded dataset (sliced into per-request seeded_slice_path). New per naming doc."
+        },
+        {
+          "type": "string",
+          "name": "incumbent_split_config",
+          "optional": true,
+          "hint": "JSON describing how to slice seeded_data_path per supplier (typically keyed by supplier name). Long-text capacity needed."
+        },
+        {
+          "type": "integer",
+          "name": "reminder_days_1",
+          "optional": false,
+          "hint": "Days from invitation to tier-1 reminder."
+        },
+        {
+          "type": "integer",
+          "name": "reminder_days_2",
+          "optional": false,
+          "hint": "Days from invitation to tier-2 reminder."
+        },
+        {
+          "type": "integer",
+          "name": "reminder_days_3",
+          "optional": false,
+          "hint": "Days from invitation to tier-3 reminder."
+        },
+        {
+          "type": "integer",
+          "name": "default_due_days",
+          "optional": true,
+          "hint": "Days from invitation to the default supplier due date. Engagement-level default; per-request override is SUP_SupplierRequest.due_date."
+        },
+        {
+          "type": "string",
+          "name": "project_completion_status",
+          "optional": false,
+          "hint": "enum: active | inactive. Default 'active'. Set by E3 (engagement closure)."
+        },
+        {
+          "type": "string",
+          "name": "external_request_id",
+          "optional": true,
+          "hint": "Plain-string upstream traceability handle. Was correlation_id in v0. Not an FK."
+        }
+      ]
+    },
+    {
+      "name": "CFG_TemplateVersion",
+      "purpose": "A version of the data-collection template. Snapshot lifecycle: draft -> published -> deprecated.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "template_version_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "integer",
+          "name": "version_number",
+          "optional": false,
+          "hint": "Monotonic within project. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "version_label",
+          "optional": true,
+          "hint": "Human-readable label. Write-once at publish."
+        },
+        {
+          "type": "string",
+          "name": "status",
+          "optional": false,
+          "hint": "enum: draft | published | deprecated. Default 'draft'. Forward transitions only."
+        },
+        {
+          "type": "string",
+          "name": "master_template_path",
+          "optional": false,
+          "hint": "FileStorage path to the master XLSX. Renamed from master_template_file_id."
+        },
+        {
+          "type": "string",
+          "name": "parsed_config_path",
+          "optional": false,
+          "hint": "FileStorage path to the per-version parsed config snapshot (distinct from Project.parsed_config_path). Renamed from parsed_config_file_id."
+        },
+        {
+          "type": "date_time",
+          "name": "published_at",
+          "optional": true,
+          "hint": "Write-once on draft -> published transition."
+        },
+        {
+          "type": "string",
+          "name": "validation_summary",
+          "optional": true,
+          "hint": "JSON summary of validation results from CFG-validate_config. Long-text capacity needed."
+        }
+      ]
+    },
+    {
+      "name": "CFG_Field",
+      "purpose": "A column definition in the data-collection template.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "field_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "template_version_id",
+          "optional": false,
+          "hint": "FK -> CFG_TemplateVersion.template_version_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "field_name",
+          "optional": false,
+          "hint": "Immutable within version."
+        },
+        {
+          "type": "string",
+          "name": "description",
+          "optional": true,
+          "hint": "Human-readable description shown to suppliers."
+        },
+        {
+          "type": "string",
+          "name": "data_type",
+          "optional": false,
+          "hint": "From the _mapping authoritative types."
+        },
+        {
+          "type": "string",
+          "name": "data_format",
+          "optional": true,
+          "hint": "Type-specific format hint (e.g., date format string)."
+        },
+        {
+          "type": "integer",
+          "name": "position",
+          "optional": false,
+          "hint": "Column order in the rendered template."
+        },
+        {
+          "type": "boolean",
+          "name": "required",
+          "optional": false,
+          "hint": "Default false."
+        },
+        {
+          "type": "boolean",
+          "name": "must_be_empty",
+          "optional": false,
+          "hint": "Default false. Mutually exclusive with `required` at config-validation time."
+        },
+        {
+          "type": "boolean",
+          "name": "column_unique",
+          "optional": false,
+          "hint": "Default false. Within-submission uniqueness for this column."
+        },
+        {
+          "type": "boolean",
+          "name": "strict",
+          "optional": false,
+          "hint": "Default false. Whether validation failures on this field block submission vs. warn."
+        },
+        {
+          "type": "boolean",
+          "name": "visible",
+          "optional": false,
+          "hint": "Default true."
+        },
+        {
+          "type": "string",
+          "name": "field_length_validation",
+          "optional": true,
+          "hint": "Length spec, e.g., 'min:1,max:255'."
+        },
+        {
+          "type": "string",
+          "name": "numeric_field_validation",
+          "optional": true,
+          "hint": "Range spec for numeric types."
+        },
+        {
+          "type": "string",
+          "name": "date_field_validation",
+          "optional": true,
+          "hint": "Range spec for date types."
+        },
+        {
+          "type": "string",
+          "name": "field_input_validation",
+          "optional": true,
+          "hint": "Regex or pattern spec."
+        },
+        {
+          "type": "string",
+          "name": "data_cleaning_flags",
+          "optional": true,
+          "hint": "Comma-separated cleaning hints (trim, uppercase, etc.)."
+        },
+        {
+          "type": "string",
+          "name": "lookup_name",
+          "optional": true,
+          "hint": "Soft-join key to CFG_Lookup.lookup_name."
+        },
+        {
+          "type": "string",
+          "name": "depends_on",
+          "optional": true,
+          "hint": "Self-FK -> CFG_Field.field_id (cascading dropdowns)."
+        },
+        {
+          "type": "string",
+          "name": "control_type",
+          "optional": false,
+          "hint": "enum: text | number | dropdown | date | checkbox. Derived from data_type + lookup_name at row-creation time."
+        }
+      ]
+    },
+    {
+      "name": "CFG_Lookup",
+      "purpose": "One row per (lookup_name, value). Soft-joined from CFG_Field.lookup_name and CFG_FormSlotMapping.lookup_name.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "lookup_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "template_version_id",
+          "optional": false,
+          "hint": "FK -> CFG_TemplateVersion.template_version_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "lookup_name",
+          "optional": false,
+          "hint": "Immutable within version."
+        },
+        {
+          "type": "string",
+          "name": "valid_value",
+          "optional": false,
+          "hint": "One allowable value."
+        },
+        {
+          "type": "string",
+          "name": "parent_value",
+          "optional": true,
+          "hint": "Cascade trigger for dependent dropdowns -- the parent value that gates this child."
+        },
+        {
+          "type": "boolean",
+          "name": "project_specific",
+          "optional": false,
+          "hint": "Default false. Whether this lookup row is engagement-scoped vs. global."
+        }
+      ]
+    },
+    {
+      "name": "CFG_Variant",
+      "purpose": "A flavor of the template with a subset of fields.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "variant_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "template_version_id",
+          "optional": false,
+          "hint": "FK -> CFG_TemplateVersion.template_version_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "variant_name",
+          "optional": false,
+          "hint": "Immutable within version."
+        },
+        {
+          "type": "string",
+          "name": "description",
+          "optional": true,
+          "hint": "Human-readable description."
+        },
+        {
+          "type": "string",
+          "name": "template_path",
+          "optional": false,
+          "hint": "FileStorage path to the variant XLSX. Renamed from template_file_id."
+        }
+      ]
+    },
+    {
+      "name": "CFG_ErrorMessage",
+      "purpose": "Per-version snapshot of error code -> human-readable message.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "error_translation_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "template_version_id",
+          "optional": false,
+          "hint": "FK -> CFG_TemplateVersion.template_version_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "error_code",
+          "optional": false,
+          "hint": "Stable code referenced by CFG_ValidationRule.error_message."
+        },
+        {
+          "type": "string",
+          "name": "human_readable_message",
+          "optional": false,
+          "hint": "Message shown to supplier; supports placeholder substitution."
+        },
+        {
+          "type": "string",
+          "name": "required_placeholders",
+          "optional": true,
+          "hint": "Comma-separated placeholder names ({field_name}, {value}, etc.) the rendering recipe must supply."
+        }
+      ]
+    },
+    {
+      "name": "CFG_ValidationRule",
+      "purpose": "Cross-field validation rules. Evaluated by the validate_upload connector action.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "rule_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "template_version_id",
+          "optional": false,
+          "hint": "FK -> CFG_TemplateVersion.template_version_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "field_id",
+          "optional": false,
+          "hint": "FK -> CFG_Field.field_id. Immutable. The rule's primary target field."
+        },
+        {
+          "type": "string",
+          "name": "rule",
+          "optional": false,
+          "hint": "Rule expression / type code."
+        },
+        {
+          "type": "string",
+          "name": "condition_field_id",
+          "optional": true,
+          "hint": "FK -> CFG_Field.field_id. The conditional dependency, if any."
+        },
+        {
+          "type": "string",
+          "name": "conditional_value",
+          "optional": true,
+          "hint": "Value the condition field must hold for the rule to fire."
+        },
+        {
+          "type": "string",
+          "name": "error_message",
+          "optional": false,
+          "hint": "Default error code -- looked up in CFG_ErrorMessage."
+        },
+        {
+          "type": "string",
+          "name": "error_message_custom",
+          "optional": true,
+          "hint": "Override message. Wins over error_message when set."
+        },
+        {
+          "type": "boolean",
+          "name": "strict_enforcement",
+          "optional": false,
+          "hint": "Default true. Whether failure blocks submission."
+        },
+        {
+          "type": "string",
+          "name": "scope",
+          "optional": false,
+          "hint": "enum: submission | supplier | engagement. Default 'submission'. Controls cross-row evaluation set. v2 addition."
+        },
+        {
+          "type": "string",
+          "name": "target_field",
+          "optional": false,
+          "hint": "Denormalized display name of field_id's field, for Workato Data Tables UI readability."
+        },
+        {
+          "type": "string",
+          "name": "condition_field",
+          "optional": true,
+          "hint": "Denormalized display name of condition_field_id's field."
+        }
+      ]
+    },
+    {
+      "name": "CFG_VariantField",
+      "purpose": "Junction table. Variant <-> Field. Inclusion list -- presence means visible.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "variant_field_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "variant_id",
+          "optional": false,
+          "hint": "FK -> CFG_Variant.variant_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "field_id",
+          "optional": false,
+          "hint": "FK -> CFG_Field.field_id. Immutable."
+        }
+      ]
+    },
+    {
+      "name": "CFG_FormSlotMapping",
+      "purpose": "Maps fields to fixed WFA slot columns on SUP_SupplierRequest. Slot labels live here; the 20 *_label columns on SupplierRequest in v0 are gone.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "form_slot_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "template_version_id",
+          "optional": false,
+          "hint": "FK -> CFG_TemplateVersion.template_version_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "field_id",
+          "optional": false,
+          "hint": "FK -> CFG_Field.field_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "slot_name",
+          "optional": false,
+          "hint": "e.g., 'slot_text_01', 'slot_num_02'. Soft-joined to the matching column on SUP_SupplierRequest."
+        },
+        {
+          "type": "string",
+          "name": "display_label",
+          "optional": false,
+          "hint": "Label shown to the supplier in the WFA form. Was *_label on SupplierRequest in v0."
+        },
+        {
+          "type": "string",
+          "name": "control_type",
+          "optional": false,
+          "hint": "enum: text | number | dropdown | date | checkbox."
+        },
+        {
+          "type": "boolean",
+          "name": "required",
+          "optional": false,
+          "hint": "Default false."
+        },
+        {
+          "type": "string",
+          "name": "lookup_name",
+          "optional": true,
+          "hint": "Soft-join to CFG_Lookup.lookup_name. Required when control_type=dropdown."
+        },
+        {
+          "type": "integer",
+          "name": "position",
+          "optional": false,
+          "hint": "Display order in the form."
+        }
+      ]
+    },
+    {
+      "name": "SUP_Supplier",
+      "purpose": "Supplier identity. Survives across template versions.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "supplier_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "supplier_name",
+          "optional": false,
+          "hint": "Display name."
+        },
+        {
+          "type": "string",
+          "name": "default_variant_id",
+          "optional": true,
+          "hint": "FK -> CFG_Variant.variant_id. Optional default variant for re-engagement scenarios."
+        },
+        {
+          "type": "string",
+          "name": "status",
+          "optional": false,
+          "hint": "enum: active | deactivated. Default 'active'."
+        },
+        {
+          "type": "date_time",
+          "name": "created_at",
+          "optional": false,
+          "hint": "Immutable."
+        }
+      ]
+    },
+    {
+      "name": "SUP_SupplierUser",
+      "purpose": "Contacts at a supplier. First-class to the supplier -- not to any single SupplierRequest.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "supplier_user_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "supplier_id",
+          "optional": false,
+          "hint": "FK -> SUP_Supplier.supplier_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "user_email",
+          "optional": false,
+          "hint": "Unique within supplier_id (enforced at config-issuance time)."
+        },
+        {
+          "type": "string",
+          "name": "contact_name",
+          "optional": false,
+          "hint": "Contact's display name."
+        },
+        {
+          "type": "boolean",
+          "name": "primary",
+          "optional": false,
+          "hint": "Default false. Designates the primary contact. Exactly one per supplier; enforced by CFG-validate_config and Add user to request. v2 addition."
+        },
+        {
+          "type": "string",
+          "name": "status",
+          "optional": false,
+          "hint": "enum: active | deactivated. Default 'active'."
+        },
+        {
+          "type": "date_time",
+          "name": "created_at",
+          "optional": false,
+          "hint": "Immutable."
+        }
+      ]
+    },
+    {
+      "name": "SUP_SupplierRequest",
+      "purpose": "Per-version ask of a supplier. Lifecycle state, file pointers, validation summary. Largest table in the schema.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "supplier_request_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "supplier_id",
+          "optional": false,
+          "hint": "FK -> SUP_Supplier.supplier_id."
+        },
+        {
+          "type": "string",
+          "name": "assigned_version_id",
+          "optional": false,
+          "hint": "FK -> CFG_TemplateVersion.template_version_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "assigned_variant_id",
+          "optional": false,
+          "hint": "FK -> CFG_Variant.variant_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "assignee_email",
+          "optional": false,
+          "hint": "Immutable. The supplier user assigned to fulfill this request. Joins to SUP_SupplierUser.user_email within the supplier."
+        },
+        {
+          "type": "string",
+          "name": "external_request_id",
+          "optional": true,
+          "hint": "Plain-string upstream traceability. Was correlation_id in v0. Not an FK."
+        },
+        {
+          "type": "string",
+          "name": "status",
+          "optional": false,
+          "hint": "enum: pending | sent | supplier_action_required | pending_review | approved | cancelled. Default 'pending'. SINGLE WRITER: STS-01."
+        },
+        {
+          "type": "date_time",
+          "name": "current_state_entered_at",
+          "optional": false,
+          "hint": "Timestamp of the most recent transition into status. Updated atomically with status. SINGLE WRITER: STS-01. State-machine backport."
+        },
+        {
+          "type": "string",
+          "name": "supplier_display_status",
+          "optional": false,
+          "hint": "Denormalized supplier-facing status label. SINGLE WRITER: STS-01."
+        },
+        {
+          "type": "string",
+          "name": "supplier_message",
+          "optional": true,
+          "hint": "Denormalized supplier-facing message body, including any embedded shareable links (regenerated via UTL-01 on every handler write). Long-text capacity needed. SINGLE WRITER: STS-01."
+        },
+        {
+          "type": "boolean",
+          "name": "reminders_enabled",
+          "optional": false,
+          "hint": "Default true. Per-request reminder opt-out. State-machine backport."
+        },
+        {
+          "type": "string",
+          "name": "template_path",
+          "optional": false,
+          "hint": "FileStorage path to the supplier-facing template. The ONLY path that's rewritten over the row's lifetime (regenerated on each resubmission cycle to carry forward valid prior rows). Renamed from template_file_id."
+        },
+        {
+          "type": "boolean",
+          "name": "has_seeded_data",
+          "optional": false,
+          "hint": "Default false. Whether seeded data was applied for this supplier."
+        },
+        {
+          "type": "string",
+          "name": "seeded_slice_path",
+          "optional": true,
+          "hint": "FileStorage path to this request's slice of Project.seeded_data_path. Renamed from seeded_data_file_id."
+        },
+        {
+          "type": "string",
+          "name": "approved_path",
+          "optional": true,
+          "hint": "FileStorage path to the approved snapshot. Write-once at approval. Immutable thereafter. Renamed from approved_file_id."
+        },
+        {
+          "type": "date_time",
+          "name": "approved_at",
+          "optional": true,
+          "hint": "Write-once at approval."
+        },
+        {
+          "type": "string",
+          "name": "current_validation_result_id",
+          "optional": true,
+          "hint": "FK -> RUN_ValidationResult.validation_result_id. Pointer to the most recent ValidationResult. (v0 had this wired to FieldError.field_id; v2 fixes it.)"
+        },
+        {
+          "type": "integer",
+          "name": "last_valid_row_count",
+          "optional": true,
+          "hint": "Denormalized. Pulled from current ValidationResult for fast querying."
+        },
+        {
+          "type": "integer",
+          "name": "last_invalid_row_count",
+          "optional": true,
+          "hint": "Denormalized. Pulled from current ValidationResult."
+        },
+        {
+          "type": "integer",
+          "name": "submission_attempt",
+          "optional": false,
+          "hint": "Default 0. Increments on each Upload."
+        },
+        {
+          "type": "integer",
+          "name": "last_reminder_tier",
+          "optional": false,
+          "hint": "Default 0. Most recent tier sent (0 = none)."
+        },
+        {
+          "type": "date_time",
+          "name": "last_reminder_sent_at",
+          "optional": true,
+          "hint": "Most recent reminder timestamp."
+        },
+        {
+          "type": "date_time",
+          "name": "template_access_time",
+          "optional": true,
+          "hint": "First time the supplier accessed the template via shareable link."
+        },
+        {
+          "type": "date_time",
+          "name": "due_date",
+          "optional": true,
+          "hint": "Per-request due date. Defaults computed from Project.default_due_days at invitation; analyst-editable thereafter. (Conditional column -- drop if engagement uses Project.default_due_days only.)"
+        },
+        {
+          "type": "string",
+          "name": "slot_text_01",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string; semantic type enforced at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_text_02",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string; semantic type enforced at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_text_03",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string; semantic type enforced at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_text_04",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string; semantic type enforced at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_text_05",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string; semantic type enforced at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_text_06",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string; semantic type enforced at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_text_07",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string; semantic type enforced at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_text_08",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string; semantic type enforced at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_num_01",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string for widget compatibility; cast to numeric at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_num_02",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string for widget compatibility; cast to numeric at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_bool_01",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string for widget compatibility; cast to boolean at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_bool_02",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string for widget compatibility; cast to boolean at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_sel_01",
+          "optional": true,
+          "hint": "WFA form slot (dropdown). Stored as string."
+        },
+        {
+          "type": "string",
+          "name": "slot_sel_02",
+          "optional": true,
+          "hint": "WFA form slot (dropdown). Stored as string."
+        },
+        {
+          "type": "string",
+          "name": "slot_sel_03",
+          "optional": true,
+          "hint": "WFA form slot (dropdown). Stored as string."
+        },
+        {
+          "type": "string",
+          "name": "slot_sel_04",
+          "optional": true,
+          "hint": "WFA form slot (dropdown). Stored as string."
+        },
+        {
+          "type": "string",
+          "name": "slot_date_01",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string for widget compatibility; cast to date at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_date_02",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string for widget compatibility; cast to date at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_date_03",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string for widget compatibility; cast to date at validation."
+        },
+        {
+          "type": "string",
+          "name": "slot_date_04",
+          "optional": true,
+          "hint": "WFA form slot. Stored as string for widget compatibility; cast to date at validation."
+        }
+      ]
+    },
+    {
+      "name": "RUN_ManualEntry",
+      "purpose": "Supplier-side single-row form submissions via the WFA. Alternative submission path to file upload.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "manual_entry_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "supplier_request_id",
+          "optional": false,
+          "hint": "FK -> SUP_SupplierRequest.supplier_request_id."
+        },
+        {
+          "type": "string",
+          "name": "field_id",
+          "optional": false,
+          "hint": "FK -> CFG_Field.field_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "field_name",
+          "optional": false,
+          "hint": "Denormalized. Field's display name copied here so the WFA table widget header reads correctly without a join."
+        },
+        {
+          "type": "integer",
+          "name": "row_number",
+          "optional": false,
+          "hint": "1-indexed; suppliers can submit multi-row data through repeated form fills."
+        },
+        {
+          "type": "string",
+          "name": "submitted_value",
+          "optional": true,
+          "hint": "The value the supplier entered."
+        }
+      ]
+    },
+    {
+      "name": "RUN_Upload",
+      "purpose": "Supplier file submission.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "upload_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "supplier_request_id",
+          "optional": false,
+          "hint": "FK -> SUP_SupplierRequest.supplier_request_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "template_version_id",
+          "optional": false,
+          "hint": "FK -> CFG_TemplateVersion.template_version_id. FROZEN at row creation -- copied from SUP_SupplierRequest.assigned_version_id. Survives request reassignment."
+        },
+        {
+          "type": "string",
+          "name": "submitted_path",
+          "optional": false,
+          "hint": "Immutable. FileStorage path to the submitted XLSX. Renamed from submitted_file_id."
+        },
+        {
+          "type": "string",
+          "name": "extracted_path",
+          "optional": true,
+          "hint": "FileStorage path to the extracted JSON. Written by the extraction step. Renamed from extracted_file_version_id."
+        },
+        {
+          "type": "string",
+          "name": "status",
+          "optional": false,
+          "hint": "enum: received | extracting | validating | validated | error. Default 'received'. (`error` renamed from `failed` per state-machine backport.)"
+        },
+        {
+          "type": "date_time",
+          "name": "submitted_at",
+          "optional": false,
+          "hint": "Immutable."
+        },
+        {
+          "type": "string",
+          "name": "valid_payload_json",
+          "optional": true,
+          "hint": "JSON of the row data that passed validation. Long-text capacity needed. Renamed from valid_payload."
+        }
+      ]
+    },
+    {
+      "name": "RUN_ValidationResult",
+      "purpose": "Outcome of validating an Upload.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "validation_result_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "upload_id",
+          "optional": false,
+          "hint": "FK -> RUN_Upload.upload_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "template_version_id",
+          "optional": false,
+          "hint": "FK -> CFG_TemplateVersion.template_version_id. Mirrors the parent Upload's version for direct join access."
+        },
+        {
+          "type": "string",
+          "name": "status",
+          "optional": false,
+          "hint": "enum: running | passed | failed | error. Default 'running'."
+        },
+        {
+          "type": "integer",
+          "name": "valid_row_count",
+          "optional": true,
+          "hint": "Write-once. Renamed from valid_rows."
+        },
+        {
+          "type": "integer",
+          "name": "invalid_row_count",
+          "optional": true,
+          "hint": "Write-once. Renamed from invalid_rows."
+        },
+        {
+          "type": "string",
+          "name": "report_path",
+          "optional": true,
+          "hint": "FileStorage path to the validation report XLSX. Generated by VAL-01. New per naming doc."
+        },
+        {
+          "type": "date_time",
+          "name": "completed_at",
+          "optional": true,
+          "hint": "Write-once."
+        }
+      ]
+    },
+    {
+      "name": "RUN_FieldError",
+      "purpose": "Per-cell validation failure. Links a ValidationResult to specific failing cells.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "field_error_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "validation_result_id",
+          "optional": false,
+          "hint": "FK -> RUN_ValidationResult.validation_result_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "field_id",
+          "optional": false,
+          "hint": "FK -> CFG_Field.field_id. The column whose value failed."
+        },
+        {
+          "type": "integer",
+          "name": "row_number",
+          "optional": false,
+          "hint": "1-indexed row in the supplier's submitted file."
+        },
+        {
+          "type": "string",
+          "name": "submitted_value",
+          "optional": true,
+          "hint": "The value that failed validation. Nullable -- the failure may have been 'value missing'."
+        },
+        {
+          "type": "string",
+          "name": "error_message",
+          "optional": false,
+          "hint": "Rendered human-readable message -- error code resolved through CFG_ErrorMessage with placeholder substitution applied at write time."
+        }
+      ]
+    },
+    {
+      "name": "RUN_ReviewNote",
+      "purpose": "Analyst approve/rework decisions. One row per analyst action -- historical record, not a single overwritten note.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "review_note_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "string",
+          "name": "supplier_request_id",
+          "optional": false,
+          "hint": "FK -> SUP_SupplierRequest.supplier_request_id. Immutable."
+        },
+        {
+          "type": "string",
+          "name": "author_email",
+          "optional": false,
+          "hint": "The analyst who took the action."
+        },
+        {
+          "type": "string",
+          "name": "note_text",
+          "optional": true,
+          "hint": "Free-text note. Required for rework; optional for approved. Long-text capacity needed."
+        },
+        {
+          "type": "string",
+          "name": "review_action",
+          "optional": false,
+          "hint": "enum: approved | rework. The decision recorded."
+        },
+        {
+          "type": "date_time",
+          "name": "created_at",
+          "optional": false,
+          "hint": "Immutable."
+        }
+      ]
+    },
+    {
+      "name": "EventLog",
+      "purpose": "Unified audit log + incident tracking. Replaces the v0 SYS_EventLogs / RUN_PipelineError split.",
+      "schema": [
+        {
+          "type": "string",
+          "name": "event_id",
+          "optional": false,
+          "hint": "PK. UUID."
+        },
+        {
+          "type": "date_time",
+          "name": "timestamp",
+          "optional": false,
+          "hint": "Immutable."
+        },
+        {
+          "type": "string",
+          "name": "source_recipe",
+          "optional": false,
+          "hint": "Recipe identifier (PRV-01, VAL-01a, etc.) per naming-doc recipe convention."
+        },
+        {
+          "type": "integer",
+          "name": "step_number",
+          "optional": true,
+          "hint": "Step within the source recipe."
+        },
+        {
+          "type": "string",
+          "name": "phase",
+          "optional": false,
+          "hint": "High-level phase label (provisioning, validation, review, etc.)."
+        },
+        {
+          "type": "string",
+          "name": "severity",
+          "optional": false,
+          "hint": "enum: info | warn | error."
+        },
+        {
+          "type": "string",
+          "name": "human_message",
+          "optional": false,
+          "hint": "One-line human-readable summary."
+        },
+        {
+          "type": "string",
+          "name": "details_json",
+          "optional": true,
+          "hint": "Structured detail payload. Long-text capacity needed."
+        },
+        {
+          "type": "string",
+          "name": "analyst_email",
+          "optional": true,
+          "hint": "Acting analyst, if relevant."
+        },
+        {
+          "type": "string",
+          "name": "supplier_request_id",
+          "optional": true,
+          "hint": "FK -> SUP_SupplierRequest.supplier_request_id. Many events aren't request-scoped (e.g., provisioning, config validation)."
+        },
+        {
+          "type": "string",
+          "name": "error_type",
+          "optional": true,
+          "hint": "Categorical error classifier."
+        },
+        {
+          "type": "boolean",
+          "name": "alert_sent",
+          "optional": false,
+          "hint": "Default false. Whether an alert was dispatched for this event."
+        },
+        {
+          "type": "boolean",
+          "name": "resolved",
+          "optional": false,
+          "hint": "Default false."
+        },
+        {
+          "type": "date_time",
+          "name": "resolved_at",
+          "optional": true,
+          "hint": "When the incident was resolved, if applicable."
+        }
+      ]
+    }
+  ],
+  "deferred_relations": {
+    "_comment": "Pass 2: relation-type display columns added after all tables exist. UI helpers only -- they do NOT enforce referential integrity. All real joins use the business ID string fields. The provisioning recipe resolves table_id and field_id from the Pass 1 results map.",
+    "updates": [
+      {
+        "target_table": "CFG_Field",
+        "add_column": {
+          "type": "relation",
+          "name": "depends_on_display",
+          "optional": true,
+          "relation": {
+            "table_name": "CFG_Field",
+            "display_field_name": "field_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "CFG_ValidationRule",
+        "add_column": {
+          "type": "relation",
+          "name": "field_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "CFG_Field",
+            "display_field_name": "field_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "CFG_ValidationRule",
+        "add_column": {
+          "type": "relation",
+          "name": "condition_field_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "CFG_Field",
+            "display_field_name": "field_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "CFG_VariantField",
+        "add_column": {
+          "type": "relation",
+          "name": "variant_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "CFG_Variant",
+            "display_field_name": "variant_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "CFG_VariantField",
+        "add_column": {
+          "type": "relation",
+          "name": "field_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "CFG_Field",
+            "display_field_name": "field_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "CFG_FormSlotMapping",
+        "add_column": {
+          "type": "relation",
+          "name": "field_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "CFG_Field",
+            "display_field_name": "field_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "SUP_Supplier",
+        "add_column": {
+          "type": "relation",
+          "name": "default_variant_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "CFG_Variant",
+            "display_field_name": "variant_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "SUP_SupplierUser",
+        "add_column": {
+          "type": "relation",
+          "name": "supplier_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "SUP_Supplier",
+            "display_field_name": "supplier_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "SUP_SupplierRequest",
+        "add_column": {
+          "type": "relation",
+          "name": "supplier_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "SUP_Supplier",
+            "display_field_name": "supplier_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "SUP_SupplierRequest",
+        "add_column": {
+          "type": "relation",
+          "name": "assigned_variant_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "CFG_Variant",
+            "display_field_name": "variant_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "RUN_Upload",
+        "add_column": {
+          "type": "relation",
+          "name": "supplier_request_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "SUP_SupplierRequest",
+            "display_field_name": "assignee_email",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "RUN_FieldError",
+        "add_column": {
+          "type": "relation",
+          "name": "field_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "CFG_Field",
+            "display_field_name": "field_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "RUN_ManualEntry",
+        "add_column": {
+          "type": "relation",
+          "name": "supplier_request_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "SUP_SupplierRequest",
+            "display_field_name": "assignee_email",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "RUN_ManualEntry",
+        "add_column": {
+          "type": "relation",
+          "name": "field_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "CFG_Field",
+            "display_field_name": "field_name",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      },
+      {
+        "target_table": "RUN_ReviewNote",
+        "add_column": {
+          "type": "relation",
+          "name": "supplier_request_id_display",
+          "optional": true,
+          "relation": {
+            "table_name": "SUP_SupplierRequest",
+            "display_field_name": "assignee_email",
+            "_resolved_table_id": null,
+            "_resolved_field_id": null
+          }
+        }
+      }
+    ]
+  }
+}
