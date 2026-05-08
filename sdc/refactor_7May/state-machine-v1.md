@@ -107,8 +107,10 @@ Terminal.
 | pending | cancelled | Analyst cancels staged request | EventLog with cancellation reason |
 | sent | pending_review | Validation passes (Upload terminal, ValidationResult `status=passed`) | Write `current_validation_result_id`, `last_valid_row_count`, `last_invalid_row_count=0`; notify analyst |
 | sent | supplier_action_required | Validation fails (Upload terminal, ValidationResult `status=failed`) | Write `current_validation_result_id`, row counts, FieldError rows; notify supplier |
+| sent | supplier_action_required | system_structural_failure | Write current_validation_result_id (pointing at a RUN_ValidationResult with status=error), write the structural error summary into the trigger context bag for derivation; notify supplier |
 | sent | cancelled | Analyst cancels post-invite | EventLog with cancellation reason |
 | supplier_action_required | pending_review | Validation passes on resubmission | Same as `sent → pending_review` |
+| supplier_action_required | supplier_action_required | system_structural_failureSame as above. No-op transition under invariant 7; new RUN_Upload, new RUN_ValidationResult, refreshed display fields, same state. |
 | supplier_action_required | cancelled | Analyst gives up on supplier | EventLog with cancellation reason |
 | pending_review | approved | Analyst clicks Approve | Write ReviewNote (`review_action=approved`), `approved_at`, `approved_file_id` |
 | pending_review | supplier_action_required | Analyst clicks Reject | Write ReviewNote (`review_action=rework`); notify supplier |
@@ -121,6 +123,8 @@ Every transition also writes `status` and `current_state_entered_at`. These are 
 When a supplier resubmits from `supplier_action_required` and validation fails again, **the request does not transition**. A new Upload is created, a new ValidationResult with `status=failed` is written, new FieldError rows are written, and `current_validation_result_id` plus the row-count fields are updated. The state stays `supplier_action_required`. The supplier sees fresh error counts via the derivation rule, but the state has not moved.
 
 This is the elegant consequence of folding `validated` into `pending_review` and treating `submitted` as Upload's concern: repeated validation failures are pure audit-chain churn, not state churn. The state moves only when the *resting* situation changes.
+
+When a supplier resubmits from supplier_action_required and either validation fails again or the new submission is structurally unparseable, the request does not transition. A new Upload is created, a new ValidationResult is written (with status=failed for content failure or status=error for structural failure), new FieldError rows are written (per-cell for content failure; one summary row for structural failure), and current_validation_result_id plus the row-count fields are updated. The state stays supplier_action_required. The supplier sees fresh error details via the derivation rule, but the state has not moved.
 
 ### Field-level preconditions
 
@@ -142,7 +146,10 @@ Cancellations can fire from `pending`, `sent`, `supplier_action_required`, and `
 The status-change handler is the single writer of `status`, `supplier_display_status`, and `supplier_message`. The handler runs on:
 
 1. **Real transitions** (rows in the transition table).
-2. **Display-refresh events** — cases where status stays the same but the display fields need to update. The canonical case is repeated validation failure in `supplier_action_required`: state doesn't change, but `supplier_message` should reflect the *new* error counts and link to the *new* validation report.
+2. **Display-refresh events** — cases where status stays the same but the display fields need to update.
+   a. The canonical case is repeated validation failure in `supplier_action_required`: state doesn't change, but `supplier_message` should reflect the *new* error counts and link to the *new* validation report.R
+   b. Pipeline error during validation (no state transition; pipeline_error_alert trigger context refreshes the display to a "we're reviewing it" message while the analyst investigates).
+   c. Repeated structural failure within supplier_action_required (treated like case 1 — same no-op mechanics, the structural-failure derivation row renders).
 
 Both cases write all three fields atomically.
 
@@ -152,7 +159,9 @@ Both cases write all three fields atomically.
 |---|---|---|---|
 | pending | — | (not displayed; no portal access) | — |
 | sent | invitation issued | "Action needed: data template" | "Please complete the attached template and submit by {due_date}." |
+| sent (no transition) | pipeline_error_alert | "Submitted — under review""Your submission on {submitted_at} is being reviewed. No action is needed from you at this time." |
 | supplier_action_required | system validation failed | "Action needed: corrections required" | "Validation found {invalid_row_count} issue(s) in your submission on {validated_at}. Please review the error report and resubmit. {validation_report_link}" |
+| supplier_action_required | system_structural_failure | "Action needed: submission could not be processed""Your submission on {submitted_at} could not be processed: {structural_error_summary}. Please review the requirements and submit a corrected file." | 
 | supplier_action_required | analyst rework | "Action needed: changes requested by reviewer" | "The reviewer requested changes on {reviewed_at}: {review_note_text}. Please review and resubmit." |
 | pending_review | submission validated | "Submitted — under review" | "Your submission was received on {submitted_at} and is being reviewed. No further action is needed." |
 | approved | analyst approved | "Approved" | "Your submission was approved on {approved_at}. Thank you." |
@@ -172,6 +181,7 @@ What the handler must be passed (or able to read) to compute the right pair:
 - Most recent ReviewNote text and timestamp (join from ReviewNote, scoped to this request).
 - `Project.analyst_email` for the cancellation message.
 - A `due_date` value for the `sent` message — see backport list.
+- structural_error_summary — one-line description of a structural failure (e.g., "missing required sheet 'WorkerData'", "file appears corrupted"). Required when trigger context is system_structural_failure. Populated by VAL-01.
 
 ### Why one state can carry two messages
 
@@ -265,6 +275,7 @@ Small data model amendments that fall out of this workstream. Each folds into a 
 - `SupplierRequest.reminders_enabled` (boolean, default true). Per-request opt-out. Per-supplier or per-project policy is an additive change later if a use case forces it.
 - `SupplierRequest.due_date` (date, optional) **or** `Project.default_due_days` (int). Drives the `sent` derivation message. Pick the location based on whether due dates are per-request or per-engagement; Project-level is simpler if the project default is the common case.
 - `Upload.status` enum: rename `failed` → `error` for symmetry with `ValidationResult.status` and to disambiguate from "validation found bad data."
+- Add pipeline_error_alert as a recognized display-refresh trigger context. Document VAL-01's responsibility to invoke STS-01 in display-refresh mode (not transition mode) when the validation engine crashes. STS-01 needs to support a "refresh-only" invocation that takes a target state matching the row's current state — confirms no transition occurs, just a display field rewrite.
 
 ---
 
@@ -278,11 +289,3 @@ Small data model amendments that fall out of this workstream. Each folds into a 
 - **A separate "cancellation" state distinct from `cancelled`** — one terminal-not-approved state covers all closure reasons. EventLog carries the reason.
 - **WFA stage as an independent state machine** — collapsed into a derived view of `SupplierRequest.status`. The two-system drift problem from the prior model is gone by construction.
 - **A `ReminderPolicy` table** — speculative complexity. Add when a use case forces it; the current per-request `reminders_enabled` covers the immediately-anticipated need.
-
----
-
-## Pending in Phase 0
-
-- **Naming and prefix conventions.** Status values above use snake_case and unprefixed table names (`SupplierRequest`, `Upload`, etc.). Whether the data tables themselves take prefixes (CFG_, VER_, RUN_) is the next workstream and may revise field names referenced here.
-- **ADR triage.** AD-1 through AD-38 review. Several state machine decisions here likely supersede earlier ADRs.
-- **Callable reuse-vs-rebuild.** Whether the existing status-writing recipe is ported or rebuilt depends on this session's invariants and the next session's naming.
