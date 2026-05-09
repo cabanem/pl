@@ -125,6 +125,7 @@ All eight CFG_ tables share two invariants:
 | `status` | enum (`draft`, `published`, `deprecated`) | Default `draft`. Forward transitions only. |
 | `master_template_path` | string | FileStorage path to the master XLSX. Renamed from `master_template_file_id`. |
 | `parsed_config_path` | string | FileStorage path to the per-version parsed config snapshot — distinct from `Project.parsed_config_path`. Renamed from `parsed_config_file_id`. |
+| canonical_model_path | string | New. FileStorage path to the canonical model — the fully resolved, FK-wired, slot-pool-assigned version of the configuration. Audience: runtime consumers (PRV-02, VAL-01's connector, future builders). |
 | `published_at` | date_time | write-once. Set on draft → published. Nullable until then. |
 | `validation_summary` | long-text | JSON summary of validation results from `CFG-validate_config`. |
 
