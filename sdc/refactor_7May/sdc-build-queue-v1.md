@@ -28,9 +28,10 @@ The 10-item linear order from the handoff is preserved by intent — its depende
 
 **Concrete deliverables.**
 
-*From the data model v2:*
+*From the data model v2 (now v2.1):*
 - Add `SupplierUser.primary` (boolean).
 - Add `ValidationRule.scope` (enum: `submission` | `supplier` | `engagement`, default `submission`).
+- Add `CFG_TemplateVersion.canonical_model_path` (string, required). Holds the per-version canonical model artifact written at publish time.
 
 *From the naming conventions doc (backports section):*
 - Apply table prefixes (`CFG_`, `SUP_`, `RUN_`) and bare-naming for `Project`, `EventLog`.
@@ -60,10 +61,23 @@ The 10-item linear order from the handoff is preserved by intent — its depende
 - **UTL-01 (Generate Shareable Link).** Pure utility per naming-doc invariant 8. Takes a path, returns a fresh 10-day link. Single owner of FileStorage TTL handling.
 - **OBS-01 (Event emitter).** Per the sibling scope. Takes severity, source_recipe, step_number, phase, human_message, optional details_json + supplier_request_id + error_type. Writes one EventLog row.
 - **STS-01 (Status-change handler).** Per the state-machine doc + the sibling scope. Single writer of `status`, `supplier_display_status`, `supplier_message`, `current_state_entered_at`. Implements the derivation table.
-- **Connector adjustments to `validate_upload`.** Add the optional `prior_values` parameter shape: `{ field_id: [{value, row_number, submission_id}, ...] }`. Add awareness of `ValidationRule.scope` so the action knows which scope-tagged rules expect a `prior_values` set vs. evaluate within-submission.
-- **Connector adjustments to `validate_config`.** Add the new check from data-model invariant 6: exactly one `SupplierUser.primary = true` per supplier.
 
-**Parallelism.** UTL-01, OBS-01, and the two connector adjustments can be built concurrently — none depends on the others. STS-01 depends on OBS-01 (it emits an event on every transition).
+Connector adjustments expand from two items to six. Three additive (per Phase 0 design); three architectural (emerged from the canonical-model decision in Stage 2 design pass).
+
+*Additive (Phase 0):*
+
+- **`validate_upload`** — Add the optional `prior_values` parameter shape: `{ field_id: [{value, row_number, submission_id}, ...] }`. Add awareness of `ValidationRule.scope` so the action knows which scope-tagged rules expect a `prior_values` set vs. evaluate within-submission.
+- **`validate_config`** — Add the new check from data-model invariant 6: exactly one `SupplierUser.primary = true` per supplier.
+
+*Architectural (canonical-model decision):*
+
+- **`validate_upload` input contract** — replace `template_version_id` parameter (which had the action query CFG_* tables to assemble its configuration) with a `canonical_model_json` parameter (the action consumes the pre-built canonical model directly). Aligns with the `parsed once` principle and with PRV-02's redesign. Removes per-call data table query overhead.
+- **`validate_config` input contract** — same shape: `validate_config` already takes the parsed config as input, so the change is naming-aligned: confirm the input parameter is named `parsed_config_json` (not `parsed_config_file_path` or similar) and the action consumes content, not paths. The recipe (CFG-01) reads the file from FileStorage and passes the content.
+- **`validate_upload` pre-processing** — apply per-field `data_cleaning_flags` from the canonical model before rule evaluation. Implements the deep dive's "require exact, with universal trim and per-field opt-in coercion" normalization policy. Recipe-side pre-processing in V-01b's prior workspace; folded into the connector for the rebuild.
+
+The architectural changes expand the connector's role beyond what triage v2's "carry forward" call assumed; the actions' capability fit (parse, validate, build storage paths) is unchanged, but the signatures evolve. See the corresponding amendment in `sdc-callable-triage_v2.md`.
+
+**Parallelism.** UTL-01, OBS-01, and the connector adjustments can be built concurrently — none depends on the others. STS-01 depends on OBS-01 (it emits an event on every transition).
 
 **Done when.** Each utility has at least one consumer-side stub exercising it end-to-end. STS-01's transition table is exercised against a fixture of synthetic state changes. OBS-01 round-trips a row through EventLog. UTL-01 produces a valid link from a known path.
 
@@ -98,7 +112,10 @@ The 10-item linear order from the handoff is preserved by intent — its depende
 
 **Concrete deliverables.**
 
-- **E1 recipe (PRV-01 + PRV-02 + PRV-03 + PRV-04 chain or similar).** Webhook → parse config → validate config → record project → publish first version → build templates per variant → stage supplier records. Calls Validate config and Build XLSX template from Stage 2.
+- **E1 recipe (PRV-01 + PRV-02 + PRV-03 + PRV-04 chain or similar).** Webhook → parse config → validate config → record project → **build canonical model → persist parsed config and canonical model** → publish first version → build templates per variant → stage supplier records. Calls Validate config and Build XLSX template from Stage 2.
+
+  The canonical-model build substage is the substantive work that prior workspace's C-01 step 9 Python performed: minting UUIDs for fields/rules/lookups/variants, resolving FK references from names to UUIDs, applying slot pool assignment, and producing the runtime-consumable JSON shape. The substage is new in the v1 architecture (v0 mixed it into the validation recipe); making it explicit lets PRV-02 and VAL-01 read the canonical model directly rather than re-hydrating from CFG_* tables.
+
 - **E2 recipe.** Same shape, branched at the "first time vs. update" decision. Publishes a new version, deprecates the old one, leaves in-flight suppliers stamped with their original version per data-model invariant + state-machine derivation.
 
 **Parallelism.** E1 and E2 share most of their substages. Build E1 first; E2 is largely a parameterization of E1's chain.
