@@ -4,7 +4,7 @@
 
 The build-to schema for **Stage 0 of the SDC build queue**. Folds three Phase 0 artifacts into one consolidated specification:
 
-- `sdc-data-model-v2.md` — conceptual model, FK rationale, foundational decisions
+- `sdc-data-model-v2.md` — conceptual model, FK rationale, foundational decisions (now v2.1, applying the canonical-model decision and the TemplateVersion naming backports)
 - `sdc-state-machines-v1.md` — status enums, transitions, derivation rule
 - `sdc-naming-v1.md` — prefix scheme, field conventions, file model, backports
 
@@ -124,8 +124,8 @@ All eight CFG_ tables share two invariants:
 | `version_label` | string | write-once. Human-readable label assigned at publish time. |
 | `status` | enum (`draft`, `published`, `deprecated`) | Default `draft`. Forward transitions only. |
 | `master_template_path` | string | FileStorage path to the master XLSX. Renamed from `master_template_file_id`. |
-| `parsed_config_path` | string | FileStorage path to the per-version parsed config snapshot — distinct from `Project.parsed_config_path`. Renamed from `parsed_config_file_id`. |
-| canonical_model_path | string | New. FileStorage path to the canonical model — the fully resolved, FK-wired, slot-pool-assigned version of the configuration. Audience: runtime consumers (PRV-02, VAL-01's connector, future builders). |
+| `parsed_config_path` | string | FileStorage path to the per-version parsed config snapshot — the workbook's contents, structurally cleaned but pre-FK-resolution. Distinct from `Project.parsed_config_path`. Renamed from `parsed_config_file_id`. |
+| `canonical_model_path` | string | **v2.1 addition.** FileStorage path to the per-version canonical model — the fully resolved, FK-wired, slot-pool-assigned configuration. write-once at publish. Distinct from `parsed_config_path` (which holds the pre-resolution structurally-cleaned config). Audience: runtime consumers (PRV-02, VAL-01's connector). |
 | `published_at` | date_time | write-once. Set on draft → published. Nullable until then. |
 | `validation_summary` | long-text | JSON summary of validation results from `CFG-validate_config`. |
 
@@ -500,7 +500,7 @@ All 20 slots: `string`, all nullable, no defaults. **Slot *labels* are not store
 The full set across data-model, state-machine, and naming docs. Numbering carries through.
 
 1. **Status writer rule.** Only `STS-01` writes `SUP_SupplierRequest.status`, `current_state_entered_at`, `supplier_display_status`, `supplier_message`.
-2. **Snapshot semantics.** Once a `CFG_TemplateVersion` is `published`, no row in any CFG_ table scoped to that version is ever updated.
+2. **Snapshot semantics.** Once a `CFG_TemplateVersion` is `published`, no row in any CFG_ table scoped to that version is ever updated. The same rule covers per-version file artifacts: `parsed_config_path` and `canonical_model_path` are write-once at publish and immutable thereafter.
 3. **FileStorage TTL re-hydration.** `template_path` shareable links are 10-day TTL. Reminder workflow regenerates via `UTL-01` before sending.
 4. **Supplier ↔ SupplierUser independence.** A `SUP_SupplierUser` belongs to a `SUP_Supplier`, not to any `SUP_SupplierRequest`. Re-engagement creates new request rows but reuses existing supplier and user rows.
 5. **External references are strings, not FKs.** `external_request_id` traces to upstream intake but does not constrain or join inside this workspace.
