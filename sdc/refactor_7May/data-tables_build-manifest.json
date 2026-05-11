@@ -1,7 +1,7 @@
 {
   "_meta": {
-    "schema_version": "5.0.0",
-    "description": "SDC Phase 0 rebuild manifest. 18 tables across Project, CFG_, SUP_, RUN_, and bare EventLog. Folds the v2 data model, the v1 naming-doc backports (file paths, dropped columns, renames), and the state-machine backports (current_state_entered_at, reminders_enabled, Upload status 'failed' -> 'error') into one consolidated build target. Replaces the v0 22-table workspace; not a delta on v3.1.0.",
+    "schema_version": "5.1.0",
+    "description": "SDC Phase 0 rebuild manifest. 18 tables across Project, CFG_, SUP_, RUN_, and bare EventLog. Folds the v2 data model, the v1 naming-doc backports (file paths, dropped columns, renames), the state-machine backports (current_state_entered_at, reminders_enabled, Upload status 'failed' -> 'error'), and the v2.1 canonical-model decision into one consolidated build target. Replaces the v0 22-table workspace; not a delta on v3.1.0.",
     "created_at": "2026-05-08",
     "notes": {
       "creation_order": "Tables are ordered so FK targets are created before FK sources. Relation-type display columns are in deferred_relations and applied in Pass 2 via PUT/PATCH after all tables exist.",
@@ -18,6 +18,14 @@
       "file_model": "All long-term file references are paths (`*_path`); shareable links are generated on demand by UTL-01. The naming-doc invariant is that links are not stored as state. Path is canonical; link is volatile."
     },
     "changelog": [
+      {
+        "version": "5.1.0",
+        "date": "2026-05-09",
+        "changes": [
+          "Added CFG_TemplateVersion.canonical_model_path (string, required). Holds the FileStorage path to the per-version canonical model -- the fully resolved, FK-wired, slot-pool-assigned configuration. Audience: runtime consumers (PRV-02, VAL-01 connector). Distinct from parsed_config_path, which holds the pre-resolution structurally-cleaned config.",
+          "No other schema changes; additive only."
+        ]
+      },
       {
         "version": "5.0.0",
         "date": "2026-05-08",
@@ -173,6 +181,12 @@
           "name": "parsed_config_path",
           "optional": false,
           "hint": "FileStorage path to the per-version parsed config snapshot (distinct from Project.parsed_config_path). Renamed from parsed_config_file_id."
+        },
+        {
+          "type": "string",
+          "name": "canonical_model_path",
+          "optional": false,
+          "hint": "FileStorage path to the per-version canonical model (resolved, FK-wired, slot-pool-assigned). Distinct from parsed_config_path (which holds the pre-resolution structurally-cleaned config). Written write-once at version publish; immutable thereafter."
         },
         {
           "type": "date_time",
