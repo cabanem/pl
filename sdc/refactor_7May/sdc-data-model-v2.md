@@ -1,8 +1,10 @@
-# SDC Data Collection — Data Model (v2, Phase 0)
+# SDC Data Collection — Data Model (v2.1, Phase 0)
 
 ## Status
 
-This is the proposed schema for the new SDC workspace, replacing the 22-table model from the prior workspace. **v2 folds in the two schema additions from the cluster resolutions in `sdc-callable-triage-v2.md`:** `SupplierUser.primary` and `ValidationRule.scope`. Both are additive to v1; no v1 fields, FKs, or invariants change. The version bump exists because the authoritative schema document is referenced elsewhere and a v1 reader needs to know to look for v2.
+This is the proposed schema for the new SDC workspace, replacing the 22-table model from the prior workspace. **v2.1 folds in the canonical-model decision** (`CFG_TemplateVersion.canonical_model_path`) **and applies the naming-doc backports for TemplateVersion** (`master_template_file_id` → `master_template_path`, `parsed_config_file_id` → `parsed_config_path`). v2 folded in the two schema additions from the cluster resolutions in `sdc-callable-triage-v2.md`: `SupplierUser.primary` and `ValidationRule.scope`.
+
+All v2 additions (and v1 fields, FKs, invariants) carry forward unchanged. The version bump exists because the authoritative schema document is referenced elsewhere and a v2 reader needs to know to look for v2.1.
 
 Other Phase 0 work — state machine, naming and prefix conventions, ADR triage, callable reuse-vs-rebuild — is still pending in subsequent sessions.
 
@@ -29,6 +31,7 @@ Three answers shaped the model:
 - `Supplier` extracted from the request table
 - `SupplierUser.primary` (boolean) — designated primary contact per supplier *(v2)*
 - `ValidationRule.scope` (enum) — uniqueness scope for cross-row validation *(v2)*
+- `CFG_TemplateVersion.canonical_model_path` (string) — per-version snapshot of the fully resolved configuration *(v2.1)*
 
 **Net:** 22 → 18 tables. Every remaining FK has a single, clear purpose.
 
@@ -58,7 +61,9 @@ A version of the data-collection template. Snapshot semantics: once published, i
 
 - `version_number` (immutable), `version_label` (write-once)
 - `status` — draft | published | deprecated; forward transitions only
-- `master_template_file_id` (FileStorage), `parsed_config_file_id` (per-version snapshot, distinct from `Project.parsed_config_file_id`)
+- `master_template_path` (FileStorage path to the master XLSX)
+- `parsed_config_path` (per-version snapshot of the workbook's contents — structurally cleaned but pre-FK-resolution. Distinct from `Project.parsed_config_path`)
+- `canonical_model_path` (per-version snapshot of the fully resolved configuration — UUIDs minted, FKs wired, slot pool assigned. Audience: runtime consumers — PRV-02, VAL-01's connector, future builders)
 - `published_at` (write-once), `validation_summary`
 
 PK: `template_version_id`. **Removed:** `template_project_id`, `manifest_id`.
@@ -266,7 +271,7 @@ These are the contracts the recipes must honor. Documented here so they're not r
 
 1. **Status writer rule.** Only the status-change handler recipe writes `SupplierRequest.status`, `supplier_display_status`, and `supplier_message`. Every other recipe reads. Drift between the three fields is impossible by construction.
 
-2. **Snapshot semantics.** Once a TemplateVersion transitions to `published`, no Field, Lookup, ValidationRule, Variant, VariantField, FormSlotMapping, or ErrorMessage row scoped to that version is ever updated. New version = new rows. Typo fixes flow forward via new versions, never via in-place edits to published rows.
+2. **Snapshot semantics.** Once a TemplateVersion transitions to `published`, no Field, Lookup, ValidationRule, Variant, VariantField, FormSlotMapping, or ErrorMessage row scoped to that version is ever updated. New version = new rows. Typo fixes flow forward via new versions, never via in-place edits to published rows. *The same rule covers per-version file artifacts: `parsed_config_path` and `canonical_model_path` are written write-once at publish and immutable thereafter.*
 
 3. **FileStorage TTL re-hydration.** `SupplierRequest.template_file_id` is a 10-day shareable link. The reminder workflow regenerates it before sending. Same rule applies to any `*_link` field whose source is FileStorage.
 
@@ -278,25 +283,9 @@ These are the contracts the recipes must honor. Documented here so they're not r
 
 ---
 
-## Deliberately omitted
-
-- **HOME_Requests / HOME_Manifests references** — gone with cross-project boundary.
-- **WFA_Cache** — its contents were a grab bag of session, share-method, and last-known-user state. Session and share metadata move into `EventLog` with typed phases. Last-known-user state, if needed, will be reintroduced as a purpose-specific table only when a recipe demands it.
-- **The `*_label` columns on SupplierRequest** — replaced by linked-table join to `FormSlotMapping`.
-- **`customer_name` on SupplierRequest** — sourced from the `Project` singleton.
-
----
-
-## Pending in Phase 0
-
-- **State machine design.** Status enum values, transitions, derivation rule for `supplier_display_status` and `supplier_message`. Currently inheriting the old enum (pending | sent | in_progress | submitted | validated | accepted | rejected) — to be reconsidered.
-- **Naming and prefix conventions.** Table names above are conceptual. Whether to use prefixes (CFG_, VER_, RUN_, etc.), simpler prefixes, or no prefix at all is still open.
-- **ADR triage.** Which of AD-1 through AD-38 still apply, which are obsolete, which need revisiting.
-- **Reuse-vs-rebuild on existing callables.** Depends on naming and state machine decisions.
-
----
-
 ## Changelog
+
+**v2.1** — Added `CFG_TemplateVersion.canonical_model_path` (string) and applied the naming-doc file-column backports to TemplateVersion (`master_template_file_id` → `master_template_path`, `parsed_config_file_id` → `parsed_config_path`). The canonical model addition reflects the architectural decision to persist a fully resolved per-version configuration snapshot for runtime consumers, distinct from the structurally-cleaned `parsed_config_path` artifact. No invariants change; both new and renamed columns follow the existing snapshot-semantics rule (invariant 2). The naming backport was queued at v2's authorship; this revision applies it.
 
 **v2** — Added `SupplierUser.primary` (boolean) and `ValidationRule.scope` (enum: `submission` | `supplier` | `engagement`, default `submission`). Added invariant #6 covering the exactly-one-primary-per-supplier rule. No other changes from v1; all v1 fields, FKs, and invariants 1–5 carry forward unchanged.
 
