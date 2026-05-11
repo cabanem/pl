@@ -1,180 +1,158 @@
-Good call. Let me work through change #1 first — fixing the `rows` bug and extending `validate_upload` to return the five-valued verdict (`passed | failed | structural_failure | empty | error`).
+## Change #2: Add the primary-user invariant check to `validate_config`
 
-A quick note on scope before I dive in. The v2 build guide's verdict shape has five statuses, but two of them are conceptually different from the others:
+**The invariant** (data-model v2 invariant 6): each `SUP_Supplier` has exactly one `SUP_SupplierUser` with `primary = true`. Today, `validate_config` checks that users reference real suppliers (`user_supplier_exists` at line 1388), but does not check that each supplier has exactly one primary.
 
-- `passed`, `failed`, `empty` — verdicts the connector can produce by looking at its inputs (rows + canonical model)
-- `structural_failure` — requires parsing XLSX bytes. The connector currently takes pre-extracted `upload_data`, so unless we add XLSX parsing to the connector, `structural_failure` is detected upstream (in the recipe or in a separate `extract_xlsx_to_rows` action) and passed in
-- `error` — this is the "validation engine crashed" case, surfaced by Workato's error monitor in the recipe, not a value the connector returns
+Two failure modes to catch:
+- **Zero primaries.** A supplier has users, but none flagged `primary = true`. The downstream "designated assignee" logic in Invite supplier users has no one to assign to.
+- **Multiple primaries.** A supplier has two or more users flagged `primary = true`. Ambiguity about who owns the request task.
 
-So `validate_upload` itself should return three statuses: `passed | failed | empty`. The `structural_failure` and `error` paths are handled outside this action. Let me confirm that's the right scoping before writing code — it changes what we're building.
-
-The alternative would be to also pull XLSX parsing into the connector (so it accepts `submitted_xlsx_bytes` and can detect structural problems internally). That's a bigger change, ~150 lines of Ruby, and a separate decision. For change #1, I'd recommend keeping it scoped to the three statuses `validate_upload` can produce from its current input shape, and treating the XLSX parsing as a separate connector adjustment if you decide to do it.
-
-Sound right? I'll proceed on that scoping. Here are the changes.
+Both should be flagged at config-validation time so the analyst sees them before provisioning, not at runtime when Invite supplier users would otherwise hit an ambiguous state.
 
 ---
 
-## Change #1a: Fix the `rows` bug
+## Where it goes
 
-**Where:** `/mnt/user-data/uploads/functional_core_for_sdc_multi_workspace_custom_adapter.rb`, inside `validate_upload`'s `execute:` lambda. Specifically, after the existing input bindings at line 1741 and before the variant filter at line 1748.
+**File:** `/mnt/user-data/uploads/functional_core_for_sdc_multi_workspace_custom_adapter.rb`, inside `validate_config`'s `execute:` lambda.
 
-**What to insert** (one new line):
+**Position:** Immediately after the existing `user_supplier_exists` check ends at line 1398, and before the `dependent_dropdown_has_parent` check at line 1400.
 
-```ruby
-        rows           = input["upload_data"] || []
-```
-
-**Resulting context** (lines 1740–1750 after the edit — the new line is the third-from-last):
-
-```ruby
-        prior_values = input["prior_values"] || {}
-        opts         = input["options"] || {}
-
-        apply_cleaning = opts["apply_cleaning"].nil? ? true : opts["apply_cleaning"]
-        max_per_row    = opts["max_errors_per_row"]
-        max_total      = opts["max_total_errors"]
-        stop_first     = opts["stop_on_first_row_failure"] || false
-
-        rows           = input["upload_data"] || []
-
-        # Filter fields by variant if applicable
-```
-
-This makes the three downstream references (lines 1777, 2152, 2157) resolve. No other changes needed for the bug fix — the rest of the loop body uses `rows` consistently.
+The placement matters — putting it adjacent to `user_supplier_exists` keeps both user-related checks in the same block, and means a reader scanning the file sees user-integrity checks as a logical unit.
 
 ---
 
-## Change #1b: Add `empty` as a distinct verdict status
+## What to insert
 
-The current verdict logic (line 2155) is:
-
-```ruby
-"status" => all_errors.any? { |e| e["strict"] } ? "failed" : "passed",
-```
-
-This treats a zero-row submission with no errors as `passed`, which is wrong — empty submissions are a hard-fail by default per the deep dive. The connector should detect this and return `empty` with a summary error so the recipe persists it like any other failure.
-
-**Where:** Two changes, both near the end of `validate_upload`'s `execute:` lambda.
-
-**First**, an early-return block right after `rows` is bound (after the line you just added in 1a). Insert this block:
+A new check block. Drop this in between line 1398 (the closing `}` of `user_supplier_exists`) and line 1400 (the `# dependent_dropdown_has_parent` comment):
 
 ```ruby
-        # ── Empty-submission gate ─────────────────
-        # Zero rows is hard-fail by default per the capability deep dive.
-        # Return early with status='empty' and a single summary error so the
-        # recipe persists it through the same path as other failures.
-        if rows.empty?
-          return {
-            "status" => "empty",
-            "summary" => {
-              "total_rows"       => 0,
-              "valid_rows"       => 0,
-              "invalid_rows"     => 0,
-              "total_errors"     => 1,
-              "truncated"        => false,
-              "cleaning_applied" => false
-            },
-            "errors" => [{
-              "row_number"      => 0,
-              "field_id"        => nil,
-              "field_name"      => nil,
-              "submitted_value" => nil,
-              "error_code"      => "err_empty_submission",
-              "error_message"   => "Submission contains no rows",
-              "strict"          => true,
-              "source"          => "structural"
-            }],
-            "valid_payload" => []
-          }
+        # exactly_one_primary_user_per_supplier
+        # Data-model v2 invariant 6: each supplier has exactly one user
+        # with primary = true. Enforces both directions:
+        #   - zero primaries → no designated assignee for the request task
+        #   - multiple primaries → ambiguous task ownership
+        # Suppliers referenced by no users are caught by user_supplier_exists
+        # and skipped here (no users to check).
+        primary_issues = []
+        users_by_supplier = users.group_by { |u| u["supplier_name"] }
+        supplier_names.each do |s_name|
+          s_users = users_by_supplier[s_name] || []
+          next if s_users.empty?  # Empty-user case is the analyst's gap, not ours
+
+          primary_count = s_users.count { |u| u["primary"] == true }
+          if primary_count == 0
+            primary_issues << {
+              "entity" => "supplier", "name" => s_name,
+              "issue"  => "no user flagged as primary (need exactly one)"
+            }
+          elsif primary_count > 1
+            primary_emails = s_users.select { |u| u["primary"] == true }.map { |u| u["user_email"] }
+            primary_issues << {
+              "entity" => "supplier", "name" => s_name,
+              "issue"  => "#{primary_count} users flagged as primary " \
+                          "(need exactly one): #{primary_emails.join(', ')}"
+            }
+          end
         end
+        checks << {
+          "check_name" => "exactly_one_primary_user_per_supplier",
+          "status"     => primary_issues.empty? ? "pass" : "fail",
+          "message"    => primary_issues.empty? ?
+                            "All suppliers have exactly one primary user" :
+                            "#{primary_issues.size} supplier(s) have incorrect primary-user count",
+          "details"    => primary_issues
+        }
 
-        # Filter fields by variant if applicable
 ```
 
-**Resulting context** (the block sits between the `rows` bind and the `# Filter fields by variant` comment that's already there at line 1748):
+(Note the trailing blank line — keeps the spacing consistent with the surrounding check blocks.)
+
+---
+
+## Resulting context
+
+After the insert, lines 1388–1418 read as one continuous user-integrity block followed by the dependent-dropdown check:
 
 ```ruby
-        rows           = input["upload_data"] || []
-
-        # ── Empty-submission gate ─────────────────
-        # Zero rows is hard-fail by default per the capability deep dive.
-        # Return early with status='empty' and a single summary error so the
-        # recipe persists it through the same path as other failures.
-        if rows.empty?
-          return {
-            "status" => "empty",
-            ...
+        # user_supplier_exists
+        bad_user_suppliers = users.reject { |u| supplier_names.include?(u["supplier_name"]) }
+        checks << {
+          "check_name" => "user_supplier_exists",
+          "status" => bad_user_suppliers.empty? ? "pass" : "fail",
+          "message" => bad_user_suppliers.empty? ? "All user→supplier references valid" : "#{bad_user_suppliers.size} user(s) reference missing suppliers",
+          "details" => bad_user_suppliers.map { |u|
+            { "entity" => "user", "name" => u["user_email"],
+              "issue" => "supplier '#{u['supplier_name']}' not found" }
           }
-        end
+        }
 
-        # Filter fields by variant if applicable
-        active_fields = if variant_ids.present?
-```
+        # exactly_one_primary_user_per_supplier
+        # Data-model v2 invariant 6: each supplier has exactly one user
+        # with primary = true. Enforces both directions:
+        #   - zero primaries → no designated assignee for the request task
+        #   - multiple primaries → ambiguous task ownership
+        # Suppliers referenced by no users are caught by user_supplier_exists
+        # and skipped here (no users to check).
+        primary_issues = []
+        ... (the block above) ...
+        checks << {
+          "check_name" => "exactly_one_primary_user_per_supplier",
+          ...
+        }
 
-**Second**, update the `output_fields` declaration (line 1703) so Workato's schema validator accepts the new `empty` status. Change:
-
-```ruby
-          { name: "status",  type: "string" },  # passed | failed
-```
-
-to:
-
-```ruby
-          { name: "status",  type: "string" },  # passed | failed | empty
-```
-
-And similarly update the `help:` block (line 1670) so the docs match what the action actually does. Change:
-
-```ruby
-          body: "Called after extracting uploaded file content. Core validation engine. Takes frozen field/rule/lookup config and parsed upload rows. Returns per-row, per-field errors with error codes and human-readable messages."
-```
-
-to:
-
-```ruby
-          body: "Called after extracting uploaded file content. Core validation engine. Takes frozen field/rule/lookup config and parsed upload rows. Returns one of three verdicts: 'passed' (no strict errors), 'failed' (one or more strict errors), or 'empty' (zero rows submitted — hard-fail with a summary error)."
+        # dependent_dropdown_has_parent
+        dep_dropdowns = fields.select { |f| f["data_format"] == "dropdown (dependent)" }
 ```
 
 ---
 
-## Why an early return vs. letting the existing logic produce `passed`
+## One detail worth flagging — and a defensive amendment
 
-Three reasons the early return is the right shape:
+I noticed at line 705 there's a typo in the source parser:
 
-1. **Caller experience.** The recipe gets to read `verdict.status == "empty"` directly and route to a different `trigger_context` (`system_validation_failed` with an empty-specific message) without inspecting `summary.total_rows`. The verdict is what it claims to be.
-
-2. **No false denominators downstream.** The existing `valid_payload` array would be empty either way, but the `summary.valid_rows = 0, invalid_rows = 0, total_errors = 0` combination on a `passed` status is genuinely confusing — it reads as "0 of 0 rows passed," which sounds correct until you remember zero submissions shouldn't be a passing state.
-
-3. **Consistency with the structural-failure path you may add later.** If you do extend the connector to take XLSX bytes and detect structural problems, that path will also be an early return with a summary error and a non-`passed/failed` status. Empty handled this way is the prototype for that shape.
-
----
-
-## What this enables in VAL-01
-
-With this change in, the v2 build guide's step 12 trigger_context mapping reads from `verdict.status` directly:
-
-```
-passed              → system_validation_passed
-failed              → system_validation_failed
-empty               → system_validation_failed (with empty-specific supplier_message)
-structural_failure  → system_structural_failure   (still recipe-detected for now)
-error               → pipeline_error_alert        (from Workato monitor, not connector)
+```ruby
+"primary" => call(:coerce_boolean, raw["Priamry contact"])
 ```
 
-Step 7's `RUN_ValidationResult.status` mapping needs one small adjustment: map `empty` to `failed` at the table level (the table enum is still `passed | failed | error` per the schema). The distinction lives in the verdict and in the error row.
+`Priamry` is misspelled. This means whatever the analyst types in the column header *as the typo* is what gets read. Two cases:
 
-Step 8's batch FieldError create handles the empty case naturally — `verdict.errors` has one summary row when `status == empty`, and the batch persists it the same as any other error.
+1. **If the master config workbook also has the typo** (`Priamry contact` as the column header), the parser works and reads correctly, but the typo is "live" — fixing it later means coordinating a connector update and a workbook update.
+
+2. **If the workbook has the correct spelling** (`Primary contact`), the parser is silently reading nothing — every user's `primary` resolves to `nil`, `coerce_boolean(nil)` returns `false`, and *every* supplier in *every* engagement would fail the new check with "no user flagged as primary."
+
+Worth checking which case is true before deploying change #2. If it's case 2, the typo needs fixing in the same connector update — otherwise this check will fail-loud on its first real call and the analyst will be confused.
+
+To make the new check robust against this kind of header-drift bug, the `primary_count` line above uses `u["primary"] == true` (strict equality) rather than truthy-checking. That way, if `primary` is `nil` or a string `"true"` (which would happen if `coerce_boolean` didn't run for some reason), the check fails-loud rather than silently passing. The fail-loud surface here is good — it surfaces the parsing bug rather than hiding it.
+
+If you find case 2 is real and want to fix the typo in this same connector pass, the fix is at line 705:
+
+```ruby
+"primary" => call(:coerce_boolean, raw["Primary contact"])
+```
+
+That's a third small change you could fold into this update. It's not strictly required for change #2 to work (you could leave the typo and have the workbook match), but if you're touching the connector and the workbook has the right spelling, it's worth fixing.
 
 ---
 
 ## How to verify
 
-After applying both 1a and 1b, three quick tests:
+Three test fixtures:
 
-1. **Happy path regression.** Call `validate_upload` with the same fixture you currently use to verify a `passed` result. Should still return `passed`. If it doesn't, the `rows` bind is misplaced or the early-return condition is wrong.
+1. **Happy path.** Config with three suppliers, each with one primary user and several non-primary users. The new check returns `pass`. Confirms the strict equality doesn't reject legitimately-true primaries.
 
-2. **Empty input.** Call with `upload_data: []` and a valid canonical model. Should return `status: "empty"` with one error row carrying `error_code: "err_empty_submission"`.
+2. **Zero primaries.** Config with a supplier that has two users, both `primary = false`. The new check returns `fail` with one `primary_issues` entry naming the supplier. Confirms zero-detection.
 
-3. **Failed regression.** Call with a fixture that has known strict errors. Should still return `failed`. Confirms the early return doesn't shadow the normal path.
+3. **Multiple primaries.** Config with a supplier that has two users, both `primary = true`. The new check returns `fail` with one `primary_issues` entry naming both emails. Confirms multiple-detection.
 
-If all three pass, change #1 is done. Want me to walk through change #2 — adding the primary-user invariant check to `validate_config` — next?
+A fourth test if you fix the typo at line 705: a config where the workbook column header is spelled correctly. Before the typo fix, every supplier fails the new check (case 2 above). After the typo fix, the happy-path fixture passes.
+
+---
+
+## What this enables downstream
+
+The new check fires before provisioning, which means by the time E1 (Initial provisioning) calls Invite supplier users, the data-model v2 invariant 6 is guaranteed at the configuration boundary. Add user to request, the Stage 7 sibling capability, will need to enforce the same invariant at runtime when an analyst attaches a new user mid-engagement — but that's a separate (Stage 7) callable using the same predicate. The May 8 spec called out this "two enforcement points, one shared predicate" pattern as a cross-cutting build-time principle.
+
+This check is also the first of the data-model invariants where validate_config has an enforcement role beyond its original eight check categories. If you find yourself adding more invariant checks here (e.g. an exactly-one-default-variant rule if that ever becomes a thing), it might be worth grouping them under a section comment like `# ── Invariant checks ────────────────────` to keep the file scannable. For one check, it's overkill.
+
+---
+
+Ready to move on to change #3 — adding `structural_failure` detection to `validate_upload` by accepting raw XLSX bytes — or would you prefer to deploy and verify changes #1 and #2 first before continuing?
