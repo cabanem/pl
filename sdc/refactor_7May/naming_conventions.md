@@ -105,6 +105,8 @@ Pick whichever reads most naturally; don't force one shape.
 
 ### Layout
 
+Two artifacts live under each version's directory: `parsed_config.json` (the workbook's contents, structurally cleaned but pre-FK-resolution — audience: analyst debugging, configuration archival) and `canonical_model.json` (the fully resolved configuration with UUIDs minted, FKs wired, slot pool assigned — audience: runtime consumers like PRV-02 and VAL-01's connector). Both are written write-once at version publish.
+
 ```
 /configs/
   parsed_config.json                                   Project.parsed_config_path
@@ -114,6 +116,7 @@ Pick whichever reads most naturally; don't force one shape.
 /templates/v<NNN>/
   master.xlsx                                          CFG_TemplateVersion.master_template_path
   parsed_config.json                                   CFG_TemplateVersion.parsed_config_path
+  canonical_model.json                                 CFG_TemplateVersion.canonical_model_path
   variants/<variant_id>.xlsx                           CFG_Variant.template_path
 
 /requests/<request_id>/
@@ -146,6 +149,7 @@ Three distinct artifacts, separated cleanly:
 | (new) | `Project.seeded_data_path` |
 | `CFG_TemplateVersion.master_template_file_id` | `CFG_TemplateVersion.master_template_path` |
 | `CFG_TemplateVersion.parsed_config_file_id` | `CFG_TemplateVersion.parsed_config_path` |
+| (new) | `CFG_TemplateVersion.canonical_model_path` |
 | `CFG_Variant.template_file_id` | `CFG_Variant.template_path` |
 | `SUP_SupplierRequest.template_file_id` | `SUP_SupplierRequest.template_path` |
 | `SUP_SupplierRequest.approved_file_id` | `SUP_SupplierRequest.approved_path` |
@@ -255,6 +259,7 @@ Each folds into a `sdc-data-model-v1.md` or `sdc-state-machines-v1.md` revision 
 - Apply table prefixes (`CFG_`, `SUP_`, `RUN_`) and bare-naming for `Project`, `EventLog` throughout the data model doc.
 - Apply file-column renames per the table above.
 - Add `Project.seeded_data_path`.
+- Add `CFG_TemplateVersion.canonical_model_path`.
 - Drop `seeded_template_file_id`, `latest_upload_file_id`, `last_submitted_file_link`, `last_validation_report_path`, `last_validation_report_link` from `SUP_SupplierRequest`.
 - Rename `valid_payload` → `valid_payload_json` on `RUN_Upload`.
 - Rename `valid_rows` / `invalid_rows` → `valid_row_count` / `invalid_row_count` on `RUN_ValidationResult`.
