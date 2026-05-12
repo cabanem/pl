@@ -65,14 +65,14 @@ Path 1 (parser failure) routes to `failed` rather than `rejected` because a pars
     variants_synthesized:    boolean
   } | null,
   
-  // Populated when CFG-01 ran
+  // Populated when validate_config ran
   // (success and rejected paths; absent on parser-failed and on
-  //  failures occurring after CFG-01 itself)
+  //  failures occurring after validation itself)
   validation_summary: {
     status:        "valid" | "invalid",
     error_count:   integer,
     warning_count: integer,
-    checks:        array of check objects   // full CFG-01 detail
+    checks:        array of check objects   // full validate_config detail
   } | null,
   
   // Populated when the version row was created

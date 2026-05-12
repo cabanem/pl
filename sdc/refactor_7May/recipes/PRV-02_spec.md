@@ -28,8 +28,8 @@ Three decisions that thread through the spec:
 |---|---|---|---|
 | 1 | Parse config via connector | Connector action `parse_config_file` | `config_unparseable` |
 | 2 | Emit `config_parsed` | OBS-01 callable invocation | none routine |
-| 3 | Call CFG-01 | Callable invocation | propagates from CFG-01 |
-| 4 | Branch on verdict | Recipe branch | n/a |
+| 3 | Call `validate_config` directly | Connector action | `external_action_failed` |
+| 4 | Branch on verdict | Recipe branch + emit | n/a |
 | 5 | Create or update TemplateVersion | Data Tables create | `external_action_failed` |
 | 6 | Build canonical model | Python step | `unexpected_error` |
 | 7 | Write canonical model to FileStorage | FileStorage write + Data Tables update | `external_action_failed` |
@@ -69,13 +69,15 @@ Alternative considered: defer `config_parsed` until after Substage 5 so it can i
 
 ---
 
-## Substage 3 — Call CFG-01
+## Substage 3 — Call `validate_config` directly
 
-Synchronous callable invocation. CFG-01's contract takes the parsed-config JSON and returns a verdict object (`{status, error_count, warning_count, checks}`).
+Connector action invocation. The connector's `validate_config` action takes `parsed_config_json` (string) and returns a verdict object (`{status, error_count, warning_count, checks}`).
 
-**Decision: pass the in-memory parsed-config JSON, not the FileStorage path.** CFG-01's input field is `parsed_config_json` (string). Substage 1 already has the serialized form in hand; passing it directly avoids a redundant FileStorage round-trip. CFG-01 doesn't need the file artifact, only the content.
+**Decision: PRV-02 calls `validate_config` directly, not via CFG-01.** CFG-01 takes a Drive file ID as input — it's the analyst-facing entry point (GAS-triggered standalone validation, where the natural reference is the Drive workbook). PRV-02 has a different entry-point shape: by Substage 3 it already holds the parsed-config JSON in memory from Substage 1. Calling the underlying connector action preserves the in-memory handoff that the construction spec wants and avoids threading a Drive ID through a path that doesn't otherwise need one.
 
-CFG-01 emits its own `config_validated` or `config_rejected` event. PRV-02 does not duplicate those emits.
+The validation logic is identical either way — both CFG-01 and PRV-02 ultimately call the same connector action. The split is at the entry-point shape, not the logic.
+
+**Emit responsibility shifts.** Because PRV-02 isn't routing through CFG-01, it emits `config_validated` (on `valid` verdict, in Substage 4's fall-through branch) and `config_rejected` (on `invalid` verdict, in Substage 4's `invalid` branch) itself. The phase taxonomy treats these as workflow-stage phases, not recipe-bound, so multiple recipes emitting them is consistent with the taxonomy's design.
 
 ---
 
@@ -83,10 +85,10 @@ CFG-01 emits its own `config_validated` or `config_rejected` event. PRV-02 does 
 
 Two branches:
 
-- **`invalid`** — CFG-01 has already emitted `config_rejected` with the failure details. PRV-02 returns early with the validation summary. No `recipe_failed` emit; no `template_version_id` exists yet to publish. The workflow stops here cleanly.
-- **`valid`** — proceed to Substage 5.
+- **`invalid`** — PRV-02 emits `config_rejected` (severity `warn`) carrying the verdict's failing checks in `details_json`. The recipe returns early with the validation summary. No `template_version_id` exists yet to publish; the workflow stops here cleanly.
+- **`valid`** — PRV-02 emits `config_validated` (severity `info`) and proceeds to Substage 5.
 
-A `warn`-count > 0 with `error_count` == 0 still routes to the `valid` branch. Warnings (e.g., `email_format_valid`, `variant_count_matches`) don't block provisioning. They surface in the CFG-01 emit's `details_json` for analyst review.
+A `warn`-count > 0 with `error_count` == 0 still routes to the `valid` branch. Warnings (e.g., `email_format_valid`, `variant_count_matches`) don't block provisioning. They surface in the `config_validated` emit's `details_json` for analyst review.
 
 ---
 
@@ -386,12 +388,12 @@ Mapping each error type the recipe plan named to the substage that produces it a
 | Error type | Substage | Phase emitted | Trigger |
 |---|---|---|---|
 | `config_unparseable` | 1 | `recipe_failed` | Connector returned `{status: error}` from `parse_config_file`. Most common cause: required sheet missing, malformed `sheet_data`. |
-| `config_invalid` | 4 | (none — CFG-01 emitted `config_rejected`) | CFG-01 returned `invalid` status. PRV-02 halts the chain but doesn't emit; CFG-01 owns the emit for this case. |
+| `config_invalid` | 4 | `config_rejected` (warn) | `validate_config` returned `invalid` status. PRV-02 emits the phase itself; the recipe halts cleanly without `recipe_failed`. |
 | `external_action_failed` | 5, 7, 8 | `recipe_failed` | Data Tables create/update failed (5), FileStorage write failed (7), or callable dispatch failed (8). |
 | `recipe_invariant` | 6 (self-check), 5 (idempotency) | `recipe_failed` | Cross-collection check failed in the canonical model build; OR two concurrent provisioning runs detected on the same project. |
 | `unexpected_error` | 6 | `recipe_failed` | Python step crashed for any reason not caught as `recipe_invariant`: pill format issue, type coercion failure, JSON serialization failure. |
 
-Note that the recipe plan listed `config_invalid` as a propagating error type. The phase taxonomy treats this slightly differently: CFG-01 emits `config_rejected` (with its own `error_type=config_invalid`), and PRV-02 doesn't re-emit. The recipe plan's framing of "PRV-02 catches this" is about flow control, not about emit duplication.
+Note that the recipe plan listed `config_invalid` as a propagating error type. With CFG-01 out of PRV-02's path (per Substage 3's decision), PRV-02 now owns the `config_rejected` emit directly on the `invalid` verdict. `config_invalid` is the `error_type` value attached to that emit per the error taxonomy.
 
 ---
 

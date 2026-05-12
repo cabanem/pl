@@ -39,9 +39,11 @@ Step numbers are flat across the recipe, not nested under substages. Sub-steps i
 | 3.1 | ⊕ | Emit `recipe_failed` (config_unparseable) | 1 |
 | 3.2 | ⨯ | Stop recipe | 1 |
 | 4 | ⊕ | Emit `config_parsed` | 2 |
-| 5 | ⇢ | Call CFG-01 | 3 |
-| 6 | ⋔ | Branch on CFG-01 verdict | 4 |
-| 6.1 | ⨯ | Stop recipe (no emit) | 4 |
+| 5 | ◆ | Connector: `validate_config` | 3 |
+| 6 | ⋔ | Branch on verdict | 4 |
+| 6.1 | ⊕ | Emit `config_rejected` | 4 |
+| 6.2 | ⨯ | Stop recipe | 4 |
+| 6.3 | ⊕ | Emit `config_validated` (success branch) | 4 |
 | 7 | ⋔ | Branch on `is_initial` | 5 |
 | 7.1 | ✦ | Set `new_version_number = 1` | 5 (E1) |
 | 7.2 | ◆ | Data Tables search: prior versions | 5 (E2) |
@@ -156,40 +158,71 @@ Return `{status: "failed", reason: "config_unparseable"}` to the synchronous cal
 
 ---
 
-### Substage 3 — Call CFG-01
+### Substage 3 — Call `validate_config` directly
 
-#### Step 5 — Call CFG-01
+#### Step 5 — Connector: `validate_config`
 
-**Type:** ⇢ Callable invocation (synchronous).
+**Type:** ◆ Action (SDC Platform Connector).
 
-**Target:** CFG-01 (whichever recipe wraps `validate_config`).
+**Action:** `validate_config`.
 
 **Inputs:**
 - `parsed_config_json` ← `step_2.parsed_config_json`
+- `form_field_limit` — omit (let the connector default to 20)
 
-**Output captured as:** `cfg01_verdict` with fields `{status, error_count, warning_count, checks}`.
+**Output captured as:** `verdict` with fields `{status, error_count, warning_count, checks}`.
 
-**Failure:** If CFG-01 itself crashes (not an `invalid` verdict but an actual recipe failure), wrapped in monitor block B → `recipe_failed` with `error_type=external_action_failed`.
+**Why not via CFG-01?** CFG-01 takes a Drive file ID; PRV-02 has parsed-config JSON in memory from Step 2 and no Drive ID. Calling the connector action directly preserves the in-memory handoff and avoids threading a Drive reference through PRV-01 → PRV-02. CFG-01 is the analyst-facing entry point to the same underlying logic; PRV-02 is a system-facing entry point.
+
+**Failure:** Wrapped in monitor block B → `recipe_failed` with `error_type=external_action_failed`.
 
 ---
 
 ### Substage 4 — Branch on verdict
 
-#### Step 6 — Branch on CFG-01 verdict
+#### Step 6 — Branch on verdict
 
 **Type:** ⋔ Conditional.
 
-**Condition:** `cfg01_verdict.status != "valid"`.
+**Condition:** `verdict.status != "valid"`.
 
-**True branch:**
+**True branch (invalid):**
 
-##### Step 6.1 — Stop (no emit)
+##### Step 6.1 — Emit `config_rejected`
+
+**Type:** ⊕ OBS-01 invocation.
+
+**Payload:**
+- `source_recipe`: `"PRV-02"`
+- `step_number`: 5
+- `phase`: `"config_rejected"`
+- `severity`: `"warn"`
+- `error_type`: `"config_invalid"`
+- `human_message`: `"Configuration validation found {error_count} error(s)"`
+- `details_json`: `{ project_id: trigger.project_id, error_count: verdict.error_count, warning_count: verdict.warning_count, failed_checks: <subset of verdict.checks where status=fail> }`
+
+##### Step 6.2 — Stop recipe
 
 **Type:** ⨯ Early return.
 
-CFG-01 has already emitted `config_rejected`. PRV-02 does not duplicate the emit. Return `{status: "rejected", validation_summary: cfg01_verdict}` to the synchronous caller.
+Return `{status: "rejected", validation_summary: verdict, ...}` to the synchronous caller. No version row was created.
 
-**False branch:** Fall through to Step 7.
+**False branch (valid):**
+
+##### Step 6.3 — Emit `config_validated`
+
+**Type:** ⊕ OBS-01 invocation.
+
+**Payload:**
+- `source_recipe`: `"PRV-02"`
+- `step_number`: 5
+- `phase`: `"config_validated"`
+- `severity`: `"info"`
+- `error_type`: null
+- `human_message`: `"Configuration validated"` (append `" with {warning_count} warning(s)"` if `verdict.warning_count > 0`)
+- `details_json`: `{ project_id: trigger.project_id, error_count: 0, warning_count: verdict.warning_count, warning_checks: <subset of verdict.checks where status=warn> }`
+
+Fall through to Step 7.
 
 ---
 
@@ -381,7 +414,7 @@ Workato monitor blocks wrap step groups and provide a single error path for the 
 | Block | Wraps | Error type on failure | Notes |
 |---|---|---|---|
 | A | Step 1 | `external_action_failed` | FileStorage read of parsed_config_path. Failure means PRV-01 wrote a bad path or FileStorage is unavailable. |
-| B | Steps 5, 7.2, 7.3, 8 | varies | CFG-01 call, version-number computation, and the version row create. Errors include `external_action_failed` (CFG-01 crash, Data Tables errors) and `recipe_invariant` (E2 with no prior version). |
+| B | Steps 5, 7.2, 7.3, 8 | varies | `validate_config` action, version-number computation, and the version row create. Errors include `external_action_failed` (connector or Data Tables errors) and `recipe_invariant` (E2 with no prior version). |
 | C | Steps 11, 12, 13, 14, 15 | varies | The file/data writes plus the Python algorithm. Errors include `external_action_failed` (FileStorage or Data Tables) and `recipe_invariant`/`unexpected_error` (Python step). The error_type depends on the inner failure; the monitor catches it and forwards. |
 | D | Step 16 | `external_action_failed` | Async dispatch only. PRV-03's own failures are not in scope. |
 
@@ -409,7 +442,7 @@ For build reference. "In scope" means a subsequent step can pill-reference it.
 |---|---|---|
 | `parsed_config_raw_content` | 1 | 2 |
 | `step_2.status`, `step_2.error`, `step_2.parsed_config_json`, `step_2.parse_summary` | 2 | 3, 4, 5, 13 |
-| `cfg01_verdict` | 5 | 6 (and synchronous return value) |
+| `verdict` | 5 | 6, 6.1, 6.3 (and synchronous return value) |
 | `new_version_number` | 7.1 / 7.3 | 8, 10, 13 |
 | `prior_version_row` | 7.2 | 7.3 |
 | `template_version_id` | 9 | 11, 12, 13, 14, 15, 16 |
@@ -431,7 +464,7 @@ Beyond the algorithm test cases in the construction spec, the step inventory its
 
 3. **Parser failure routing.** Feed a parsed-config file that the parser will reject (e.g., missing customer sheet). Verify Steps 3.1 and 3.2 fire; no `config_parsed` emit; no version row created.
 
-4. **CFG-01 invalid verdict.** Feed a parsed-config file that parses cleanly but fails CFG-01 (e.g., a field referencing a missing lookup). Verify Step 4 fires (`config_parsed` emitted), then Step 6.1 fires (stop, no emit). CFG-01 owns the `config_rejected` emit. No version row created.
+4. **Invalid verdict from `validate_config`.** Feed a parsed-config file that parses cleanly but fails validation (e.g., a field referencing a missing lookup). Verify Step 4 fires (`config_parsed` emitted), then Step 6.1 fires (`config_rejected` emitted), then Step 6.2 (stop). No version row created. No `recipe_failed` emit — `config_rejected` is the workflow's natural rejection emit, not a failure.
 
 5. **FileStorage write failure in Step 11.** Simulate FileStorage unavailability. Verify monitor block C catches, emits `recipe_failed` with `error_type=external_action_failed`, and the version row exists but with null `parsed_config_path`. This is the partial-failure case flagged in PRV-02's recipe-plan open questions.
 
