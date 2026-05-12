@@ -22,15 +22,30 @@ var Provision = {};
  * Run the provision flow end-to-end.
  *
  * @param {Spreadsheet} ss
+ * @param {Object}      options
+ * @param {boolean}     options.isInitial - True for initial provision runs;
+ *                                          false for update runs. Menu-derived
+ *                                          ("Start supplier data collection"
+ *                                          vs "Update configuration"). Required;
+ *                                          no default to force the caller to
+ *                                          be explicit about intent.
  * @returns {Object} canonical Result
  */
-Provision.run = function(ss) {
+Provision.run = function(ss, options) {
   if (!ss) throw new Error('Provision.run: ss is required.');
+  if (!options || typeof options.isInitial !== 'boolean') {
+    throw new Error(
+      'Provision.run: options.isInitial is required and must be boolean. ' +
+      'Pass { isInitial: true } for first-time provisioning or ' +
+      '{ isInitial: false } for updates.'
+    );
+  }
+  var isInitial = options.isInitial;
 
   var correlationId = Util.newCorrelationId();
   var log = Log.forCorrelation(ss, correlationId);
 
-  log('INFO', 'Starting provision...');
+  log('INFO', 'Starting provision (' + (isInitial ? 'initial' : 'update') + ')...');
 
   try {
     // 1. Build config (also runs schema compatibility check).
@@ -101,7 +116,8 @@ Provision.run = function(ss) {
       separateWorkspace: pf.separateWorkspace,
       configFileId:      ss.getId(),
       configJsonFileId:  configJsonFileId,
-      templateFileIds:   variantResult.fileIds
+      templateFileIds:   variantResult.fileIds,
+      isInitial:         isInitial
     });
 
     Stage.run('webhook', function() {

@@ -32,8 +32,8 @@ function onOpen() {
   SDC.Log.ensureSchema(ss);
 
   var menu = ui.createMenu('Supplier data collection')
-    .addItem('Start supplier data collection', 'initializeOrUpdateWorkspace')
-    .addItem('Update configuration',           'initializeOrUpdateWorkspace')
+    .addItem('Start supplier data collection', 'initializeWorkspace')
+    .addItem('Update configuration',           'updateWorkspace')
     .addSeparator()
     .addItem('Validate configuration',         'validateConfiguration')
     .addSeparator()
@@ -56,12 +56,28 @@ function onOpen() {
 // --- Flow shims ------------------------------------------------------
 
 /**
- * Provision flow. Library does the work; container renders the Result.
+ * Provision flow â€” initial run. Triggered by "Start supplier data
+ * collection" menu item. Carries is_initial=true into the webhook
+ * payload so the downstream recipe can distinguish first-time setup
+ * from subsequent updates.
  */
-function initializeOrUpdateWorkspace() {
+function initializeWorkspace() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   ss.toast('Sending to Workato...', 'Status');
-  var r = SDC.Provision.run(ss);
+  var r = SDC.Provision.run(ss, { isInitial: true });
+  ss.toast('');
+  showResult_(r);
+}
+
+/**
+ * Provision flow â€” update run. Triggered by "Update configuration"
+ * menu item. Carries is_initial=false. Same pipeline as initial;
+ * differs only in the payload flag.
+ */
+function updateWorkspace() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  ss.toast('Sending to Workato...', 'Status');
+  var r = SDC.Provision.run(ss, { isInitial: false });
   ss.toast('');
   showResult_(r);
 }
