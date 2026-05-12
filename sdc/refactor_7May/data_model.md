@@ -1,10 +1,10 @@
-# SDC Data Collection — Data Model (v2.1, Phase 0)
+# SDC Data Collection — Data Model (v2.2, Phase 0)
 
 ## Status
 
-This is the proposed schema for the new SDC workspace, replacing the 22-table model from the prior workspace. **v2.1 folds in the canonical-model decision** (`CFG_TemplateVersion.canonical_model_path`) **and applies the naming-doc backports for TemplateVersion** (`master_template_file_id` → `master_template_path`, `parsed_config_file_id` → `parsed_config_path`). v2 folded in the two schema additions from the cluster resolutions in `sdc-callable-triage-v2.md`: `SupplierUser.primary` and `ValidationRule.scope`.
+This is the proposed schema for the new SDC workspace, replacing the 22-table model from the prior workspace. **v2.2 resolves the GAS-export persistence ambiguity in the PRV chain** by adding `CFG_TemplateVersion.gas_export_path` (the raw pre-parse sheet_data audit artifact) and removing the redundant `Project.parsed_config_path`. v2.1 folded in the canonical-model decision (`CFG_TemplateVersion.canonical_model_path`) and applied the naming-doc backports for TemplateVersion (`master_template_file_id` → `master_template_path`, `parsed_config_file_id` → `parsed_config_path`). v2 folded in the two schema additions from the cluster resolutions in `sdc-callable-triage-v2.md`: `SupplierUser.primary` and `ValidationRule.scope`.
 
-All v2 additions (and v1 fields, FKs, invariants) carry forward unchanged. The version bump exists because the authoritative schema document is referenced elsewhere and a v2 reader needs to know to look for v2.1.
+All prior additions (v2.1, v2, and the v1 fields, FKs, and invariants) carry forward unchanged except for the cross-reference inside `CFG_TemplateVersion.parsed_config_path` (which no longer distinguishes itself from a Project-level equivalent) and invariant 2 (which now covers the new column). The version bump exists because the authoritative schema document is referenced elsewhere and a v2.1 reader needs to know to look for v2.2.
 
 Other Phase 0 work — state machine, naming and prefix conventions, ADR triage, callable reuse-vs-rebuild — is still pending in subsequent sessions.
 
@@ -25,6 +25,7 @@ Three answers shaped the model:
 - `customer_name` from SupplierRequest
 - `template_project_id` and `correlation_id` columns across many tables
 - The split between SYS_EventLogs and RUN_PipelineError
+- `Project.parsed_config_path` — redundant with `CFG_TemplateVersion.parsed_config_path` *(v2.2)*
 
 **Added:**
 - `Project` singleton table
@@ -32,6 +33,7 @@ Three answers shaped the model:
 - `SupplierUser.primary` (boolean) — designated primary contact per supplier *(v2)*
 - `ValidationRule.scope` (enum) — uniqueness scope for cross-row validation *(v2)*
 - `CFG_TemplateVersion.canonical_model_path` (string) — per-version snapshot of the fully resolved configuration *(v2.1)*
+- `CFG_TemplateVersion.gas_export_path` (string) — per-version raw GAS sheet_data, pre-parse audit artifact *(v2.2)*
 
 **Net:** 22 → 18 tables. Every remaining FK has a single, clear purpose.
 
@@ -44,7 +46,7 @@ Three answers shaped the model:
 Singleton row holding workspace identity and engagement-level configuration.
 
 - `analyst_email`, `customer_name`, `target_vms`
-- `output_drive_folder_id`, `parsed_config_file_id`, `incumbent_data_file_id`, `incumbent_split_config`
+- `output_drive_folder_id`, `incumbent_data_file_id`, `incumbent_split_config`
 - `reminder_days_1`, `reminder_days_2`, `reminder_days_3`
 - `project_completion_status` (active | inactive)
 - `external_request_id` — was `correlation_id`; kept as plain string for upstream traceability, no FK
@@ -62,7 +64,8 @@ A version of the data-collection template. Snapshot semantics: once published, i
 - `version_number` (immutable), `version_label` (write-once)
 - `status` — draft | published | deprecated; forward transitions only
 - `master_template_path` (FileStorage path to the master XLSX)
-- `parsed_config_path` (per-version snapshot of the workbook's contents — structurally cleaned but pre-FK-resolution. Distinct from `Project.parsed_config_path`)
+- `gas_export_path` (FileStorage path to the raw GAS export — sheet_data JSON exactly as the analyst's master config workbook produced it. Pre-parse audit artifact. Distinct from `parsed_config_path` (post-parse, structurally cleaned) and `canonical_model_path` (resolved). Written by PRV-01 at row creation, immutable thereafter) *(v2.2)*
+- `parsed_config_path` (per-version snapshot of the workbook's contents — structurally cleaned but pre-FK-resolution. Distinct from `gas_export_path` (pre-parse) and `canonical_model_path` (resolved). Written by PRV-02 after a successful connector parse)
 - `canonical_model_path` (per-version snapshot of the fully resolved configuration — UUIDs minted, FKs wired, slot pool assigned. Audience: runtime consumers — PRV-02, VAL-01's connector, future builders)
 - `published_at` (write-once), `validation_summary`
 
@@ -271,7 +274,7 @@ These are the contracts the recipes must honor. Documented here so they're not r
 
 1. **Status writer rule.** Only the status-change handler recipe writes `SupplierRequest.status`, `supplier_display_status`, and `supplier_message`. Every other recipe reads. Drift between the three fields is impossible by construction.
 
-2. **Snapshot semantics.** Once a TemplateVersion transitions to `published`, no Field, Lookup, ValidationRule, Variant, VariantField, FormSlotMapping, or ErrorMessage row scoped to that version is ever updated. New version = new rows. Typo fixes flow forward via new versions, never via in-place edits to published rows. *The same rule covers per-version file artifacts: `parsed_config_path` and `canonical_model_path` are written write-once at publish and immutable thereafter.*
+2. **Snapshot semantics.** Once a TemplateVersion transitions to `published`, no Field, Lookup, ValidationRule, Variant, VariantField, FormSlotMapping, or ErrorMessage row scoped to that version is ever updated. New version = new rows. Typo fixes flow forward via new versions, never via in-place edits to published rows. *The same rule covers per-version file artifacts: `gas_export_path`, `parsed_config_path`, and `canonical_model_path` are write-once and immutable. Note that `gas_export_path` is written at row creation by PRV-01, not at publish — but the write-once rule still holds; PRV-01's create is the only write to that column. `parsed_config_path` and `canonical_model_path` follow the standard pattern: written by PRV-02 during the draft phase, locked at publish.*
 
 3. **FileStorage TTL re-hydration.** `SupplierRequest.template_file_id` is a 10-day shareable link. The reminder workflow regenerates it before sending. Same rule applies to any `*_link` field whose source is FileStorage.
 
@@ -284,6 +287,8 @@ These are the contracts the recipes must honor. Documented here so they're not r
 ---
 
 ## Changelog
+
+**v2.2** — Added `CFG_TemplateVersion.gas_export_path` (string, required), the per-version FileStorage path to the raw GAS sheet_data export — pre-parse audit artifact. Removed `Project.parsed_config_path` as redundant with the per-version equivalent `CFG_TemplateVersion.parsed_config_path`. Amended invariant 2 to cover `gas_export_path` under snapshot semantics, noting the write-once timing nuance (row creation rather than publish). Resolves the GAS-export persistence ambiguity in the PRV chain: PRV-01 now creates the version row and writes `gas_export_path`; PRV-02 reads from `gas_export_path`, parses, writes `parsed_config_path`, builds the canonical model, writes `canonical_model_path`. No other schema changes.
 
 **v2.1** — Added `CFG_TemplateVersion.canonical_model_path` (string) and applied the naming-doc file-column backports to TemplateVersion (`master_template_file_id` → `master_template_path`, `parsed_config_file_id` → `parsed_config_path`). The canonical model addition reflects the architectural decision to persist a fully resolved per-version configuration snapshot for runtime consumers, distinct from the structurally-cleaned `parsed_config_path` artifact. No invariants change; both new and renamed columns follow the existing snapshot-semantics rule (invariant 2). The naming backport was queued at v2's authorship; this revision applies it.
 
