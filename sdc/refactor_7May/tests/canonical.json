@@ -1,0 +1,145 @@
+{
+  "_meta": {
+    "expected_sheet_name": "Data",
+    "variant_name": "Variant_2",
+    "client_name": "MARS RC",
+    "source": "hand-rolled from config_MARS.xlsx for demo"
+  },
+  "cfg_fields": [
+    {
+      "field_name": "RSRUID"
+    },
+    {
+      "field_name": "RSRSID"
+    },
+    {
+      "field_name": "Supplier Name"
+    },
+    {
+      "field_name": "SUPPLIER COMMENTS"
+    },
+    {
+      "field_name": "Worker First Name"
+    },
+    {
+      "field_name": "Worker Last Name"
+    },
+    {
+      "field_name": "Worker Email"
+    },
+    {
+      "field_name": "Active worker?"
+    },
+    {
+      "field_name": "MSP/Outsorced worker"
+    },
+    {
+      "field_name": "Worker's Month of birth"
+    },
+    {
+      "field_name": "Worker's Day of Birth"
+    },
+    {
+      "field_name": "Country of Worker's Location"
+    },
+    {
+      "field_name": "City of worker's location"
+    },
+    {
+      "field_name": "Worker's Location"
+    },
+    {
+      "field_name": "Job Class"
+    },
+    {
+      "field_name": "Job Title"
+    },
+    {
+      "field_name": "Worker Level"
+    },
+    {
+      "field_name": "Original Resource Start Date"
+    },
+    {
+      "field_name": "Current assignment Start Date"
+    },
+    {
+      "field_name": "Current assignment End Date"
+    },
+    {
+      "field_name": "Extension End Date"
+    },
+    {
+      "field_name": "Purchase Order Number"
+    },
+    {
+      "field_name": "Worker's Manager name"
+    },
+    {
+      "field_name": "Worker's Manager email address"
+    },
+    {
+      "field_name": "Resource Type"
+    },
+    {
+      "field_name": "Currency"
+    },
+    {
+      "field_name": "Regular Time Rate Type Code"
+    },
+    {
+      "field_name": "Regular Time Pay Rate Amount"
+    },
+    {
+      "field_name": "Holiday"
+    },
+    {
+      "field_name": "Absence"
+    },
+    {
+      "field_name": "Social Security"
+    },
+    {
+      "field_name": "Taxes"
+    },
+    {
+      "field_name": "Pension"
+    },
+    {
+      "field_name": "Benefits"
+    },
+    {
+      "field_name": "Insurance"
+    },
+    {
+      "field_name": "Other"
+    },
+    {
+      "field_name": "Supplier Markup"
+    },
+    {
+      "field_name": "Regular Time Bill Rate Amount"
+    },
+    {
+      "field_name": "Overtime 100% Rate applicable?"
+    },
+    {
+      "field_name": "Overtime 125% Rate applicable?"
+    },
+    {
+      "field_name": "Overtime 150% Rate applicable?"
+    },
+    {
+      "field_name": "Overtime 175% Rate applicable?"
+    },
+    {
+      "field_name": "Overtime 200% Rate applicable?"
+    },
+    {
+      "field_name": "Overtime 250% Rate applicable?"
+    },
+    {
+      "field_name": "Overtime 325% Rate applicable?"
+    }
+  ]
+}
