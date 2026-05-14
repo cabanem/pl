@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "schema_version": "5.3.0",
+    "schema_version": "5.4.0",
     "description": "SDC Phase 0 rebuild manifest. 18 tables across Project, CFG_, SUP_, RUN_, and bare EventLog. Folds the v2 data model, the v1 naming-doc backports (file paths, dropped columns, renames), the state-machine backports (current_state_entered_at, reminders_enabled, Upload status 'failed' -> 'error'), and the v2.1 canonical-model decision into one consolidated build target. Replaces the v0 22-table workspace; not a delta on v3.1.0.",
     "created_at": "2026-05-08",
     "notes": {
@@ -16,9 +16,19 @@
       "immutability": "Immutability and write-once constraints are recipe-enforced; the data table API has no native support. Hints flag every immutable / write-once column.",
       "status_writer_rule": "SUP_SupplierRequest.status, current_state_entered_at, supplier_display_status, and supplier_message must only be written by STS-01. Hints repeat this on each affected column. Drift between the four fields is impossible by construction if and only if STS-01 is the single writer.",
       "file_model": "All long-term file references are paths (`*_path`); shareable links are generated on demand by UTL-01. The naming-doc invariant is that links are not stored as state. Path is canonical; link is volatile.",
-      "controlled_vocabularies": "EventLog.phase and EventLog.error_type are controlled vocabularies. The canonical lists live in recipes_tracker.xlsx (sheets: phases, error_types, phase_error_matrix), not in this manifest. OBS-01's Python step enforces both at write time per the enforcement model in the taxonomy_meta sheet."
+      "controlled_vocabularies": "EventLog.phase and EventLog.error_type are controlled vocabularies. The canonical lists live in recipes_tracker.xlsx (sheets: phases, error_types, phase_error_matrix), not in this manifest. OBS-01's Python step enforces both at write time per the enforcement model in the taxonomy_meta sheet.",
+      "file_column_convention": "Data Tables file columns are used as delivery channels for supplier-side file submissions (currently: pending_upload_file on SUP_SupplierRequest). Bytes do not persist in the Data Tables file column — they are bridged to FileStorage by the consuming recipe (UPL-01) and the column is cleared. The Data Tables file column is the WFA file widget's bind target; FileStorage paths are the canonical reference downstream. Aligns with the file_model note: path is canonical, link is volatile, and the column is a transient delivery slot."
     },
     "changelog": [
+      {
+        "version": "5.4.0",
+        "date": "2026-05-13",
+        "changes": [
+          "Added SUP_SupplierRequest.pending_upload_file (file column, optional). Bind target for the WFA file widget on PAGE-02 and trigger source for UPL-01. Write-then-clear lifecycle: WFA writes on supplier upload, UPL-01 bridges bytes to FileStorage and clears the column within the same recipe run. Empty at rest.",
+          "Added _meta.notes.file_column_convention entry describing the Data Tables file column as a delivery channel (transient) vs FileStorage as canonical storage (durable). Codifies the model adopted in the UPL-01 build conversation.",
+          "Clarification (no schema change): the recipes_tracker.xlsx substage outline for UPL-01 references submission_attempt and submission_source as columns on RUN_Upload, but neither exists in this manifest. submission_attempt lives only on SUP_SupplierRequest (incremented by UPL-01 during intake). submission_source is a VAL-01 parameter only, not a stored column. Recipes-sheet to be patched separately; no manifest action required."
+        ]
+      },
       {
         "version": "5.3.0",
         "date": "2026-05-13",
@@ -244,6 +254,7 @@
         { "type": "string", "name": "supplier_message", "optional": true, "hint": "Denormalized supplier-facing message body, including any embedded shareable links (regenerated via UTL-01 on every handler write). Long-text capacity needed. SINGLE WRITER: STS-01." },
         { "type": "boolean", "name": "reminders_enabled", "optional": false, "hint": "Default true. Per-request reminder opt-out. State-machine backport." },
         { "type": "string", "name": "template_path", "optional": false, "hint": "FileStorage path to the supplier-facing template. The ONLY path that's rewritten over the row's lifetime (regenerated on each resubmission cycle to carry forward valid prior rows). Renamed from template_file_id." },
+        { "type": "file", "name": "pending_upload_file", "optional": true, "hint": "Supplier upload landing column for the WFA file widget on PAGE-02. Data Tables file type — column surfaces as an object with `filename` and `file_content` properties on read. Write-then-clear lifecycle: WFA writes on supplier upload, UPL-01 reads the bytes, bridges to FileStorage at /uploads/<supplier_request_id>/<upload_id>.xlsx, then clears this column in the same recipe run. Empty at rest. UPL-01's Data Tables column-change trigger filters on `file_content present`. Not a canonical store — the bytes live in FileStorage post-bridge; this column is a delivery channel only."}
         { "type": "boolean", "name": "has_seeded_data", "optional": false, "hint": "Default false. Whether seeded data was applied for this supplier." },
         { "type": "string", "name": "seeded_slice_path", "optional": true, "hint": "FileStorage path to this request's slice of Project.seeded_data_path. Renamed from seeded_data_file_id." },
         { "type": "string", "name": "approved_path", "optional": true, "hint": "FileStorage path to the approved snapshot. Write-once at approval. Immutable thereafter. Renamed from approved_file_id." },
