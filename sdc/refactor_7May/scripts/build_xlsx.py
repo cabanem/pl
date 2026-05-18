@@ -584,7 +584,7 @@ def build(build_input: BuildInput) -> BuildOutput:
 # ──────────────────────────────────────────────────────────────────────
 
 def build_xlsx_template(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
+      """
     Workato-runnable entry point. Accepts a plain dict; returns a plain
     dict. Wraps the typed `build` function.
 
@@ -600,8 +600,28 @@ def build_xlsx_template(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
     """
     build_input = _payload_to_input(payload)
-    output = build(build_input)
-    return output.to_dict()
+    try:
+        output = build(build_input)
+    except BuildError as e:
+        if e.code == "EMPTY_FIELD_LIST":
+            return {
+                "status": "empty_variant",
+                "file_content": None,
+                "suggested_filename": None,
+                "metadata": None,
+                "error": {
+                    "code": "empty_variant",
+                    "message": e.message,
+                },
+            }
+        raise  # other BuildErrors propagate to the recipe's catch
+    return {
+        "status": "success",
+        "file_content": output.file_content_base64,
+        "suggested_filename": output.suggested_filename,
+        "metadata": output.metadata,
+        "error": None,
+    }
 
 
 def _payload_to_input(payload: Dict[str, Any]) -> BuildInput:
