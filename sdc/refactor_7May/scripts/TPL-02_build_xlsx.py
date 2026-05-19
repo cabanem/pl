@@ -58,10 +58,7 @@ from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.datavalidation import DataValidation
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Constants
-# ──────────────────────────────────────────────────────────────────────
-
+# --- MODULE CONSTANTS -------------------------------------------------------
 DATA_ROWS = 1000
 DATA_SHEET_NAME = "Data Entry"
 REFERENCE_SHEET_NAME = "Reference"
@@ -74,10 +71,8 @@ _HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True
 _REQUIRED_FILL = PatternFill("solid", fgColor="C0504D")
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Error type — caught only for empty_variant; everything else propagates
-# ──────────────────────────────────────────────────────────────────────
-
+# --- ERROR TYPE -------------------------------------------------------------
+""" Caught only for empty_variant; everything else propagates. """
 class BuildError(Exception):
     def __init__(self, code, message):
         self.code = code
@@ -85,11 +80,8 @@ class BuildError(Exception):
         super().__init__("[{0}] {1}".format(code, message))
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Robust truthy check — handles bool, int 1, "1", "TRUE", "true"
-# (canonical model may serialise booleans as numerics or strings)
-# ──────────────────────────────────────────────────────────────────────
-
+# --- ROBUST TRUTHY CHECK ----------------------------------------------------
+""" Handles bool, int 1, "1", "TRUE", "true" (canonical model may serialise booleans as numerics or strings) """
 def _is_truthy(val):
     if val is True:
         return True
@@ -99,18 +91,15 @@ def _is_truthy(val):
     return s in ("1", "TRUE", "YES")
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Shared sanitization — load-bearing invariant
-#
-# The same substitution map is used twice:
-#   (a) in Python, to name the defined ranges on the reference sheet;
-#   (b) inside the INDIRECT formula's SUBSTITUTE chain at runtime.
-# They cannot drift because they're both derived from the same list of
-# (char, replacement) pairs computed once from the actual parent values.
-# ──────────────────────────────────────────────────────────────────────
-
+# --- Shared sanitization (load-bearing invariant) ---------------------------
+"""
+The same substitution map is used twice:
+  (a) in Python, to name the defined ranges on the reference sheet;
+  (b) inside the INDIRECT formula's SUBSTITUTE chain at runtime.
+They cannot drift because they're both derived from the same list of
+(char, replacement) pairs computed once from the actual parent values.
+"""
 _NAMED_RANGE_SAFE = re.compile(r"[A-Za-z0-9_]")
-
 
 def _compute_substitutions(parent_values):
     """Find every disallowed char across the parent values, paired with '_'."""
@@ -121,14 +110,12 @@ def _compute_substitutions(parent_values):
                 disallowed.add(char)
     return [(c, "_") for c in sorted(disallowed)]
 
-
 def _sanitize_for_named_range(value, substitutions):
     """Python-side: apply the substitution map to a parent value."""
     result = str(value)
     for char, replacement in substitutions:
         result = result.replace(char, replacement)
     return result
-
 
 def _build_indirect_formula(parent_cell_ref, substitutions):
     """Formula-side: build the SUBSTITUTE chain mirroring _sanitize_for_named_range."""
@@ -139,23 +126,18 @@ def _build_indirect_formula(parent_cell_ref, substitutions):
         expr = 'SUBSTITUTE({0},"{1}","{2}")'.format(expr, esc_char, esc_repl)
     return 'INDIRECT("{0}"&{1})'.format(NAMED_RANGE_PREFIX, expr)
 
-
 def _named_range_name(parent_value, substitutions):
     return "{0}{1}".format(
         NAMED_RANGE_PREFIX,
         _sanitize_for_named_range(parent_value, substitutions),
     )
 
-
 def _safe_identifier(name):
     """Sanitize an arbitrary string into a safe identifier suffix."""
     return re.sub(r"[^A-Za-z0-9_]", "_", str(name))
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Substages 1–2: slice fields by variant, then narrow lookups
-# ──────────────────────────────────────────────────────────────────────
-
+# --- SUBSTAGES 1-2: Slice field by variant, then narrow lookups  ------------
 def _resolve_fields(model, variant_id):
     """
     Return the variant's fields, sorted by position. Base case (no
@@ -171,7 +153,6 @@ def _resolve_fields(model, variant_id):
     else:
         fields = list(all_fields)
     return sorted(fields, key=lambda f: int(f.get("position", 0)))
-
 
 def _index_lookups(cfg_lookups_rows, needed_names):
     """
@@ -212,10 +193,7 @@ def _index_lookups(cfg_lookups_rows, needed_names):
     return indexed
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Substage 3: lay out the reference sheet
-# ──────────────────────────────────────────────────────────────────────
-
+# --- SUBSTAGE 3: Plot out the reference sheet -------------------------------
 def _lay_out_reference(lookups):
     """
     Decide column placement on the reference sheet. Build the
@@ -266,10 +244,7 @@ def _lay_out_reference(lookups):
     }
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Substages 4–6: workbook, header row, reference content
-# ──────────────────────────────────────────────────────────────────────
-
+# --- SUBSTAGES 4-6: Define workbook, header row, reference content ----------
 def _create_workbook():
     wb = Workbook()
     data_ws = wb.active
@@ -277,7 +252,6 @@ def _create_workbook():
     ref_ws = wb.create_sheet(REFERENCE_SHEET_NAME)
     ref_ws.sheet_state = "hidden"
     return wb, data_ws, ref_ws
-
 
 def _write_data_header(data_ws, fields):
     for col_idx, field in enumerate(fields, start=1):
@@ -292,7 +266,6 @@ def _write_data_header(data_ws, fields):
             len(header_text) + 4, 14
         )
     data_ws.freeze_panes = "A2"
-
 
 def _write_reference_content(ref_ws, lookups, layout):
     substitutions = layout["substitutions"]
@@ -311,16 +284,12 @@ def _write_reference_content(ref_ws, lookups, layout):
                 for row_offset, child_value in enumerate(children, start=2):
                     ref_ws.cell(row=row_offset, column=col_idx, value=child_value)
 
-
 def _register_defined_names(wb, layout):
     for name, range_ref in layout["defined_ranges"]:
         wb.defined_names[name] = DefinedName(name=name, attr_text=range_ref)
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Substage 7: data validations
-# ──────────────────────────────────────────────────────────────────────
-
+# --- SUBSTAGE 7: Data validations -------------------------------------------
 def _apply_data_validations(data_ws, fields, lookups, layout):
     field_col_index = {f["field_id"]: idx for idx, f in enumerate(fields, start=1)}
     last_row = 1 + DATA_ROWS
@@ -382,7 +351,6 @@ def _apply_data_validations(data_ws, fields, lookups, layout):
         dv = _build_type_validation(field, cell_range, display)
         if dv is not None:
             data_ws.add_data_validation(dv)
-
 
 def _build_type_validation(field, cell_range, display):
     raw_format = field.get("data_format") or {}
@@ -456,22 +424,17 @@ def _build_type_validation(field, cell_range, display):
     return None
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Substage 9–10: serialize, compose output
-# ──────────────────────────────────────────────────────────────────────
-
+# --- SUBSTAGES 9-10: Serialize, compose output ------------------------------
 def _serialize_to_bytes(wb):
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
-
 
 def _build_filename(customer_name, variant_name):
     safe_customer = _safe_identifier(customer_name)
     safe_variant = _safe_identifier(variant_name) if variant_name else "base"
     stamp = datetime.utcnow().strftime("%Y%m%d")
     return "{0}_{1}_{2}.xlsx".format(safe_customer, safe_variant, stamp)
-
 
 def _empty_variant_outcome():
     return {
@@ -489,10 +452,8 @@ def _empty_variant_outcome():
     }
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────────────
 
+# --- ENTRYPOINT -------------------------------------------------------------
 def main(input):
     # Parse the canonical model. A malformed JSON here is a precondition
     # violation (FileStorage held something invalid) — let it propagate.
