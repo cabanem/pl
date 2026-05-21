@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font: 13px/1.5 Arial, sans-serif; margin: 16px; color: #222; }
+      a.file { font-weight: bold; }
+      .meta { color: #555; margin: 8px 0 14px; }
+      .note { margin-top: 14px; padding: 10px; background: #fef7e0; border-radius: 4px; color: #5f4b00; }
+      button { font-size: 13px; padding: 8px 14px; cursor: pointer; margin-top: 14px; }
+    </style>
+  </head>
+  <body>
+    <? var m = meta || {};
+       var sheets = (m.sheet_names || []).join(', ');
+       var kb = m.byte_size ? (m.byte_size / 1024).toFixed(1) + ' KB' : null; ?>
+
+    <div>Configuration is valid. Preview saved to <b>_previews</b>:</div>
+    <div style="margin-top:8px">
+      <a class="file" href="<?= fileUrl ?>" target="_blank"><?= fileName ?></a>
+    </div>
+
+    <? if (m.field_count || m.row_count || sheets) { ?>
+    <div class="meta">
+      <?= m.field_count || '?' ?> fields, <?= m.row_count || '?' ?> data rows<? if (kb) { ?>, <?= kb ?><? } ?><br>
+      <? if (sheets) { ?>Sheets: <?= sheets ?><? } ?>
+    </div>
+    <? } ?>
+
+    <div class="note">
+      <b>Download</b> the file and open it in <b>Excel</b> to verify the dependent
+      dropdowns. Opening it directly in Google Sheets re-imports it and won't
+      reproduce the <code>INDIRECT</code> / named-range behavior a supplier sees.
+    </div>
+
+    <button onclick="google.script.host.close()">Close</button>
+  </body>
+</html>
