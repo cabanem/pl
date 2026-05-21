@@ -26,6 +26,11 @@ var TEST_CONFIG_FILE_ID = '';
 // this collection. (A valid token under the wrong header name still 401s.)
 var PREVIEW_API_KEY = '';
 
+// All six query params are required:true in the spec. Don't rely on
+// Session.getActiveUser().getEmail() — it returns '' in many web-app doGet
+// contexts, which would make this required field empty and trip a gateway 400.
+var TEST_REQUESTER_EMAIL = 'test@example.com';
+
 // -----------------------------------------------------------------------------
 
 /** Run from the editor; result also goes to the Logs. */
@@ -51,9 +56,11 @@ function doGet() {
 function callPreviewEndpoint_() {
   var params = {
     correlation_id:      'test-' + Date.now(),
-    config_json_file_id: TEST_CONFIG_FILE_ID,
-    requester_email:     Session.getActiveUser().getEmail() || 'test@example.com',
-    variant_id:          '',
+    config_json_file_id: TEST_CONFIG_FILE_ID,       // EMPTY trips a gateway 400 (required)
+    requester_email:     TEST_REQUESTER_EMAIL,
+    variant_id:          '',                         // EMPTY may trip a gateway 400 until
+                                                     // variant_id is made optional in the
+                                                     // endpoint; set a value to test past it
     timestamp:           new Date().toISOString(),
     payload_version:     'test'
   };
@@ -98,6 +105,15 @@ function formatTestResult_(r) {
   if (!p) {
     lines.push('Body was not JSON. First 500 chars:');
     lines.push((r.rawBody || '').substring(0, 500));
+    return lines.join('\n');
+  }
+
+  // Gateway/validation errors don't have the recipe's {ok, verdict} shape — they
+  // come back as e.g. {"message":"..."}. If 'ok' is absent, the recipe almost
+  // certainly never ran; show the gateway message verbatim (it names the field).
+  if (typeof p.ok === 'undefined') {
+    lines.push('No {ok,verdict} in body -> request rejected BEFORE the recipe ran.');
+    lines.push('Gateway response: ' + JSON.stringify(p));
     return lines.join('\n');
   }
 
