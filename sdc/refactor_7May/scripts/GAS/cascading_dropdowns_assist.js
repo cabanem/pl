@@ -1,42 +1,49 @@
 /**
- * Track 2 — cascade authoring assist
+ * Track 2 — cascade authoring assist  (Tables-aware)
  * SDC dropdown / cascade redesign
  * ---------------------------------------------------------------------------
  * WHAT THIS DOES
  *   1. Stamps a self-validating dropdown on the "Parent value" column of every
  *      cascade child block, sourced from the parent lookup's own values, with
- *      invalid entries hard-rejected. The analyst picks "Belgium"; "BE", "TRUE",
- *      and any other off-list string become unenterable.
+ *      invalid entries hard-rejected.
  *   2. Stamps a dropdown on the "Depends on" column of 4_fields (the existing
- *      lookup-name cell — we are NOT moving it to a field reference yet), so the
- *      parent list can only be a real lookup name.
+ *      lookup-name cell), so the parent list can only be a real lookup name.
  *   3. Surfaces a completeness counter in a sidebar: mapped / total per cascade
- *      list, plus "fill parent first" for blocks whose parent list is empty and
- *      a readiness verdict. This is the catches-MISSING half; the dropdown is
- *      the catches-WRONG half.
+ *      list, "fill parent first" for empty parents, and a readiness verdict.
+ *
+ * GOOGLE SHEETS TABLES
+ *   If 5_lookups is a native Sheets *Table* and "Parent value" is a TYPED
+ *   column, per-cell validation is refused ("This operation is not allowed on
+ *   cells in typed columns"). A typed column is column-UNIFORM and therefore
+ *   cannot hold the per-row parent dropdowns a cascade needs — so the type must
+ *   come OFF that column. Two ways:
+ *     - Manual (guaranteed): click the "Parent value" column in the table and
+ *       set its type to None / plain text. One-time.
+ *     - Programmatic (best-effort): run untypeParentValueColumn(). Requires the
+ *       Google Sheets API advanced service (Apps Script editor > Services + >
+ *       Google Sheets API). Verify the column-type behaviour against the current
+ *       Table reference if Google changes it:
+ *       https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets#table
+ *   Run checkLookupTableTyping() first to see which columns are typed.
+ *   The field-side "Depends on" column is column-uniform, so it MAY stay a
+ *   native typed dropdown column; it does not have to be untyped.
  *
  * WHY IT CANNOT BREAK SERIALIZATION OR FIGHT sdc_lib
- *   - Data validations, cell notes, and the sidebar are metadata / UI. They are
- *     NOT cell values, and Drive.serializeConfig reads getValues() — so none of
- *     this reaches the JSON the connector parses.
- *   - It reads and writes BY HEADER NAME (via Track 1's helpers), never by index.
- *   - It defines NO reserved onOpen/onEdit. It installs its own *installable*
- *     triggers with unique handler names, so it coexists with sdc_lib's handlers.
+ *   - Validations, notes, the sidebar, and column TYPE are metadata / UI, not
+ *     cell values. Drive.serializeConfig reads getValues() — none of this
+ *     reaches the JSON the connector parses.
+ *   - It reads / writes BY HEADER NAME (Track 1 helpers), never by index.
+ *   - It defines NO reserved onOpen/onEdit; it installs its own *installable*
+ *     triggers with unique names, so it coexists with sdc_lib's handlers.
  *
  * DEPENDENCY
- *   This file reuses Track 1 (sdc_track1_lookup_migration.gs): SDC_MIG,
+ *   Reuses Track 1 (sdc_track1_lookup_migration.gs): SDC_MIG,
  *   buildFieldCascadeMap_, verifyLookupParents, findHeaderRow_, headerMap_, trim_.
  *   Both files must live in the same Apps Script project.
  *
  * SETUP (once)
- *   Run installSdcTrack2Triggers().  Adds installable onOpen (menu) + onEdit
- *   (live re-stamp). If you would rather wire it into sdc_lib's own handlers,
- *   skip that and instead call sdcTrack2Menu() from sdc_lib's onOpen and
- *   sdcTrack2OnEdit(e) from sdc_lib's onEdit.
- *
- * USE
- *   Menu "SDC cascade" > Stamp dropdowns   -> stampCascadeDropdowns()
- *   Menu "SDC cascade" > Show completeness -> showTrack2Sidebar()
+ *   Run installSdcTrack2Triggers().  Or call sdcTrack2Menu() from sdc_lib's
+ *   onOpen and sdcTrack2OnEdit(e) from sdc_lib's onEdit.
  */
 
 function assertTrack1_() {
@@ -50,6 +57,17 @@ function assertTrack1_() {
       'in the same Apps Script project — it reuses SDC_MIG, buildFieldCascadeMap_, ' +
       'verifyLookupParents, and the header helpers.');
   }
+}
+
+function assertSheetsAdvanced_() {
+  if (typeof Sheets === 'undefined') {
+    throw new Error('Enable the Google Sheets API advanced service: Apps Script editor > ' +
+      'Services (+) > Google Sheets API > Add. Then re-run.');
+  }
+}
+
+function isTypedColumnError_(err) {
+  return String((err && err.message) || err).indexOf('typed columns') !== -1;
 }
 
 // --- Stamping ---------------------------------------------------------------
@@ -140,8 +158,22 @@ function stampParentDropdowns_(ss) {
     }
   }
 
-  range.setDataValidations(dvs);
-  range.setNotes(notes);
+  // Tables: a typed "Parent value" column refuses per-cell validation. Translate
+  // the raw error into the actual fix instead of letting it bubble up opaque.
+  try {
+    range.setDataValidations(dvs);
+  } catch (err) {
+    if (isTypedColumnError_(err)) {
+      throw new Error('"Parent value" is a typed Table column, so per-cell dropdowns are refused. ' +
+        'Run untypeParentValueColumn() (or set the column type to None/Text in the table), then re-run. ' +
+        'A typed column is column-uniform and cannot hold the per-row parent dropdowns a cascade needs.');
+    }
+    throw err;
+  }
+  // Notes may also be blocked on typed columns; the sidebar carries the same
+  // "fill parent first" signal, so a note failure is non-fatal.
+  try { range.setNotes(notes); } catch (e) {}
+
   return { stamped: stamped, cleared: cleared, blocked: blocked };
 }
 
@@ -178,8 +210,125 @@ function stampDependsOnDropdown_(ss) {
   if (n2 <= 0) return { stamped: 0 };
   var col = [];
   for (var i = 0; i < n2; i++) col.push([dv]);            // blank stays valid; off-list rejected
-  fields.getRange(fStart + 1, cDep + 1, n2, 1).setDataValidations(col);
+
+  try {
+    fields.getRange(fStart + 1, cDep + 1, n2, 1).setDataValidations(col);
+  } catch (err) {
+    if (isTypedColumnError_(err)) {
+      // "Depends on" is column-uniform: a native typed dropdown is acceptable here.
+      return { stamped: 0, reason: '"Depends on" is a typed Table column. Either keep it as a native ' +
+        'dropdown column (set its options in the table), or untype it: ' +
+        'untypeTableColumn_("' + SDC_MIG.FIELDS_SHEET + '", "' + SDC_MIG.HEADERS.fieldDependsOn + '").' };
+    }
+    throw err;
+  }
   return { stamped: n2 };
+}
+
+// --- Tables: diagnose + untype (Advanced Sheets Service) --------------------
+
+/** Read-only: which columns on 5_lookups / 4_fields are typed Table columns. */
+function checkLookupTableTyping() {
+  assertTrack1_();
+  assertSheetsAdvanced_();
+  var ss = SpreadsheetApp.getActive();
+  var meta = Sheets.Spreadsheets.get(ss.getId(), { fields: 'sheets.properties,sheets.tables' });
+
+  var report = [];
+  (meta.sheets || []).forEach(function (s) {
+    var title = s.properties.title;
+    if (title !== SDC_MIG.LOOKUPS_SHEET && title !== SDC_MIG.FIELDS_SHEET) return;
+    if (!s.tables || !s.tables.length) {
+      report.push({ sheet: title, table: null, note: 'plain range (no table) — per-cell validation OK' });
+      return;
+    }
+    s.tables.forEach(function (t) {
+      var cols = (t.columnProperties || []).map(function (c) {
+        return { name: c.columnName, type: c.columnType || '(none)' };
+      });
+      report.push({ sheet: title, table: t.name, tableId: t.tableId, typedColumns: cols });
+    });
+  });
+
+  var parentTyped = false;
+  report.forEach(function (r) {
+    (r.typedColumns || []).forEach(function (c) {
+      if (r.sheet === SDC_MIG.LOOKUPS_SHEET &&
+          c.name === SDC_MIG.HEADERS.parent && c.type !== '(none)') parentTyped = true;
+    });
+  });
+
+  var out = { report: report, parentValueTyped: parentTyped };
+  Logger.log('checkLookupTableTyping: ' + JSON.stringify(out, null, 2));
+  try {
+    ss.toast(parentTyped
+      ? 'Parent value is a TYPED column — run untypeParentValueColumn().'
+      : 'Parent value is not typed — stamping should work.', 'SDC cascade', 6);
+  } catch (e) {}
+  return out;
+}
+
+/** Remove the column type from 5_lookups "Parent value" so per-cell DV is allowed. */
+function untypeParentValueColumn() {
+  assertTrack1_();
+  var r = untypeTableColumn_(SDC_MIG.LOOKUPS_SHEET, SDC_MIG.HEADERS.parent);
+  Logger.log('untypeParentValueColumn: ' + JSON.stringify(r));
+  try {
+    SpreadsheetApp.getActive().toast(
+      r.changed ? ('Removed type "' + r.removedType + '" from Parent value.') : r.reason,
+      'SDC cascade', 6);
+  } catch (e) {}
+  return r;
+}
+
+/**
+ * Best-effort: drop the type assignment for one column of a Sheets Table by
+ * rewriting the table's columnProperties without that column's entry.
+ * Requires the Sheets advanced service. If the API rejects this or the type
+ * persists, use the manual route (set the column type to None/Text in the UI).
+ */
+function untypeTableColumn_(sheetName, headerName) {
+  assertSheetsAdvanced_();
+  var ss = SpreadsheetApp.getActive();
+  var ssId = ss.getId();
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet) throw new Error('Sheet not found: ' + sheetName);
+  var sheetId = sheet.getSheetId();
+
+  var meta = Sheets.Spreadsheets.get(ssId, { fields: 'sheets.properties,sheets.tables' });
+  var table = null;
+  (meta.sheets || []).forEach(function (s) {
+    if (s.properties.sheetId === sheetId && s.tables) {
+      s.tables.forEach(function (t) { if (!table) table = t; });   // assume one table on the sheet
+    }
+  });
+  if (!table) return { changed: false, reason: 'no table on ' + sheetName + ' (plain range — nothing to untype)' };
+
+  var props = table.columnProperties || [];
+  var target = -1;
+  for (var i = 0; i < props.length; i++) {
+    if (trim_(props[i].columnName) === headerName) { target = i; break; }
+  }
+  if (target === -1) {
+    return { changed: false, reason: '"' + headerName + '" carries no column type (already untyped)' };
+  }
+  if (!props[target].columnType || props[target].columnType === 'COLUMN_TYPE_UNSPECIFIED') {
+    return { changed: false, reason: '"' + headerName + '" is already untyped' };
+  }
+
+  var removedType = props[target].columnType;
+  var kept = props.filter(function (_, idx) { return idx !== target; });   // drop the typed entry
+
+  Sheets.Spreadsheets.batchUpdate({
+    requests: [{
+      updateTable: {
+        table: { tableId: table.tableId, columnProperties: kept },
+        fields: 'columnProperties'
+      }
+    }]
+  }, ssId);
+
+  return { changed: true, sheet: sheetName, column: headerName, removedType: removedType };
 }
 
 // --- Completeness (the sidebar data) ----------------------------------------
@@ -193,7 +342,6 @@ function getTrack2Status(opts) {
   var v = verifyLookupParents({ ss: ss });               // {perLookup, badParentValues, ready}
   var childToParent = buildFieldCascadeMap_(ss).map;
 
-  // parent value-set sizes (to flag "fill parent first")
   var sheet = ss.getSheetByName(SDC_MIG.LOOKUPS_SHEET);
   var values = sheet.getDataRange().getValues();
   var H = SDC_MIG.HEADERS;
@@ -295,6 +443,9 @@ function sdcTrack2Menu() {
     .createMenu('SDC cascade')
     .addItem('Stamp dropdowns', 'stampCascadeDropdowns')
     .addItem('Show completeness', 'showTrack2Sidebar')
+    .addSeparator()
+    .addItem('Check table typing', 'checkLookupTableTyping')
+    .addItem('Remove Parent value column type', 'untypeParentValueColumn')
     .addToUi();
 }
 
@@ -333,5 +484,5 @@ function installSdcTrack2Triggers() {
   });
   ScriptApp.newTrigger('sdcTrack2OnOpen').forSpreadsheet(ss).onOpen().create();
   ScriptApp.newTrigger('sdcTrack2OnEdit').forSpreadsheet(ss).onEdit().create();
-  SpreadsheetApp.getActive().toast('Track 2 triggers installed (onOpen + onEdit).', 'SDC cascade', 5);
+  ss.toast('Track 2 triggers installed (onOpen + onEdit).', 'SDC cascade', 5);
 }
