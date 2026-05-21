@@ -230,6 +230,12 @@ And `preview_saved.html` — now that `metadata` carries `sheet_names`/`field_co
 
 So the wiring, in one line: two `_developer_settings` rows → two new `config.webhook` reads → `Preview.run` calls `Preview._call` (the GET helper, lifted from your working stub) instead of `Webhook.call` → success writes to Drive and returns `driveFileUrl`/`metadata` → the existing handler routes valid to `showTemplatePreview_` and invalid to `showValidationResults_`.
 
-The one judgment call worth surfacing: `Preview._call` is a deliberate departure from `Webhook.call` because the transports genuinely differ (GET+header vs POST+JSON). I kept it as a small private method on `Preview` rather than generalizing `Webhook.call`, because bending the shared POST helper to also do GET-with-auth would complicate the path every other flow depends on, for one caller. If you later move more endpoints to the API Platform, that's the moment to extract a shared `Endpoint.get/post` helper — but doing it now would be over-building for a single consumer. Given your lean toward simple-and-elegant, I'd keep the two callers honestly separate until a third one justifies the abstraction.
+The one judgment call worth surfacing: `Preview._call` is a deliberate departure from `Webhook.call` because the transports genuinely differ (GET+header vs POST+JSON). I 
+kept it as a small private method on `Preview` rather than generalizing `Webhook.call`, because bending the shared POST helper to also do GET-with-auth would complicate the path every other flow depends on, for one caller. If you later move more endpoints to the API Platform, that's the moment to extract a shared `Endpoint.get/post` helper — but doing it now would be over-building for a single consumer. Given your lean toward simple-and-elegant, I'd keep the two callers honestly separate until a third one justifies the abstraction.
 
 Want me to fold this corrected GET-based `Preview.run` and the two helpers into the sketch doc so it's the version of record, replacing the `Webhook.call` version that's now stale?
+
+
+
+log('INFO', 'Preview raw: ok=' + p.ok + ' status=' + (p.verdict && p.verdict.status) +
+            ' has_file=' + !!p.file_content + ' fields=' + JSON.stringify(Object.keys(p)));
