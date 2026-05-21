@@ -21,9 +21,9 @@ var PREVIEW_ENDPOINT_URL = 'https://PASTE_YOUR_ENDPOINT_URL_HERE';
 // but still HTTP 200 once you've made the 400 -> 200 fix).
 var TEST_CONFIG_FILE_ID = '';
 
-// Only if your API endpoint requires auth. '' = send no auth header (matches how
-// Webhook.call sends today). Adjust the header NAME below to whatever your API
-// client expects (Authorization: Bearer ..., api-token, x-api-key, etc.).
+// Required by this endpoint. The OpenAPI spec defines API-key auth via the
+// 'API-TOKEN' header. Paste the token from the Workato API client authorized on
+// this collection. (A valid token under the wrong header name still 401s.)
 var PREVIEW_API_KEY = '';
 
 // -----------------------------------------------------------------------------
@@ -43,9 +43,13 @@ function doGet() {
     .setMimeType(ContentService.MimeType.TEXT);
 }
 
-/** Build a sample payload, POST it, capture status + parsed body. */
+/**
+ * Build the query string, GET the endpoint, capture status + parsed body.
+ * Per the OpenAPI spec this endpoint is a GET: all six params are query params
+ * and the credential is the API-TOKEN header.
+ */
 function callPreviewEndpoint_() {
-  var payload = {
+  var params = {
     correlation_id:      'test-' + Date.now(),
     config_json_file_id: TEST_CONFIG_FILE_ID,
     requester_email:     Session.getActiveUser().getEmail() || 'test@example.com',
@@ -54,33 +58,41 @@ function callPreviewEndpoint_() {
     payload_version:     'test'
   };
 
+  var qs = Object.keys(params)
+    .map(function(k) {
+      return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+    })
+    .join('&');
+  var url = PREVIEW_ENDPOINT_URL + '?' + qs;
+
   var options = {
-    method:             'post',
-    contentType:        'application/json',
-    payload:            JSON.stringify(payload),
+    method:             'get',
     muteHttpExceptions: true   // so we SEE 4xx/5xx instead of throwing
   };
   if (PREVIEW_API_KEY) {
-    options.headers = { 'Authorization': 'Bearer ' + PREVIEW_API_KEY };
+    options.headers = { 'API-TOKEN': PREVIEW_API_KEY };   // header name per the spec
   }
 
-  var resp   = UrlFetchApp.fetch(PREVIEW_ENDPOINT_URL, options);
+  var resp   = UrlFetchApp.fetch(url, options);
   var body   = resp.getContentText();
   var parsed = null;
   try { parsed = JSON.parse(body); } catch (e) {}
 
   return {
-    sentPayload: payload,
-    statusCode:  resp.getResponseCode(),
-    rawBody:     body,
-    parsed:      parsed
+    sentParams: params,
+    statusCode: resp.getResponseCode(),
+    rawBody:    body,
+    parsed:     parsed
   };
 }
 
 /** Readable summary — reports the file's presence/size, not 60KB of base64. */
 function formatTestResult_(r) {
   var lines = [];
-  lines.push('HTTP status : ' + r.statusCode);   // expect 200 on BOTH paths
+  lines.push('HTTP status : ' + r.statusCode);   // 200 valid / 400 invalid today
+                                                  // (becomes 200 + ok:false once
+                                                  // the recipe's failure path is
+                                                  // changed from 400)
 
   var p = r.parsed;
   if (!p) {
