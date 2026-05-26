@@ -359,3 +359,16 @@ function callModel_(systemPrompt, userPrompt) {
 
   return extractGeminiText_(json);
 }
+
+
+function extractGeminiText_(json) {
+  const cand = json && Array.isArray(json.candidates) ? json.candidates[0] : null;
+  if (!cand) {
+    const blocked = json && json.promptFeedback && json.promptFeedback.blockReason;
+    throw new Error(blocked ? `Model blocked the prompt (${blocked}).` : 'Model returned no candidates.');
+  }
+  const parts = cand.content && Array.isArray(cand.content.parts) ? cand.content.parts : [];
+  const text  = parts.map(function (p) { return p && p.text ? p.text : ''; }).join('').trim();
+  if (!text) throw new Error(`Model returned no text (finishReason: ${cand.finishReason || 'unknown'}).`);
+  return text;
+}
