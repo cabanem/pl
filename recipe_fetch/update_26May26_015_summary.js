@@ -331,3 +331,31 @@ function upsertTextFile_(folder, filename, payload) {
   }
   folder.createFile(filename, payload, MimeType.PLAIN_TEXT);
 }
+
+function callModel_(systemPrompt, userPrompt) {
+  const props    = PropertiesService.getScriptProperties();
+  const project  = props.getProperty('GCP_PROJECT');
+  const location = props.getProperty('GCP_LOCATION') || 'us-central1';
+  if (!project) throw new Error('Set GCP_PROJECT in Script Properties for Vertex AI.');
+  const model = props.getProperty('LLM_MODEL') || 'gemini-2.5-flash';
+
+  const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}`
+            + `/locations/${location}/publishers/google/models/${model}:generateContent`;
+
+  const json = httpJson_(url, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'Authorization': `Bearer ${ScriptApp.getOAuthToken()}` },
+    payload: JSON.stringify({
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 512,
+        thinkingConfig: { thinkingBudget: 0 }
+      }
+    })
+  }, 'Vertex Gemini narration');
+
+  return extractGeminiText_(json);
+}
