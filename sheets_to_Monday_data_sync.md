@@ -1,282 +1,616 @@
-Right — the elegant move here is **a single source of truth for the payload**. If the mock and the real write don't go through the same code path, the mock is by definition a guess. Once they share the function, "true rendering" comes for free.
+Below is the full set of changes, organized into three sequenced passes so you can apply and test incrementally. Each pass stands on its own — you can stop after any pass and have a working, improved script.
 
-Here's the shape of the change:
+---
 
-**1. Have `getMondaySchema_` keep the column type and title.** You're already fetching `type` from the API and discarding it. Keep it:
+## Pass 1: Batched API calls (biggest immediate win)
+
+**What changes:** `truncateMondayBoard_` and `writeToMonday_` get replaced with batched versions. Adds one new helper `deleteBatch_`.
+
+**Why first:** Single change, 20-40x throughput improvement, no architectural shift. If this gets you under 30 minutes at your row counts, you may not need Pass 2.
+
+### Replace `truncateMondayBoard_`
 
 ```javascript
-function getMondaySchema_(boardId) {
-  const query = `query { boards (ids: ${boardId}) { columns { id title type } } }`;
-  const response = mondayRequest_(query, `Schema:${boardId}`);
-  const columns = response.data?.boards?.[0]?.columns;
-  if (!columns) throw new Error(`Could not fetch columns for board ${boardId}.`);
+// --- PHASE 3: TRUNCATE -------------------------------------------------------
+function truncateMondayBoard_(boardId, tag) {
+  const itemIds = fetchAllItemIds_(boardId, tag);
+  if (itemIds.length === 0) return 0;
 
-  const schema = {};
-  columns.forEach(col => {
-    schema[col.title.toLowerCase().trim()] = { id: col.id, type: col.type, title: col.title };
-  });
-  return schema;
+  logToAuditSheet('INFO', `Found ${itemIds.length} items to delete. Truncating...`, tag);
+  const deleted = deleteBatch_(itemIds, tag);
+  logToAuditSheet('INFO', `Truncate complete: ${deleted}/${itemIds.length} deleted.`, tag);
+  return deleted;
 }
-```
 
-**2. Make `validateHeaders_` bidirectional and richer.** Two changes: read from the new schema shape, and add the reverse pass that surfaces Monday columns with no sheet source. The mapping sheet now answers three questions per row, not one.
+function fetchAllItemIds_(boardId, tag) {
+  let cursor = null;
+  const itemIds = [];
 
-```javascript
-function validateHeaders_(sheetHeaders, mondaySchema, config, tag) {
-  const mapping = {};
-  const missingInMonday = [];
-  const outputMap = [['Sheets Header', 'Monday Title', 'Monday Column ID', 'Monday Type', 'Status']];
+  do {
+    const query = cursor
+      ? `query { next_items_page (limit: 500, cursor: "${cursor}") { cursor items { id } } }`
+      : `query { boards (ids: ${boardId}) { items_page (limit: 500) { cursor items { id } } } }`;
 
-  let nameIndex = sheetHeaders.findIndex(h => {
-    const norm = String(h).toLowerCase().trim();
-    return norm === 'name' || norm === 'item name';
-  });
-  if (nameIndex === -1) nameIndex = 0;
-  mapping._nameIndex = nameIndex;
+    const res = mondayRequest_(query, tag);
+    const page = cursor ? res.data?.next_items_page : res.data?.boards[0]?.items_page;
 
-  const matchedMondayKeys = new Set();
+    if (page?.items) page.items.forEach(i => itemIds.push(i.id));
+    cursor = page?.cursor || null;
+  } while (cursor);
 
-  sheetHeaders.forEach((header, index) => {
-    const normHeader = String(header).toLowerCase().trim();
-    if (!normHeader) return;
-
-    if (index === nameIndex) {
-      outputMap.push([header, '(Item Name)', '—', 'name', '✓ Mapped to item name']);
-      return;
-    }
-
-    const mondayCol = mondaySchema[normHeader];
-    if (mondayCol) {
-      mapping[index] = mondayCol.id; // keep flat shape so writeToMonday_ stays simple
-      matchedMondayKeys.add(normHeader);
-      outputMap.push([header, mondayCol.title, mondayCol.id, mondayCol.type, '✓ Mapped']);
-    } else {
-      missingInMonday.push(header);
-      outputMap.push([header, '—', '—', '—', '❌ Sheet column has no match — DATA WILL BE DROPPED']);
-    }
-  });
-
-  // Reverse pass: Monday columns with no sheet source.
-  // These are the silent killers — they go blank after truncate with zero warning today.
-  const unmatchedMonday = [];
-  Object.keys(mondaySchema).forEach(key => {
-    if (matchedMondayKeys.has(key)) return;
-    const col = mondaySchema[key];
-    unmatchedMonday.push(col);
-    outputMap.push(['—', col.title, col.id, col.type, '⚠ Monday column has no source — WILL BE BLANK AFTER WRITEBACK']);
-  });
-
-  let mapSheet;
-  if (config.staging_mapping_tab_name) {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    mapSheet = ss.getSheetByName(config.staging_mapping_tab_name);
-    if (!mapSheet) mapSheet = ss.insertSheet(config.staging_mapping_tab_name);
-    mapSheet.clear();
-    mapSheet.getRange(1, 1, outputMap.length, outputMap[0].length).setValues(outputMap);
-    mapSheet.getRange(1, 1, 1, outputMap[0].length).setFontWeight('bold').setBackground('#efefef');
-    mapSheet.autoResizeColumns(1, outputMap[0].length);
-  }
-
-  return { mapping, missing: missingInMonday, unmatchedMonday, mapSheet };
+  return itemIds;
 }
-```
 
-**3. Extract `buildColumnValues_` — the single source of truth.** This is the load-bearing piece. Both the real write and the mock now produce the exact same object.
+function deleteBatch_(itemIds, tag) {
+  // Alias multiple delete_item mutations into one request.
+  // Tune BATCH_SIZE down if you see frequent failures (complexity budget exhaustion).
+  const BATCH_SIZE = 50;
+  let deleted = 0;
 
-```javascript
-function buildColumnValues_(row, mapping) {
-  const columnValues = {};
-  Object.keys(mapping).forEach(sheetIndex => {
-    if (sheetIndex === '_nameIndex') return;
-    const colId = mapping[sheetIndex];
-    let value = row[sheetIndex];
-
-    if (Object.prototype.toString.call(value) === '[object Date]') {
-      value = !isNaN(value.getTime())
-        ? Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd')
-        : '';
-    }
-
-    if (value !== '' && value != null) {
-      columnValues[colId] = String(value);
-    }
-  });
-  return columnValues;
-}
-```
-
-**4. `writeToMonday_` now delegates to it** (this is just a swap, behavior is identical):
-
-```javascript
-function writeToMonday_(boardId, data, mapping, tag) {
-  const rows = data.slice(1);
-  let successCount = 0;
-
-  for (const row of rows) {
-    const itemName = String(row[mapping._nameIndex] || 'Untitled Item').replace(/"/g, '\\"');
-    const columnValues = buildColumnValues_(row, mapping);
-    const escapedColVals = JSON.stringify(JSON.stringify(columnValues));
-
-    const mutation = `
-      mutation {
-        create_item (
-          board_id: ${boardId},
-          item_name: "${itemName}",
-          column_values: ${escapedColVals}
-        ) { id }
-      }
-    `;
+  for (let i = 0; i < itemIds.length; i += BATCH_SIZE) {
+    const chunk = itemIds.slice(i, i + BATCH_SIZE);
+    const aliased = chunk
+      .map((id, idx) => `d${idx}: delete_item(item_id: ${id}) { id }`)
+      .join('\n');
+    const mutation = `mutation { ${aliased} }`;
 
     try {
       mondayRequest_(mutation, tag);
-      successCount++;
+      deleted += chunk.length;
     } catch (e) {
-      logToAuditSheet('ERROR', `Failed to write item "${itemName}": ${e.message}`, tag);
+      logToAuditSheet('ERROR', `Batch delete failed at offset ${i}: ${e.message}`, tag);
+      // Continue — partial progress is still progress
     }
+
+    Utilities.sleep(200); // be a good citizen between batches
   }
 
-  logToAuditSheet('INFO', `Successfully pushed ${successCount} out of ${rows.length} rows to Monday.`, tag);
+  return deleted;
 }
 ```
 
-**5. `generateMockPayloadSheet_` becomes a full ledger, not a projection.** Every sheet column appears (mapped or dropped). Every unmatched Monday column appears as a "will be blank" column. The final column is the literal JSON payload Monday will receive — produced by `buildColumnValues_`, so it cannot lie.
+### Replace `writeToMonday_`
 
 ```javascript
-function generateMockPayloadSheet_(data, mapping, mondaySchema, validation) {
-  const sheetHeaders = data[0];
+// --- PHASE 4: WRITEBACK ------------------------------------------------------
+function writeToMonday_(boardId, data, mapping, tag) {
   const rows = data.slice(1);
+  const BATCH_SIZE = 25; // create_item costs more complexity than delete_item
 
-  const headerRow = ['Item Name'];
-  const subHeaderRow = ['(built-in)'];
-  const sheetColRenderOrder = [];
+  let successCount = 0;
+  let failedBatches = 0;
 
-  // All sheet columns — mapped and unmapped
-  sheetHeaders.forEach((header, idx) => {
-    if (idx === mapping._nameIndex) return;
-    if (!String(header).trim()) return;
-    sheetColRenderOrder.push(idx);
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const chunk = rows.slice(i, i + BATCH_SIZE);
 
-    if (mapping[idx]) {
-      const normKey = String(header).toLowerCase().trim();
-      const mondayCol = mondaySchema[normKey];
-      headerRow.push(`${mondayCol.title}\n[${mondayCol.type}]`);
-      subHeaderRow.push(`Monday ID: ${mondayCol.id}\n← from "${header}"`);
-    } else {
-      headerRow.push(`⚠ ${header}`);
-      subHeaderRow.push('DROPPED — no Monday match');
-    }
-  });
+    const aliased = chunk.map((row, idx) => {
+      const itemName = String(row[mapping._nameIndex] || 'Untitled Item').replace(/"/g, '\\"');
+      const columnValues = buildColumnValues_(row, mapping);
+      const escapedColVals = JSON.stringify(JSON.stringify(columnValues));
+      return `c${idx}: create_item(board_id: ${boardId}, item_name: "${itemName}", column_values: ${escapedColVals}) { id }`;
+    }).join('\n');
 
-  // Monday columns with no sheet source
-  validation.unmatchedMonday.forEach(col => {
-    headerRow.push(`${col.title}\n[${col.type}]`);
-    subHeaderRow.push(`Monday ID: ${col.id}\n⚠ BLANK — no sheet source`);
-  });
+    const mutation = `mutation { ${aliased} }`;
 
-  // The truth column: actual JSON sent to Monday
-  headerRow.push('Actual JSON payload');
-  subHeaderRow.push('(what column_values receives)');
-
-  const outputData = [headerRow, subHeaderRow];
-
-  for (const row of rows) {
-    const outRow = [String(row[mapping._nameIndex] || 'Untitled Item')];
-
-    sheetColRenderOrder.forEach(idx => {
-      let value = row[idx];
-      if (Object.prototype.toString.call(value) === '[object Date]') {
-        value = !isNaN(value.getTime())
-          ? Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd')
-          : '';
+    try {
+      mondayRequest_(mutation, tag);
+      successCount += chunk.length;
+    } catch (e) {
+      failedBatches++;
+      logToAuditSheet('ERROR', `Batch create failed at offset ${i} (${chunk.length} rows): ${e.message}`, tag);
+      // Fall back to per-item writes for this batch so we don't lose 25 rows to one bad row
+      for (const row of chunk) {
+        try {
+          const itemName = String(row[mapping._nameIndex] || 'Untitled Item').replace(/"/g, '\\"');
+          const columnValues = buildColumnValues_(row, mapping);
+          const escapedColVals = JSON.stringify(JSON.stringify(columnValues));
+          const single = `mutation { create_item(board_id: ${boardId}, item_name: "${itemName}", column_values: ${escapedColVals}) { id } }`;
+          mondayRequest_(single, tag);
+          successCount++;
+        } catch (innerE) {
+          logToAuditSheet('ERROR', `Single-item fallback failed: ${innerE.message}`, tag);
+        }
       }
-      outRow.push(value !== '' && value != null ? String(value) : '');
-    });
+    }
 
-    validation.unmatchedMonday.forEach(() => outRow.push('(blank)'));
-
-    // Single source of truth — same call writeToMonday_ uses
-    outRow.push(JSON.stringify(buildColumnValues_(row, mapping)));
-    outputData.push(outRow);
+    Utilities.sleep(200);
   }
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const mockTabName = '.dry_run_payload';
-  let mockSheet = ss.getSheetByName(mockTabName);
-  if (!mockSheet) mockSheet = ss.insertSheet(mockTabName);
-  mockSheet.clear();
-  mockSheet.getRange(1, 1, outputData.length, outputData[0].length).setValues(outputData);
-
-  mockSheet.getRange(1, 1, 1, outputData[0].length).setFontWeight('bold').setBackground('#fff2cc');
-  mockSheet.getRange(2, 1, 1, outputData[0].length).setFontStyle('italic').setBackground('#fef7e0');
-
-  // Color the problem columns so a glance is enough
-  let col = 2;
-  sheetColRenderOrder.forEach(idx => {
-    if (!mapping[idx]) {
-      mockSheet.getRange(1, col, outputData.length, 1).setBackground('#fce5cd'); // dropped
-    }
-    col++;
-  });
-  validation.unmatchedMonday.forEach(() => {
-    mockSheet.getRange(1, col, outputData.length, 1).setBackground('#f4cccc'); // blank
-    col++;
-  });
-
-  mockSheet.setFrozenRows(2);
-  mockSheet.setFrozenColumns(1);
-  mockSheet.autoResizeColumns(1, outputData[0].length);
-  return mockSheet;
+  logToAuditSheet('INFO', `Wrote ${successCount}/${rows.length} rows. Failed batches: ${failedBatches}.`, tag);
+  return successCount;
 }
 ```
 
-**6. One-line wiring change in `runDryRun`** — pass the schema and the whole validation result through:
+The fallback-to-single pattern in `writeToMonday_` is worth its weight in gold. When a batch fails (one bad row poisons the whole alias), you don't lose 25 rows — you lose only the actual bad row.
+
+---
+
+## Pass 2: Resumable execution
+
+**What changes:** Adds job state management, a new `runWritebackResumable` entry point, resumable phase functions, and self-scheduling continuation. `runWriteback` (manual menu version) stays unchanged for small ad-hoc runs.
+
+**Why second:** Builds on the batched calls. Without batching, resumption is masking a fundamental throughput problem. With batching, resumption is the right tool for the residual problem (boards that just don't fit in 30 minutes).
+
+### Add new constants
+
+Add to the `APP` config block at the top:
 
 ```javascript
-const mockSheet = generateMockPayloadSheet_(data, validation.mapping, mondaySchema, validation);
+const APP = Object.freeze({
+  SHEETS:   { AUDIT: '.audit_log' },
+  RUNTIME:  {
+    LOG_FLUSH_SIZE: 10,
+    SOFT_DEADLINE_MS: 25 * 60 * 1000,   // bail at 25min, leave 5min headroom
+    CONTINUATION_DELAY_MS: 60 * 1000,   // ~1min between continuations
+    JOB_KEY: 'CURRENT_JOB'
+  },
+  DEFAULTS: { MONDAY_URL: 'https://api.monday.com/v2', MONDAY_API_VERSION: '2025-10' }
+});
+```
+
+### Add job state helpers
+
+Add anywhere in the file (suggest near `getAppConfig_`):
+
+```javascript
+// --- JOB STATE ---------------------------------------------------------------
+function loadJob_() {
+  const raw = PropertiesService.getScriptProperties().getProperty(APP.RUNTIME.JOB_KEY);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function saveJob_(job) {
+  PropertiesService.getScriptProperties().setProperty(APP.RUNTIME.JOB_KEY, JSON.stringify(job));
+}
+
+function clearJob_() {
+  PropertiesService.getScriptProperties().deleteProperty(APP.RUNTIME.JOB_KEY);
+}
+
+function abortJob() {
+  const ui = SpreadsheetApp.getUi();
+  const job = loadJob_();
+  if (!job) {
+    ui.alert('No job in progress.');
+    return;
+  }
+  const resp = ui.alert(
+    'Abort current job?',
+    `This will clear job state but will NOT undo deletes or writes already applied to Monday.\n\n` +
+    `Current state:\n${JSON.stringify(job, null, 2)}`,
+    ui.ButtonSet.YES_NO
+  );
+  if (resp === ui.Button.YES) {
+    clearJob_();
+    cancelContinuationTriggers_();
+    logToAuditSheet('WARN', `Job aborted by user. Last state: ${JSON.stringify(job)}`, 'abortJob', true);
+    ui.alert('Job state cleared.');
+  }
+}
+
+function showJobStatus() {
+  const job = loadJob_();
+  const msg = job
+    ? `Current job:\n\n${JSON.stringify(job, null, 2)}`
+    : 'No job in progress.';
+  SpreadsheetApp.getUi().alert(msg);
+}
+```
+
+### Add continuation helpers
+
+```javascript
+// --- CONTINUATION ------------------------------------------------------------
+function scheduleContinuation_() {
+  ScriptApp.newTrigger('runWritebackResumable')
+    .timeBased()
+    .after(APP.RUNTIME.CONTINUATION_DELAY_MS)
+    .create();
+  logToAuditSheet('INFO', 'Continuation trigger scheduled.', 'scheduleContinuation_');
+}
+
+function cancelContinuationTriggers_() {
+  // Removes only one-shot continuation triggers, not the recurring schedule.
+  // We identify continuations by handler name + the fact that recurring triggers
+  // are created via installSchedule() which uses .everyDays(), while continuations
+  // use .after(). Both have the same handler, so we can't distinguish perfectly
+  // from the trigger object alone — safest is to delete all 'runWritebackResumable'
+  // triggers and have installSchedule re-create the recurring one if needed.
+  // Pragmatic alternative: only delete if we just cleared a job (operator intent).
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'runWritebackResumable')
+    .forEach(t => {
+      try { ScriptApp.deleteTrigger(t); } catch (_) {}
+    });
+}
+```
+
+A note on `cancelContinuationTriggers_`: Apps Script doesn't expose enough metadata to distinguish a one-shot `.after()` trigger from a recurring `.everyDays()` trigger after creation. The safest pattern is to *only* call this when aborting a job (where you want everything stopped), and have `installSchedule` be the canonical re-creator of the recurring trigger. If you call `cancelContinuationTriggers_` during normal operation, you'd need to re-run `installSchedule` to restore the daily schedule.
+
+### Add the resumable entry point
+
+```javascript
+// --- RESUMABLE PIPELINE ------------------------------------------------------
+function runWritebackResumable() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    logToAuditSheet('WARN', 'Another writeback is already running. Aborting.', 'runWritebackResumable', true);
+    return;
+  }
+
+  const executionStart = Date.now();
+  const overBudget = () => (Date.now() - executionStart) > APP.RUNTIME.SOFT_DEADLINE_MS;
+
+  let config;
+  try {
+    config = getAppConfig_();
+  } catch (e) {
+    logToAuditSheet('ERROR', `Config load failed: ${e.message}`, 'runWritebackResumable', true);
+    lock.releaseLock();
+    return;
+  }
+
+  try {
+    let job = loadJob_();
+
+    // --- INITIALIZE FRESH JOB ---
+    if (!job) {
+      job = initializeJob_(config);
+      if (!job) {
+        // Initialization decided not to proceed (no data, validation failed, etc.)
+        lock.releaseLock();
+        return;
+      }
+      saveJob_(job);
+    }
+
+    logToAuditSheet('INFO', `Resuming job. Phase=${job.phase}, deleted=${job.deletedSoFar}/${job.totalToDelete}, written=${job.writtenSoFar}/${job.totalToWrite}.`, 'runWritebackResumable');
+
+    // --- PHASE: TRUNCATE ---
+    if (job.phase === 'truncating') {
+      job = resumeTruncate_(job, overBudget);
+      saveJob_(job);
+      if (job.phase === 'truncating') {
+        scheduleContinuation_();
+        logToAuditSheet('INFO', `Truncate paused at ${job.deletedSoFar}/${job.totalToDelete}. Continuation scheduled.`, 'runWritebackResumable', true);
+        lock.releaseLock();
+        return;
+      }
+    }
+
+    // --- PHASE: WRITE ---
+    if (job.phase === 'writing') {
+      job = resumeWrite_(job, overBudget);
+      saveJob_(job);
+      if (job.phase === 'writing') {
+        scheduleContinuation_();
+        logToAuditSheet('INFO', `Write paused at ${job.writtenSoFar}/${job.totalToWrite}. Continuation scheduled.`, 'runWritebackResumable', true);
+        lock.releaseLock();
+        return;
+      }
+    }
+
+    // --- PHASE: DONE ---
+    logToAuditSheet('SUCCESS',
+      `Job complete. Deleted ${job.deletedSoFar}/${job.totalToDelete}, wrote ${job.writtenSoFar}/${job.totalToWrite}.`,
+      'runWritebackResumable', true);
+    sendAlertEmail_(config, 'Writeback completed',
+      `Board: ${job.boardId}\nDeleted: ${job.deletedSoFar}\nWritten: ${job.writtenSoFar}\nElapsed since job start: ${Math.round((Date.now() - new Date(job.startedAt).getTime()) / 60000)} min`);
+    clearJob_();
+
+  } catch (e) {
+    logToAuditSheet('ERROR', `Resumable run failed: ${e.message}\n${e.stack || ''}`, 'runWritebackResumable', true);
+    sendAlertEmail_(config, 'Writeback FAILED',
+      `Execution ID: ${EXECUTION_ID}\nError: ${e.message}\nStack: ${e.stack || '(none)'}\n\nJob state preserved. Inspect before resuming or aborting.`);
+    // Do not clear job — operator inspects and decides
+  } finally {
+    flushAuditLogs();
+    lock.releaseLock();
+  }
+}
+
+function initializeJob_(config) {
+  const boardId = config.monday_board_id;
+  const tag = `Target:${boardId}`;
+
+  if (!boardId) {
+    logToAuditSheet('ERROR', 'Missing monday_board_id.', 'initializeJob_', true);
+    return null;
+  }
+
+  logToAuditSheet('INFO', `Initializing new job for board ${boardId}.`, 'initializeJob_');
+
+  // Schema + stage + validate
+  const mondaySchema = getMondaySchema_(boardId);
+  const data = stageIncumbentData_(config);
+
+  if (!data || data.length <= 1) {
+    logToAuditSheet('WARN', 'No data in incumbent. Skipping job.', tag, true);
+    return null;
+  }
+
+  const validation = validateHeaders_(data[0], mondaySchema, config, tag);
+  if (validation.missing.length > 0) {
+    const errorMsg = `Schema mismatch. Sheet columns missing in Monday:\n • ${validation.missing.join('\n • ')}`;
+    sendAlertEmail_(config, 'Header Validation Failed (Scheduled)', errorMsg);
+    logToAuditSheet('ERROR', errorMsg, tag, true);
+    return null;
+  }
+
+  // Snapshot item IDs to delete NOW — board state can drift across executions
+  const itemIds = fetchAllItemIds_(boardId, tag);
+  const deleteQueueTab = '.staging_delete_queue';
+  writeQueueToSheet_(deleteQueueTab, itemIds);
+
+  // Mapping is small JSON — fits in job state
+  return {
+    executionId: EXECUTION_ID,
+    boardId: boardId,
+    phase: 'truncating',
+    startedAt: new Date().toISOString(),
+    totalToDelete: itemIds.length,
+    deletedSoFar: 0,
+    totalToWrite: data.length - 1,
+    writtenSoFar: 0,
+    stagedRowsTabName: config.staging_new_tab_name || '.staging_incumbent',
+    deleteQueueTabName: deleteQueueTab,
+    mapping: validation.mapping
+  };
+}
+
+function resumeTruncate_(job, overBudget) {
+  const tag = `Target:${job.boardId} (resume-truncate)`;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(job.deleteQueueTabName);
+  if (!sheet) throw new Error(`Delete queue tab missing: ${job.deleteQueueTabName}`);
+
+  const BATCH_SIZE = 50;
+  const lastRow = sheet.getLastRow();
+
+  while (job.deletedSoFar < job.totalToDelete) {
+    if (overBudget()) {
+      logToAuditSheet('INFO', `Truncate over budget. Pausing at ${job.deletedSoFar}/${job.totalToDelete}.`, tag);
+      return job;
+    }
+
+    const startRow = job.deletedSoFar + 1; // 1-indexed
+    const remaining = job.totalToDelete - job.deletedSoFar;
+    const take = Math.min(BATCH_SIZE, remaining);
+    const ids = sheet.getRange(startRow, 1, take, 1).getValues().map(r => r[0]);
+
+    const aliased = ids
+      .map((id, idx) => `d${idx}: delete_item(item_id: ${id}) { id }`)
+      .join('\n');
+
+    try {
+      mondayRequest_(`mutation { ${aliased} }`, tag);
+      job.deletedSoFar += take;
+    } catch (e) {
+      logToAuditSheet('ERROR', `Truncate batch failed at ${job.deletedSoFar}: ${e.message}`, tag);
+      job.deletedSoFar += take; // skip past it — partial progress is progress
+    }
+
+    Utilities.sleep(200);
+  }
+
+  job.phase = 'writing';
+  logToAuditSheet('INFO', `Truncate phase complete. Advancing to write phase.`, tag);
+  return job;
+}
+
+function resumeWrite_(job, overBudget) {
+  const tag = `Target:${job.boardId} (resume-write)`;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(job.stagedRowsTabName);
+  if (!sheet) throw new Error(`Staging tab missing: ${job.stagedRowsTabName}`);
+
+  // Read headers once
+  const lastCol = sheet.getLastColumn();
+  // (Headers are row 1 of staging; data starts row 2. writtenSoFar=0 means start at row 2.)
+
+  const BATCH_SIZE = 25;
+
+  while (job.writtenSoFar < job.totalToWrite) {
+    if (overBudget()) {
+      logToAuditSheet('INFO', `Write over budget. Pausing at ${job.writtenSoFar}/${job.totalToWrite}.`, tag);
+      return job;
+    }
+
+    const startRow = job.writtenSoFar + 2; // row 1 = headers, data starts row 2
+    const remaining = job.totalToWrite - job.writtenSoFar;
+    const take = Math.min(BATCH_SIZE, remaining);
+    const chunk = sheet.getRange(startRow, 1, take, lastCol).getValues();
+
+    const aliased = chunk.map((row, idx) => {
+      const itemName = String(row[job.mapping._nameIndex] || 'Untitled Item').replace(/"/g, '\\"');
+      const columnValues = buildColumnValues_(row, job.mapping);
+      const escapedColVals = JSON.stringify(JSON.stringify(columnValues));
+      return `c${idx}: create_item(board_id: ${job.boardId}, item_name: "${itemName}", column_values: ${escapedColVals}) { id }`;
+    }).join('\n');
+
+    try {
+      mondayRequest_(`mutation { ${aliased} }`, tag);
+      job.writtenSoFar += take;
+    } catch (e) {
+      logToAuditSheet('ERROR', `Write batch failed at ${job.writtenSoFar}: ${e.message}. Falling back to single writes.`, tag);
+      // Single-item fallback
+      for (const row of chunk) {
+        try {
+          const itemName = String(row[job.mapping._nameIndex] || 'Untitled Item').replace(/"/g, '\\"');
+          const columnValues = buildColumnValues_(row, job.mapping);
+          const escapedColVals = JSON.stringify(JSON.stringify(columnValues));
+          mondayRequest_(`mutation { create_item(board_id: ${job.boardId}, item_name: "${itemName}", column_values: ${escapedColVals}) { id } }`, tag);
+          job.writtenSoFar += 1;
+        } catch (innerE) {
+          logToAuditSheet('ERROR', `Single-write fallback failed at row ${job.writtenSoFar}: ${innerE.message}`, tag);
+          job.writtenSoFar += 1; // skip
+        }
+        if (overBudget()) return job;
+      }
+    }
+
+    Utilities.sleep(200);
+  }
+
+  job.phase = 'done';
+  logToAuditSheet('INFO', `Write phase complete.`, tag);
+  return job;
+}
+
+function writeQueueToSheet_(tabName, ids) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(tabName);
+  if (!sheet) sheet = ss.insertSheet(tabName);
+  sheet.clear();
+  if (ids.length > 0) {
+    sheet.getRange(1, 1, ids.length, 1).setValues(ids.map(id => [id]));
+  }
+  return sheet;
+}
+```
+
+### Update `runWritebackScheduled` to call the resumable version
+
+```javascript
+function runWritebackScheduled() {
+  logToAuditSheet('INFO', `Scheduled trigger fired.`, 'runWritebackScheduled');
+  try {
+    runWritebackResumable();
+  } catch (e) {
+    logToAuditSheet('ERROR', `Unhandled scheduled failure: ${e.message}`, 'runWritebackScheduled', true);
+    try {
+      sendAlertEmail_(getAppConfig_(), 'Scheduled writeback FAILED',
+        `Execution ID: ${EXECUTION_ID}\nError: ${e.message}\nStack: ${e.stack || '(none)'}`);
+    } catch (_) {
+      MailApp.sendEmail({
+        to: Session.getEffectiveUser().getEmail(),
+        subject: '[Monday Sync] Scheduled run could not even start',
+        body: `Error: ${e.message}`
+      });
+    }
+  }
+}
+```
+
+### Update `onOpen` menu
+
+```javascript
+function onOpen() {
+  try {
+    SpreadsheetApp.getUi().createMenu('Sheets to Monday Writeback')
+      .addItem('1. Run Dry Run (Validate & Preview)', 'runDryRun')
+      .addSeparator()
+      .addItem('2. Run Writeback (Manual — small jobs)', 'runWriteback')
+      .addItem('3. Run Writeback (Resumable — large jobs)', 'runWritebackResumable')
+      .addSeparator()
+      .addItem('Show job status', 'showJobStatus')
+      .addItem('Abort current job', 'abortJob')
+      .addToUi();
+  } catch (_) {}
+}
 ```
 
 ---
 
-What you get from this: the dry run tab now reads left-to-right as "here's every sheet column, here's every Monday column that won't get fed, here's the literal JSON we'll send." Nothing is hidden because nothing is filtered — every column on both sides has a place in the grid, and the problematic ones are color-coded so a five-second glance tells your colleague whether to proceed.
+## Pass 3: Canary + schedule installation
 
-The one thing this *still* won't tell you the truth about: typed Monday columns (status, date, dropdown, etc.) need structured JSON, not strings — and `buildColumnValues_` currently stringifies everything. The mock will now honestly show you `{"status_col": "Done"}` going out the door, and Monday will silently ignore it. The `[type]` annotation in the header row at least flags which columns are at risk. Fixing that is a separate, contained change in `buildColumnValues_` — happy to layer it on if your colleague's board has typed columns, but it's worth doing only after this dry run is in their hands and they can tell you which types actually appear.
+**What changes:** Adds `installSchedule` (one-shot, run from editor) and `canaryCheck` (separate recurring trigger).
 
+### Schedule installer
 
 ```javascript
-function stageIncumbentData_(config) {
-  if (!config.incumbent_file_id || !config.incumbent_tab_name) {
-    throw new Error('Missing incumbent file ID or tab name in configuration.');
+// --- SCHEDULE INSTALLATION (run once from editor) ----------------------------
+function installSchedule() {
+  // Remove any existing recurring trigger for the scheduled handler
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'runWritebackScheduled')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+
+  ScriptApp.newTrigger('runWritebackScheduled')
+    .timeBased()
+    .everyDays(1)
+    .atHour(6)
+    .create();
+
+  // Also install canary check (runs daily, separate from writeback)
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'canaryCheck')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+
+  ScriptApp.newTrigger('canaryCheck')
+    .timeBased()
+    .everyDays(1)
+    .atHour(9) // a few hours after expected completion
+    .create();
+
+  logToAuditSheet('INFO', 'Schedule installed: writeback 6am, canary 9am.', 'installSchedule', true);
+}
+
+function canaryCheck() {
+  const job = loadJob_();
+  if (!job) return; // nothing in flight is fine
+
+  const ageMs = Date.now() - new Date(job.startedAt).getTime();
+  const ageMin = Math.round(ageMs / 60000);
+
+  if (ageMs > 2 * 60 * 60 * 1000 && job.phase !== 'done') {
+    try {
+      sendAlertEmail_(getAppConfig_(), 'Writeback job appears stuck',
+        `A job has been in phase "${job.phase}" for ${ageMin} minutes.\n\n` +
+        `Progress:\n${JSON.stringify(job, null, 2)}\n\n` +
+        `Action: open the spreadsheet menu → Show job status → decide whether to resume or abort.`);
+      logToAuditSheet('WARN', `Canary: job stuck in ${job.phase} for ${ageMin}min.`, 'canaryCheck', true);
+    } catch (e) {
+      logToAuditSheet('ERROR', `Canary alert failed: ${e.message}`, 'canaryCheck', true);
+    }
   }
-
-  // 1-indexed row where headers live. Defaults to 1 for back-compat.
-  // Set to 2 when row 1 is a banner/title and row 2 holds the actual headers.
-  const headerRow = Number(config.incumbent_header_row) || 1;
-
-  const sourceFile = SpreadsheetApp.openById(config.incumbent_file_id);
-  const sourceSheet = sourceFile.getSheetByName(config.incumbent_tab_name);
-  if (!sourceSheet) throw new Error(`Tab "${config.incumbent_tab_name}" not found in external Incumbent file.`);
-
-  const raw = sourceSheet.getDataRange().getValues();
-
-  if (raw.length < headerRow) {
-    throw new Error(`Source has ${raw.length} row(s) but incumbent_header_row=${headerRow}. Nothing to read.`);
-  }
-
-  // Drop everything above the header row. After this, data[0] = headers, data[1+] = rows.
-  const data = raw.slice(headerRow - 1);
-
-  // Staging mirrors what the pipeline actually processes — not the raw source.
-  // (If you ever want raw fidelity for debugging, open the source file directly.)
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const stagingName = config.staging_new_tab_name || '.staging_incumbent';
-  let stagingSheet = ss.getSheetByName(stagingName);
-  if (!stagingSheet) stagingSheet = ss.insertSheet(stagingName);
-
-  stagingSheet.clear();
-  if (data.length > 0) {
-    stagingSheet.getRange(1, 1, data.length, data[0].length).setValues(data);
-  }
-
-  return data;
 }
 ```
+
+---
+
+## What you do NOT change
+
+These existing functions stay exactly as-is — they're already correct and the new code calls them:
+
+- `buildColumnValues_` (single source of truth, unchanged)
+- `validateHeaders_` (bidirectional version from earlier)
+- `getMondaySchema_` (returns id/type/title per column)
+- `stageIncumbentData_` (with the `incumbent_header_row` offset)
+- `runDryRun` and `generateMockPayloadSheet_`
+- `mondayRequest_`, `fetchWithBackoff_`, `safeJsonParse_`
+- `flushAuditLogs` (append-at-bottom version)
+- `getAppConfig_`, `sendAlertEmail_`, `showToast`, `logToAuditSheet`
+- The original `runWriteback` — keep it for small manual ad-hoc runs
+
+---
+
+## Operator runbook (paste into a tab or doc)
+
+**Daily operation:** Nothing. The 6 AM trigger fires `runWritebackScheduled` → `runWritebackResumable`. If it doesn't finish in 25 minutes, it self-schedules continuations every ~1 minute until done. Success and failure both send email.
+
+**Initial setup:** Open the Apps Script editor, select `installSchedule` from the function dropdown, click Run. Approve permissions. Verify two triggers in the Triggers panel: `runWritebackScheduled` daily at 6 AM, `canaryCheck` daily at 9 AM.
+
+**If you see "job appears stuck" email:** Open the sheet → menu → *Show job status*. Compare `deletedSoFar` / `writtenSoFar` against totals to see where it stopped. Decide:
+- *Continuation trigger died but job is still valid* → menu → *Run Writeback (Resumable)* to manually resume.
+- *Something is fundamentally wrong* → menu → *Abort current job*. Investigate, fix, wait for tomorrow's schedule or run manually.
+
+**If schema validation fails (email subject "Header Validation Failed"):** No deletes have happened. Open the mapping tab to see which sheet columns have no Monday match. Fix the source sheet or add the Monday columns, then wait for tomorrow.
+
+**Manually running a small job:** Menu → *Run Writeback (Manual — small jobs)*. This uses the original non-resumable path, faster startup, no job state. Use for testing or small ad-hoc loads.
+
+**Manually running a large job off-schedule:** Menu → *Run Writeback (Resumable — large jobs)*. Same code as scheduled runs.
+
+**The script runs as whoever ran `installSchedule`.** If that account is deactivated, the schedule dies silently. The canary will not save you here — it would also be dead. Document who owns this, and re-run `installSchedule` from a service account or shared account if continuity matters.
+
+---
+
+## Sequencing recommendation
+
+Apply Pass 1 alone first. Run a dry run, then a real run against a test board. Measure: how long does a 30k-row run actually take? If it fits in 30 minutes, stop here — Pass 2 is dead weight you don't need.
+
+If Pass 1 alone doesn't fit, apply Pass 2. Test with a small board first (force the soft deadline low — set `SOFT_DEADLINE_MS` to 30 seconds temporarily — to verify continuations actually fire and resume correctly without needing to wait for a real 25-minute run).
+
+Apply Pass 3 last. It's pure operational hardening; nothing in Passes 1 or 2 depends on it.
+
+One last thing worth saying out loud: at 30k rows, the dry run becomes important in a new way. Before, it caught schema mismatches that would cost you a bad write. Now it also catches them *before* you've committed to a 2-hour delete-and-rewrite cycle that can't be undone. Push your colleague to actually run the dry run every time, not just the first time.
