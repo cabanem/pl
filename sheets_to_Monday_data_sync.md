@@ -1,7 +1,3 @@
-Below is the full set of changes, organized into three sequenced passes so you can apply and test incrementally. Each pass stands on its own — you can stop after any pass and have a working, improved script.
-
----
-
 ## Pass 1: Batched API calls (biggest immediate win)
 
 **What changes:** `truncateMondayBoard_` and `writeToMonday_` get replaced with batched versions. Adds one new helper `deleteBatch_`.
@@ -614,3 +610,33 @@ If Pass 1 alone doesn't fit, apply Pass 2. Test with a small board first (force 
 Apply Pass 3 last. It's pure operational hardening; nothing in Passes 1 or 2 depends on it.
 
 One last thing worth saying out loud: at 30k rows, the dry run becomes important in a new way. Before, it caught schema mismatches that would cost you a bad write. Now it also catches them *before* you've committed to a 2-hour delete-and-rewrite cycle that can't be undone. Push your colleague to actually run the dry run every time, not just the first time.
+
+
+
+```javascript
+SpreadsheetApp.getUi().alert(
+  '⚠️ Dry run complete — review required',
+  `${validation.missing.length} sheet column(s) have no match in Monday and will be DROPPED if you proceed:\n` +
+  `  • ${validation.missing.join('\n  • ')}\n\n` +
+  `${validation.unmatchedMonday.length > 0
+    ? `${validation.unmatchedMonday.length} Monday column(s) have no source in the sheet and will be BLANK after writeback.\n\n`
+    : ''}` +
+  `No data was changed in Monday.\n\n` +
+  `Next step: review the mapping tab (now open) and either fix the sheet headers or accept the drops before running the writeback.`,
+  SpreadsheetApp.getUi().ButtonSet.OK
+);
+```
+
+```javascript
+const unmatched = validation.unmatchedMonday.length;
+SpreadsheetApp.getUi().alert(
+  unmatched > 0 ? '✅ Dry run complete — minor warnings' : '✅ Dry run complete',
+  `All ${Object.keys(validation.mapping).length - 1} mapped sheet column(s) will write successfully.\n\n` +
+  `${unmatched > 0
+    ? `Note: ${unmatched} Monday column(s) have no sheet source and will be BLANK after writeback. This is expected if those columns are managed in Monday directly.\n\n`
+    : ''}` +
+  `No data was changed in Monday.\n\n` +
+  `The ".dry_run_payload" tab (now open) shows the exact JSON each row will send.`,
+  SpreadsheetApp.getUi().ButtonSet.OK
+);
+```
