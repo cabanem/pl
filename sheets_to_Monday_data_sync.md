@@ -240,3 +240,43 @@ const mockSheet = generateMockPayloadSheet_(data, validation.mapping, mondaySche
 What you get from this: the dry run tab now reads left-to-right as "here's every sheet column, here's every Monday column that won't get fed, here's the literal JSON we'll send." Nothing is hidden because nothing is filtered — every column on both sides has a place in the grid, and the problematic ones are color-coded so a five-second glance tells your colleague whether to proceed.
 
 The one thing this *still* won't tell you the truth about: typed Monday columns (status, date, dropdown, etc.) need structured JSON, not strings — and `buildColumnValues_` currently stringifies everything. The mock will now honestly show you `{"status_col": "Done"}` going out the door, and Monday will silently ignore it. The `[type]` annotation in the header row at least flags which columns are at risk. Fixing that is a separate, contained change in `buildColumnValues_` — happy to layer it on if your colleague's board has typed columns, but it's worth doing only after this dry run is in their hands and they can tell you which types actually appear.
+
+
+```javascript
+function stageIncumbentData_(config) {
+  if (!config.incumbent_file_id || !config.incumbent_tab_name) {
+    throw new Error('Missing incumbent file ID or tab name in configuration.');
+  }
+
+  // 1-indexed row where headers live. Defaults to 1 for back-compat.
+  // Set to 2 when row 1 is a banner/title and row 2 holds the actual headers.
+  const headerRow = Number(config.incumbent_header_row) || 1;
+
+  const sourceFile = SpreadsheetApp.openById(config.incumbent_file_id);
+  const sourceSheet = sourceFile.getSheetByName(config.incumbent_tab_name);
+  if (!sourceSheet) throw new Error(`Tab "${config.incumbent_tab_name}" not found in external Incumbent file.`);
+
+  const raw = sourceSheet.getDataRange().getValues();
+
+  if (raw.length < headerRow) {
+    throw new Error(`Source has ${raw.length} row(s) but incumbent_header_row=${headerRow}. Nothing to read.`);
+  }
+
+  // Drop everything above the header row. After this, data[0] = headers, data[1+] = rows.
+  const data = raw.slice(headerRow - 1);
+
+  // Staging mirrors what the pipeline actually processes — not the raw source.
+  // (If you ever want raw fidelity for debugging, open the source file directly.)
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const stagingName = config.staging_new_tab_name || '.staging_incumbent';
+  let stagingSheet = ss.getSheetByName(stagingName);
+  if (!stagingSheet) stagingSheet = ss.insertSheet(stagingName);
+
+  stagingSheet.clear();
+  if (data.length > 0) {
+    stagingSheet.getRange(1, 1, data.length, data[0].length).setValues(data);
+  }
+
+  return data;
+}
+```
