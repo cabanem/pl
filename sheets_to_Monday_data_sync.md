@@ -367,3 +367,138 @@ The `fetch_job_status` field selection — I asked for `state`, `error`, `rows_p
 One small structural thing worth pointing out: I deliberately did not unify this with the existing job-state model from Pass 2. The ingest path's "job" lives on Monday's side and only needs a `job_id` string to resume; the resumable batched path's "job" lives in your Script Properties as a rich record with progress counters. Conflating them would add ceremony for no benefit. Two parallel paths, two parallel state mechanisms, each fit-for-purpose. If the ingest path proves itself over a few runs, you can eventually delete the resumable scaffolding entirely — but not before.
 
 The cleanest test sequence: introspect the enums first to fix the guesses, run with a 10-row test sheet against a throwaway board to verify the happy path, then run against a real board with a few hundred rows before pointing the daily schedule at it. Don't switch the scheduled trigger from `runWritebackScheduled` → `runWritebackIngest` until you've watched a full real-volume run complete end-to-end.
+
+
+
+```javascript
+function runWritebackGroupSwap() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return;
+
+  let config;
+  try {
+    config = getAppConfig_();
+    const boardId = config.monday_board_id;
+    const tag = `Target:${boardId} (group-swap)`;
+
+    // 1. Validate schema and stage data (existing functions)
+    const mondaySchema = getMondaySchema_(boardId);
+    const data = stageIncumbentData_(config);
+    if (!data || data.length <= 1) return;
+
+    const validation = validateHeaders_(data[0], mondaySchema, config, tag);
+    if (validation.missing.length > 0) {
+      throw new Error(`Schema mismatch: ${validation.missing.join(', ')}`);
+    }
+
+    // 2. Snapshot the OLD group IDs before doing anything destructive
+    const oldGroupIds = listWritebackGroupIds_(config, boardId, tag);
+    logToAuditSheet('INFO', `Found ${oldGroupIds.length} existing writeback group(s) to archive after success.`, tag);
+
+    // 3. Create new group with a stable, recognizable name
+    const newGroupTitle = `writeback_${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd_HHmm')}`;
+    const newGroupId = createGroup_(config, boardId, newGroupTitle, tag);
+    logToAuditSheet('INFO', `Created new group: ${newGroupId} ("${newGroupTitle}")`, tag);
+
+    // 4. Build CSV and ingest into the NEW group
+    const csv = buildIngestCsv_(data, validation.mapping, mondaySchema);
+    const jobInfo = startIngestJob_(config, boardId, newGroupId, 'INSERT_ONLY', tag);
+    uploadIngestCsv_(jobInfo.upload_url, csv, tag);
+    const finalStatus = pollIngestJob_(config, jobInfo.job_id, tag);
+
+    // 5. If ingest succeeded, archive (don't delete) the old groups
+    if (finalStatus.state === 'COMPLETED' || finalStatus.state === 'SUCCESS') {
+      for (const oldId of oldGroupIds) {
+        try {
+          archiveGroup_(config, boardId, oldId, tag);
+          logToAuditSheet('INFO', `Archived old group: ${oldId}`, tag);
+        } catch (e) {
+          // Don't fail the whole writeback for a stuck archive
+          logToAuditSheet('WARN', `Failed to archive old group ${oldId}: ${e.message}`, tag);
+        }
+      }
+      logToAuditSheet('SUCCESS', `Group-swap writeback complete. New group: ${newGroupId}`, tag, true);
+    } else {
+      // Ingest failed — clean up the new group so we don't leave half-populated junk
+      logToAuditSheet('ERROR', `Ingest failed (${finalStatus.state}). Cleaning up new group.`, tag);
+      try { deleteGroup_(config, boardId, newGroupId, tag); }
+      catch (e) { logToAuditSheet('WARN', `Cleanup of new group failed: ${e.message}`, tag); }
+      throw new Error(`Ingest failed: ${JSON.stringify(finalStatus)}`);
+    }
+
+  } catch (e) {
+    logToAuditSheet('ERROR', `Group-swap writeback failed: ${e.message}`, 'runWritebackGroupSwap', true);
+    sendAlertEmail_(config, 'Group-swap writeback FAILED', `Error: ${e.message}`);
+  } finally {
+    flushAuditLogs();
+    lock.releaseLock();
+  }
+}
+
+function listWritebackGroupIds_(config, boardId, tag) {
+  // Identify groups created by previous writebacks. Convention: title starts with "writeback_".
+  // This is brittle — if someone manually renames a group, we won't archive it. Worth it for safety:
+  // the alternative (archive ALL existing groups) would clobber any human-created groups.
+  const query = `query { boards(ids: ${boardId}) { groups { id title } } }`;
+  const res = mondayRequest_(query, tag);
+  const groups = res.data?.boards?.[0]?.groups || [];
+  return groups.filter(g => /^writeback_/.test(g.title)).map(g => g.id);
+}
+
+function createGroup_(config, boardId, title, tag) {
+  // Title must be escaped for GraphQL string literal
+  const escaped = title.replace(/"/g, '\\"');
+  const mutation = `mutation { create_group(board_id: ${boardId}, group_name: "${escaped}") { id } }`;
+  const res = mondayRequest_(mutation, tag);
+  const id = res.data?.create_group?.id;
+  if (!id) throw new Error(`create_group returned no id: ${JSON.stringify(res)}`);
+  return id;
+}
+
+function archiveGroup_(config, boardId, groupId, tag) {
+  const mutation = `mutation { archive_group(board_id: ${boardId}, group_id: "${groupId}") { id archived } }`;
+  const res = mondayRequest_(mutation, tag);
+  if (!res.data?.archive_group?.archived) {
+    throw new Error(`archive_group did not confirm archived=true: ${JSON.stringify(res)}`);
+  }
+}
+
+function deleteGroup_(config, boardId, groupId, tag) {
+  const mutation = `mutation { delete_group(board_id: ${boardId}, group_id: "${groupId}") { id deleted } }`;
+  const res = mondayRequest_(mutation, tag);
+  if (!res.data?.delete_group?.deleted) {
+    throw new Error(`delete_group did not confirm deleted=true: ${JSON.stringify(res)}`);
+  }
+}
+```
+
+```javascript
+function reapArchivedWritebackGroups() {
+  const config = getAppConfig_();
+  const boardId = config.monday_board_id;
+  const KEEP_DAYS = 14;
+
+  // Query includes archived groups — verify the exact argument name against current docs;
+  // historically this has been state: archived or similar.
+  const query = `query { boards(ids: ${boardId}) { groups(state: archived) { id title } } }`;
+  const res = mondayRequest_(query, `Reap:${boardId}`);
+  const groups = res.data?.boards?.[0]?.groups || [];
+
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - KEEP_DAYS);
+
+  for (const g of groups) {
+    const match = g.title.match(/^writeback_(\d{4}-\d{2}-\d{2})/);
+    if (!match) continue;
+    const groupDate = new Date(match[1]);
+    if (groupDate < cutoff) {
+      try {
+        deleteGroup_(config, boardId, g.id, `Reap:${boardId}`);
+        logToAuditSheet('INFO', `Reaped archived group ${g.id} (${g.title})`, 'reapArchivedWritebackGroups');
+      } catch (e) {
+        logToAuditSheet('WARN', `Failed to reap ${g.id}: ${e.message}`, 'reapArchivedWritebackGroups');
+      }
+    }
+  }
+}
+```
