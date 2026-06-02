@@ -18,7 +18,8 @@ def main(input):
         - status                <- 2992c4e8... column   (optional; only if you filter)
 
     Declare output:
-      options (list of: label [string], value [string], has_request [boolean])
+      options (list of: label [string], value [string],
+               supplier_request_id [string], has_request [boolean])
       count   (integer)
     """
     requests = input.get('requests') or []
@@ -46,6 +47,7 @@ def main(input):
         options.append({
             'label': name_by_id.get(sid) or sid,
             'value': rid,
+            'supplier_request_id': rid,
             'has_request': True,
         })
 
@@ -64,6 +66,7 @@ def main(input):
         options.append({
             'label': s.get('supplier_name') or sid,
             'value': value,
+            'supplier_request_id': '',
             'has_request': False,
         })
 
