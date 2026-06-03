@@ -1,265 +1,255 @@
-# TPL-02 Repair Spec — Advisory Validation Resolver
+# TPL-02 Reorganization Spec — Plan / Render Split in a Single Blob
 
-*Replaces the dead `_build_type_validation` path; collapses the two conflicting `data_format` readers into one; routes the shapes Excel can't block to instruction hints. Implements the follow-ups in ADR-NNNN (template advisory / server authoritative).*
-
----
-
-## Summary
-
-TPL-02's field-level validation was written against a `data_format`-as-dict schema the pipeline never produces, and branched on `data_type` values (`"number"`, `"text"`) that don't exist in the real vocabulary. The result: of the 27 non-dropdown fields in the current canonical model, only the 4 date fields received any in-cell validation; numbers, currency, and percentages received none, and the `email address` shape was neither blocked nor hinted.
-
-This repair makes TPL-02 emit the **strongest advisory check Excel can honestly express** for each field, derived from a **single** interpretation of `data_format`, and surfaces the inexpressible shapes (email, and later regex/uniqueness/cross-field) as **instruction hints**. The server (VAL-01 `validate_upload`) remains the sole authority; nothing here is or pretends to be a gate.
-
-**Proven effect against `canonical_model-2.json`:** in-cell numeric/date blocks rise from 4 fields to 16 (the integer, 9 percentages, 2 currencies, 4 dates); currency gains display formatting it never had; the email field gains a hint. No regressions to the dropdown paths.
+*Structural refactor only. No behavior changes: the same workbook comes out. This reorganizes the existing functions into a decide-phase and a render-phase within one Workato Python code field, and replaces two informal dicts with explicit records.*
 
 ---
 
-## What changes (and why)
+## What the deployment constraints dictate
 
-1. **Vocabulary fix.** Numeric detection now matches the real primitives (`integer`, `float (2)`) *and* the numeric shapes (`currency`, `percentage`). This matters because `currency` carries `data_type: "string"` in the model — its numeric-ness lives in the *shape*, exactly as VAL-01's `check_data_format` treats it.
-2. **Single `data_format` reader.** The dead `_parse_data_format` (dict/JSON reader) is deleted. One normalized label feeds both the DV resolver and the display-format function. No more two-readers-that-disagree.
-3. **Honest advisory scope.** Numbers/dates get native in-cell blocks. Email gets a hint. Regex/uniqueness/cross-field get nothing in-cell by design (Excel can't, and the server already enforces).
+From the Workato "Execute Python code" action docs:
 
----
+- **One `main(input)`, one dict parameter, helpers live at module level in the same code field.** No `import` of sibling modules (user-provided libraries aren't supported). → The *only* organizing mechanism is intra-file: section banners, source ordering, and records. The blob is the unit; source order is the reader's only map.
+- **Python 3.9+** → `@dataclass` (stdlib since 3.7) is available. Use `Optional[...]` from `typing`, not `X | None` (3.10+).
+- **1 MB max code-field size** → not binding (current file ≈ 25 KB). Don't optimize for it.
 
-## Scope & non-goals
-
-- **In scope now:** type-level numeric and date blocks; currency/percentage/date display formats; the email instruction hint; removal of the dead reader.
-- **Deferred (not parsed here):** length / numeric-range / date-range *bounds*. All three `*_field_validation` columns are `null` in the current config. When the PRV chain emits **resolved structured bounds** at config-freeze, tighten the resolver in one place (see *Forward path*). The template never parses the raw analyst interval notation — that would re-create the server/template drift this design exists to prevent.
-- **Explicit non-goal:** custom Excel "is-this-an-email / phone" formulas. They fail silently on paste and break on perpetual-license Excel (per ADR evidence). Rejected as false confidence.
+Net: the refactor is sectioning + a decide/render split + two dataclasses. Nothing more.
 
 ---
 
-## The edits
+## Section map (top → bottom of the blob, in `main`'s execution order)
 
-All edits are surgical. Apply in order.
-
-### Edit 1 — DELETE the dead reader
-
-Remove `_parse_data_format` entirely. It is referenced only by `_build_type_validation`, which Edit 4 replaces.
-
-```python
-# DELETE this whole function:
-def _parse_data_format(field):
-    """Normalise data format to a dict."""
-    raw = field.get("data_format") or {}
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw) if raw.strip() else {}
-        except (ValueError, TypeError):
-            return {}
-    return raw
+```
+# 1. IMPORTS
+# 2. CONSTANTS & STYLES            (DATA_ROWS, *_ROW, fonts/fills/borders, NAMED_RANGE_PREFIX)
+# 3. ERROR TYPE                    (BuildError)
+# 4. SMALL HELPERS                 (_is_truthy, _format_label, _safe_identifier)
+# 5. SANITIZATION INVARIANT  ⚠     (the coupled pair — see banner below)
+# 6. RECORD TYPES                  (ReferenceLayout, FieldPlan)
+# 7. PLAN PHASE  (decide)          (interpret config → records; NO openpyxl writes)
+# 8. RENDER PHASE (emit)           (records → workbook; NO decisions)
+# 9. OUTPUT HELPERS                (_serialize_to_bytes, _build_filename, _empty_variant_outcome, _require_sheet_name)
+# 10. MAIN                         (parse → plan → render → serialize)
 ```
 
-### Edit 2 — ADD the single label normalizer
-
-Place near the other small helpers (e.g. just above `_parse_data_format`'s old location, or beside `_safe_identifier`).
+The one section that earns a loud banner is the sanitization invariant — it's the highest-risk unit in the file (a bug there silently corrupts dropdowns, which has bitten before):
 
 ```python
-def _format_label(field):
-    """Normalized data_format label (lowercased, trimmed); '' when absent.
-    The single source of truth for interpreting the analyst's shape dropdown."""
-    return str(field.get("data_format") or "").strip().lower()
+# ============================================================================
+# SANITIZATION INVARIANT — load-bearing, do not edit one half alone
+# ----------------------------------------------------------------------------
+# _sanitize_for_named_range (Python side) and _build_indirect_formula
+# (Excel SUBSTITUTE side) MUST apply the same (char -> replacement) map, both
+# derived from _compute_substitutions over the SAME parent values. If they
+# drift, dependent dropdowns resolve to the wrong named range and silently
+# show the wrong options. Change both halves together or neither.
+# ============================================================================
 ```
 
-### Edit 3 — REPLACE the display-format reader
+---
 
-Replace `_excel_number_format` with `_display_number_format` (clearer name, same call site shape, no dependency on the deleted reader). Then update its one caller.
+## Record types (Section 6)
+
+Two dataclasses replace the two informal dicts. They are the contract between plan and render.
 
 ```python
-def _display_number_format(field):
-    """
-    DISPLAY (number) format for a column, from the single data_format label.
-    Display only: governs how Excel RENDERS a value — never what is accepted
-    (that is the DV) nor what the server ingests (the stored value).
-    Returns an Excel format code or None.
-    """
-    label     = _format_label(field)
-    data_type = str(field.get("data_type") or "").strip().lower()
+from dataclasses import dataclass, field as dc_field
+from typing import Dict, List, Optional, Tuple
+from openpyxl.worksheet.datavalidation import DataValidation
 
-    if label.startswith("date") or data_type == "date":
-        m = _DATE_MASK.search(field.get("data_format") or "")
-        return m.group(1).strip().lower() if m else _DEFAULT_DATE_FORMAT
 
-    if label == "percentage":
-        m = _FLOAT_PREC.search(data_type)            # 'float (2)' -> 2
-        decimals = int(m.group(1)) if m else 2
-        return "0%" if decimals <= 0 else "0.{0}%".format("0" * decimals)
+@dataclass
+class ReferenceLayout:
+    """Placement + named ranges for the (veryHidden) Reference sheet.
+    Was the dict returned by _lay_out_reference."""
+    flat_columns: Dict[str, int]                       # lookup_name -> col_idx
+    dependent_columns: Dict[Tuple[str, str], int]      # (lookup_name, parent_value) -> col_idx
+    substitutions: List[Tuple[str, str]]               # the shared (char, replacement) map
+    defined_ranges: List[Tuple[str, str]]              # (range_name, range_ref)
 
-    if label == "currency":
-        return "#,##0.00"   # symbol intentionally omitted — locale/currency unknown;
-                            # cosmetic only, server is the authority for currency shape
 
-    return None
+@dataclass
+class FieldPlan:
+    """Everything the Data sheet needs for ONE column, decided once.
+    Replaces the per-field re-derivation scattered across the old
+    _write_data_header / _write_instruction_row / _apply_column_formats /
+    _apply_data_validations / _apply_protection loops."""
+    col_idx: int
+    col_letter: str
+    field_id: str
+    header_text: str                                   # display + " *" if required
+    is_required: bool
+    is_locked: bool
+    instruction_text: str                              # description + advisory hint
+    number_format: Optional[str] = None                # display mask, or None
+    data_validation: Optional[DataValidation] = None   # built in plan, attached in render
 ```
 
-In `_apply_column_formats`, update the call:
+Holding the `DataValidation` object on the plan is intentional and safe: `dv.add(cell_range)` only records the range string on the object, so the DV can be fully built during planning (no worksheet yet) and merely *attached* during render.
+
+---
+
+## Plan phase (Section 7) — decide, no writes
+
+`plan_fields` is the heart of the refactor: one loop, two passes. Pass 1 assigns columns and the static attributes; pass 2 builds validations, so a dependent dropdown can reference its parent's already-assigned column without rebuilding a `field_col_index` mid-loop.
 
 ```python
-    for col_idx, field in enumerate(fields, start=1):
-        code = _display_number_format(field)   # was: _excel_number_format(field)
-        if code is None:
+def plan_reference(lookups) -> ReferenceLayout:
+    # Body is the current _lay_out_reference, returning ReferenceLayout(**...)
+    # instead of a bare dict. Pure; no openpyxl.
+    ...
+
+
+def plan_fields(fields, lookups, layout: ReferenceLayout) -> List[FieldPlan]:
+    last_row = DATA_START_ROW + DATA_ROWS - 1
+
+    # ── Pass 1: columns + static attributes ──
+    plans: List[FieldPlan] = []
+    for col_idx, f in enumerate(fields, start=1):
+        display  = f.get("field_name", f.get("field_id", ""))
+        required = _is_truthy(f.get("required"))
+        plans.append(FieldPlan(
+            col_idx=col_idx,
+            col_letter=get_column_letter(col_idx),
+            field_id=f.get("field_id"),
+            header_text=display + (" *" if required else ""),
+            is_required=required,
+            is_locked=_is_truthy(f.get("locked")),
+            instruction_text=_instruction_text(f),
+            number_format=_display_number_format(f),
+        ))
+
+    field_col_index = {p.field_id: p.col_idx for p in plans}
+
+    # ── Pass 2: validations (may reference a parent column) ──
+    for plan, f in zip(plans, fields):
+        cell_range = "{0}{1}:{0}{2}".format(plan.col_letter, DATA_START_ROW, last_row)
+        plan.data_validation = _plan_validation(f, cell_range, field_col_index, lookups, layout)
+
+    return plans
+
+
+def _plan_validation(field, cell_range, field_col_index, lookups, layout) -> Optional[DataValidation]:
+    """The three branches moved verbatim (logic-wise) out of the old
+    _apply_data_validations: dependent dropdown (INDIRECT), flat dropdown
+    (named range), then _build_advisory_validation for type/format. Returns the
+    DV or None. This is the ONLY place field validation is decided."""
+    ...
+```
+
+Everything else in this section is existing code, relocated and pure: `_resolve_fields`, `_index_lookups`, `_display_number_format`, `_build_advisory_validation`, `_advisory_hint`, `_instruction_text`.
+
+---
+
+## Render phase (Section 8) — emit, no decisions
+
+The five independent `fields` loops collapse into one walk over `plans`. The writers make no choices; every choice already lives on the plan.
+
+```python
+def render_data_sheet(data_ws, plans: List[FieldPlan]) -> None:
+    for p in plans:
+        # header
+        cell = data_ws.cell(row=HEADER_ROW, column=p.col_idx, value=p.header_text)
+        _format_header_cell(cell, p.is_required)
+        data_ws.column_dimensions[p.col_letter].width = max(len(p.header_text) + 4, 14)
+        # instruction banner
+        ic = data_ws.cell(row=INSTRUCTION_ROW, column=p.col_idx, value=p.instruction_text)
+        ic.font = _INSTRUCTION_FONT; ic.fill = _INSTRUCTION_FILL
+        ic.border = _INSTRUCTION_BORDER; ic.alignment = _INSTRUCTION_ALIGN
+        ic.protection = Protection(locked=True)
+        # display format
+        if p.number_format:
+            data_ws.column_dimensions[p.col_letter].number_format = p.number_format
+        # validation
+        if p.data_validation is not None:
+            data_ws.add_data_validation(p.data_validation)
+
+    data_ws.row_dimensions[INSTRUCTION_ROW].height = 56
+    data_ws.freeze_panes = "A{0}".format(DATA_START_ROW)
+
+
+def apply_protection(wb, data_ws, ref_ws, plans: List[FieldPlan]) -> None:
+    for p in plans:
+        if p.is_locked:
             continue
-        data_ws.column_dimensions[get_column_letter(col_idx)].number_format = code
+        data_ws.column_dimensions[p.col_letter].protection = Protection(locked=False)
+    data_ws.protection.sheet = True
+    ref_ws.protection.sheet = True
+    wb.security = WorkbookProtection(lockStructure=True)
 ```
 
-### Edit 4 — REPLACE the validation resolver
-
-Replace `_build_type_validation` with `_build_advisory_validation`. It runs only for non-lookup fields (the dropdown paths in `_apply_data_validations` `continue` before reaching it).
-
-```python
-def _build_advisory_validation(field, cell_range, display):
-    """
-    Strongest *advisory* in-cell check Excel can express for a non-lookup field.
-    Returns a DataValidation or None.
-
-    The authority for every field constraint is the server (VAL-01
-    validate_upload). This layer exists only to block easy mistakes at type-time
-    and cut reject/resubmit round-trips. It deliberately does NOT attempt
-    email / regex / uniqueness / cross-field shapes — Excel cannot block those
-    in-cell, so they are surfaced as instruction hints (see _advisory_hint) and
-    enforced server-side.
-
-    Numeric-ness is driven by the *shape* as well as the primitive type, because
-    'currency' carries data_type 'string' in the model yet is numeric in
-    practice (mirrors VAL-01's check_data_format).
-
-    Range/length bounds are intentionally NOT parsed here. When the PRV chain
-    emits resolved structured bounds at config-freeze, tighten this in ONE place
-    (see the Forward path section) so template and server never drift.
-    """
-    label     = _format_label(field)
-    data_type = str(field.get("data_type") or "").strip().lower()
-    allow_blank = not _is_truthy(field.get("required"))
-    top_left  = cell_range.split(":")[0]
-
-    is_numeric = data_type in ("integer", "float (2)") or label in ("currency", "percentage")
-    is_integer = data_type == "integer"
-    is_date    = data_type == "date" or label.startswith("date")
-
-    # ── Numeric (incl. currency / percentage) ──
-    if is_numeric:
-        if is_integer:
-            formula = "AND(ISNUMBER({0}), {0}=INT({0}))".format(top_left)
-        else:
-            formula = "ISNUMBER({0})".format(top_left)
-        dv = DataValidation(type="custom", formula1=formula, allow_blank=allow_blank)
-        dv.error = "{0} must be a number.".format(display)
-        dv.errorTitle = "Invalid value"
-        dv.showErrorMessage = True
-        dv.add(cell_range)
-        return dv
-
-    # ── Date ──
-    if is_date:
-        dv = DataValidation(
-            type="date", operator="greaterThanOrEqual",
-            formula1="1900-01-01", allow_blank=allow_blank,
-        )
-        dv.error = "{0} must be a valid date.".format(display)
-        dv.errorTitle = "Invalid date"
-        dv.showErrorMessage = True
-        dv.add(cell_range)
-        return dv
-
-    # ── string / email / boolean / unshaped ──
-    # No in-cell block. Guidance (if any) goes to the instruction banner.
-    return None
-```
-
-In `_apply_data_validations`, update the final branch's call:
-
-```python
-        # ── Type / format constraint (advisory; authority is VAL-01) ──
-        dv = _build_advisory_validation(field, cell_range, display)   # was: _build_type_validation(...)
-        if dv is not None:
-            data_ws.add_data_validation(dv)
-```
-
-### Edit 5 — ADD hints, compose the instruction banner
-
-Add two helpers, then change one line in `_write_instruction_row`.
-
-```python
-def _advisory_hint(field):
-    """
-    Optional human-readable guidance appended to the locked instruction banner
-    for constraints Excel cannot block in-cell. Keep hints generic and
-    parse-free; the analyst's description stays the primary guidance lever, and
-    VAL-01 stays the authority. Extend by adding cases.
-    """
-    label = _format_label(field)
-    if label == "email address":
-        return "Must be a valid email address (e.g. name@example.com)."
-    # Future: a field carrying field_input_validation (regex) has no safe generic
-    # hint — the raw pattern is meaningless to a supplier. Rely on the analyst's
-    # description to state the expected format in words.
-    return None
-
-
-def _instruction_text(field):
-    """Instruction-banner text: analyst description, plus any advisory hint."""
-    parts = []
-    desc = field.get("description")
-    if desc and str(desc).strip():
-        parts.append(str(desc).strip())
-    hint = _advisory_hint(field)
-    if hint:
-        parts.append(hint)
-    return "\n".join(parts)
-```
-
-In `_write_instruction_row`, change only the cell value:
-
-```python
-        cell = data_ws.cell(
-            row=INSTRUCTION_ROW, column=col_idx, value=_instruction_text(field)
-        )                                    # was: value=field.get("description") or ""
-```
-
-*(The banner row height is 56 with wrap; the one email hint adds a line and fits. If you later add longer hints, bump `row_dimensions[INSTRUCTION_ROW].height`.)*
+`render_reference_sheet` (= current `_write_reference_content`), `register_defined_names` (= `_register_defined_names`), and `_create_workbook` move here unchanged.
 
 ---
 
-## Verification (run against `canonical_model-2.json`)
+## Main (Section 10) — the five-line story
 
-Outcome by field class. "Before" = current code; "After" = this repair.
+```python
+def main(input):
+    model        = json.loads(input["canonical_model_json"])
+    sheet_name   = _require_sheet_name(model)
+    variant_id   = input.get("variant_id") or None
+    customer     = input["customer_name"]
+    variant_name = input.get("variant_name") or "base"
 
-| Field class (count) | Before | After |
+    # ── PLAN (decide) ──
+    fields = _resolve_fields(model, variant_id)
+    if not fields:
+        return _empty_variant_outcome()
+    needed  = {f["lookup_name"] for f in fields if f.get("lookup_name")}
+    lookups = _index_lookups(model.get("cfg_lookups", []), needed)
+    layout  = plan_reference(lookups)
+    plans   = plan_fields(fields, lookups, layout)
+
+    # ── RENDER (emit) ──
+    wb, data_ws, ref_ws = _create_workbook(sheet_name)
+    render_data_sheet(data_ws, plans)
+    render_reference_sheet(ref_ws, lookups, layout)
+    register_defined_names(wb, layout)
+    apply_protection(wb, data_ws, ref_ws, plans)
+
+    # ── SERIALIZE ──
+    file_bytes = _serialize_to_bytes(wb)
+    return {
+        "status": "success",
+        "file_content": base64.b64encode(file_bytes).decode("ascii"),
+        "suggested_filename": _build_filename(customer, variant_name),
+        "metadata": {
+            "sheet_names": [sheet_name, REFERENCE_SHEET_NAME],
+            "byte_size": len(file_bytes),
+            "row_count": 0,
+            "field_count": len(plans),
+            "locked_field_count": sum(1 for p in plans if p.is_locked),
+        },
+        "error": None,
+    }
+```
+
+---
+
+## Migration map (it's mostly *moving* code)
+
+| Current function | New home | Change |
 |---|---|---|
-| Plain `string`, no shape (8) | none | none (correct — free text) |
-| `string` / **email address** (1) | none | no DV + **email hint** in banner |
-| **integer** (1) | none | custom `AND(ISNUMBER, =INT)` |
-| `float (2)` / **percentage** (9) | none | custom `ISNUMBER` + `0.00%` display |
-| `string`/`float (2)` / **currency** (2) | none | custom `ISNUMBER` + `#,##0.00` display |
-| **date** / date mask (4) | weak date DV | date DV + `yyyy-mm-dd` display |
-| Flat dropdown (`lookup_name`) (7) | list DV | list DV (unchanged) |
-| Dependent dropdown (5) | INDIRECT list DV | INDIRECT list DV (unchanged) |
-
-Totals: in-cell DV coverage on non-lookup fields **4 → 16**; display formats **11 → 15** (currency added); hints **0 → 1**. Dropdown paths untouched.
-
----
-
-## Sidebar finding (separate from this spec)
-
-Two fields — **"Active worker?"** and **"MSP/Outsorced worker"** — carry `data_format: "dropdown"` but `lookup_name: null` and `depends_on_lookup_name: null`. They therefore get **no list anywhere**: not in the template (no lookup to bind), and not at upload (VAL-01's membership check #9 only fires when `lookup_name` is present). They behave as free-text fields wearing a dropdown label.
-
-This is a **config/authoring gap**, not a shape gap, so it's deliberately out of this resolver. The right home is the connector's `validate_config` — a "format is `dropdown(/dependent)` but no lookup is bound" check, surfaced to the analyst at authoring time. Flagging for the backlog.
+| `_is_truthy`, `_safe_identifier`, `_format_label` | §4 Helpers | none |
+| `_compute_substitutions`, `_sanitize_for_named_range`, `_build_indirect_formula`, `_named_range_name` | §5 Sanitization (bannered) | none — just isolated |
+| `_lay_out_reference` | §7 → `plan_reference` | returns `ReferenceLayout` not dict |
+| `_resolve_fields`, `_index_lookups` | §7 Plan | none |
+| `_display_number_format`, `_build_advisory_validation`, `_advisory_hint`, `_instruction_text` | §7 Plan | none (already from repair spec) |
+| *new* `plan_fields`, `_plan_validation` | §7 Plan | new — absorb the per-field derivations + the DV branches from `_apply_data_validations` |
+| `_create_workbook` | §8 Render | none |
+| `_write_data_header` + `_write_instruction_row` + `_apply_column_formats` + DV-attach loop | §8 → `render_data_sheet` | **merged** into one loop over plans |
+| `_format_header_cell` | §8 Render | none |
+| `_write_reference_content` | §8 → `render_reference_sheet` | rename |
+| `_register_defined_names` | §8 → `register_defined_names` | rename |
+| `_apply_protection` | §8 → `apply_protection` | reads `plan.is_locked` |
+| `_serialize_to_bytes`, `_build_filename`, `_empty_variant_outcome`, `_require_sheet_name` | §9 Output | none |
+| `_parse_data_format` | — | already deleted (repair spec) |
+| `_date_format_code`, `_percent_format_code` | — | delete if confirmed dead |
 
 ---
 
-## Forward path
+## Guardrail
 
-1. **Bounds at config-freeze (the one place to tighten).** When the PRV chain parses the `*_field_validation` interval notation once and writes resolved bounds onto each field, e.g.
-   ```
-   field["_resolved_bounds"] = {
-     "numeric": {"min": 0, "max": 100, "min_inclusive": True, "max_inclusive": False},
-     "date":    {"min": "2024-01-01", "max": None},
-     "length":  {"max": 255},
-   }
-   ```
-   add a single reader and consume it inside `_build_advisory_validation` (numeric → `decimal`/`whole` with operator; date → `date` with operator; otherwise `textLength`). Both VAL-01 and TPL-02 then read the same parsed result — no second parser, no drift. Insertion points are marked in the resolver's docstring.
+Stop at two dataclasses and the decide/render seam. This is a linear, single-purpose pipeline; a `TemplateBuilder` class, a stage registry, or pluggable validators would add ceremony without carrying state across methods — a namespace with extra steps. The whole complexity budget goes to (a) the plan/render split and (b) isolating the sanitization invariant. Everywhere else stays plain functions.
 
-2. **`check_data_format` fail-closed guard (server, ADR follow-up).** It must recognize every label the `_mapping` shape dropdown can emit (`email address`, all four date masks, `currency`, `percentage`). An unrecognized label currently fails *open* (silently passes). If emails aren't being caught in the pilot, this is where the bug lives — not the template.
-
-3. **Optional cleanup.** `_date_format_code` and `_percent_format_code` appear unused after this change; remove if confirmed dead.
+**Free win this unlocks:** `plan_fields` returns plain records, so the per-field decision is now assertable in a test without ever building a workbook — the same thing the verification harness did by hand becomes the natural unit test for TPL-02.
