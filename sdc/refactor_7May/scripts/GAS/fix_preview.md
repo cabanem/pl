@@ -1,142 +1,82 @@
-Here's the full change set, ordered so you can apply top to bottom and test once at the end. Three edits — one in each affected file. Two are the real fixes; the third is defense in depth. None require the raw log line, because I'm making them shape-tolerant so they're correct whether the recipe nests under `verdict` or surfaces flat.
+Both are pure relocations/additions — no logic rewrites.
 
-## Step 1 — `010_Preview.js`: stop "no file" from masquerading as a pass
+## Patch 1 — `007_Validate.js`
 
-This is the root cause of the preview-shows-validation-modal symptom. Split the one overloaded branch into two.
+Declare `verdict` from the parsed body. Find this guard block:
 
-**Find:**
 ```js
-    var verdict = p.verdict || {};
+    if (!response.parsed) {
+      var err = new Error('Validate endpoint returned a non-JSON body: ' +
+                          String(response.body || '').substring(0, 200));
+      err.stage = 'endpoint-response';
+      throw err;
+    }
 
-    // Invalid config: hand back the verdict in Validate's shape. No file.
-    if (p.ok === false || verdict.status === 'invalid' || verdict.status === 'fail' || !p.file_content) {
-      log('INFO', 'Preview: config not yet valid; returning verdict.');
-      return Result.ok({
-        flow: 'preview', correlationId: correlationId,
-        message: 'Configuration is not yet valid to build.',
-        data: { validationResult: verdict }
-      });
+    // Persist the verdict in-sheet so findings live in the workbook, not just the modal.
+```
+
+Replace it with (adds the `verdict` declaration after the guard):
+
+```js
+    if (!response.parsed) {
+      var err = new Error('Validate endpoint returned a non-JSON body: ' +
+                          String(response.body || '').substring(0, 200));
+      err.stage = 'endpoint-response';
+      throw err;
+    }
+
+    // Verdict may arrive nested under .verdict (preview/validate envelope) or at
+    // the top level. Mirrors ValidationReport._extractVerdict's nesting logic so
+    // the modal (showValidationResults_) and the in-sheet report agree on shape.
+    var verdict = (response.parsed.verdict && typeof response.parsed.verdict === 'object')
+      ? response.parsed.verdict
+      : response.parsed;
+
+    // Persist the verdict in-sheet so findings live in the workbook, not just the modal.
+```
+
+The existing `validationResult: verdict` in the `data` object now resolves. `ValidationReport.write` still takes `response.parsed` — it extracts the verdict internally, so nothing else changes.
+
+## Patch 2 — `010_Preview.js`
+
+Move the null guard above the debug block. Find:
+
+```js
+    log('INFO', 'Endpoint returned HTTP ' + response.statusCode);
+    var p = response.parsed;
+
+    // ############## DEBUGGING START ####################################################################
+    log('INFO', 'Preview raw: ok=' + p.ok + ' status=' + (p.verdict && p.verdict.status) + ' has_file=' + !!p.file_content + ' fields=' + JSON.stringify(Object.keys(p)));
+    log('INFO', 'Preview raw: ' + JSON.stringify(p));
+    log('INFO', 'Preview http: ' + response.statusCode);
+    // ############## DEBUGGING END ######################################################################
+
+    if (!p) {
+      var e1 = new Error('Preview endpoint returned a non-JSON body: ' +
+                         String(response.body || '').substring(0, 200));
+      e1.stage = 'endpoint-response'; throw e1;
     }
 ```
 
-**Replace with:**
-```js
-    var verdict = p.verdict || {};
+Replace with (guard first, then debug):
 
-    // Genuinely invalid config: hand back the verdict in Validate's shape. No file.
-    if (p.ok === false || verdict.status === 'invalid' || verdict.status === 'fail') {
-      log('INFO', 'Preview: config not yet valid; returning verdict.');
-      return Result.ok({
-        flow: 'preview', correlationId: correlationId,
-        message: 'Configuration is not yet valid to build.',
-        data: { validationResult: verdict }
-      });
+```js
+    log('INFO', 'Endpoint returned HTTP ' + response.statusCode);
+    var p = response.parsed;
+
+    if (!p) {
+      var e1 = new Error('Preview endpoint returned a non-JSON body: ' +
+                         String(response.body || '').substring(0, 200));
+      e1.stage = 'endpoint-response'; throw e1;
     }
 
-    // Config accepted, but no file came back. This is a BUILD error, not a
-    // validation problem — surface it as a failure so the container routes it
-    // to showResult_ instead of rendering a (passing) validation modal.
-    if (!p.file_content) {
-      var be = new Error(
-        'Preview endpoint accepted the config but returned no file_content. ' +
-        'This is a build error, not a validation problem. See _script_logs ' +
-        'for the raw endpoint response.'
-      );
-      be.stage = 'build';
-      throw be;
-    }
+    // ############## DEBUGGING START ####################################################################
+    log('INFO', 'Preview raw: ok=' + p.ok + ' status=' + (p.verdict && p.verdict.status) + ' has_file=' + !!p.file_content + ' fields=' + JSON.stringify(Object.keys(p)));
+    log('INFO', 'Preview raw: ' + JSON.stringify(p));
+    log('INFO', 'Preview http: ' + response.statusCode);
+    // ############## DEBUGGING END ######################################################################
 ```
 
-The only behavioral change: a result that used to slip through as `Result.ok` + passing verdict now throws into the existing `catch`, becomes `Result.fail`, and the container shows it via `showResult_` as "Template preview – failed at build." Your debug `log` lines above this still fire, so the raw response is still captured.
+The debug lines keep their visibility but now only run when there's a parsed body. On an empty/non-JSON response you'll get your intended "returned a non-JSON body" error (with the `response.body` substring) instead of a `TypeError`.
 
-## Step 2 — `main.gs`: make `showValidationResults_` tolerant of nesting
-
-This is the fix for the modal "always says passed / or doesn't appear." The template reads `data.template_errors` and `data.slot_warnings` at the top level; if you hand it an object that wraps those under `.verdict`, it silently renders "passed." Unwrap once.
-
-**Find:**
-```js
-function showValidationResults_(validationResult) {
-  var template  = HtmlService.createTemplateFromFile('validate_results');
-  template.data = validationResult;
-
-  var html = template.evaluate()
-    .setWidth(720)
-    .setHeight(520);
-
-  SpreadsheetApp.getUi().showModalDialog(html, 'Validation results');
-}
-```
-
-**Replace with:**
-```js
-function showValidationResults_(validationResult) {
-  var vr = validationResult || {};
-
-  // Tolerate both shapes: the verdict at the top level, or wrapped under
-  // .verdict. The template reads template_errors / slot_warnings at the top,
-  // so unwrap when they're one level down.
-  if (vr.verdict &&
-      vr.template_errors === undefined &&
-      vr.slot_warnings === undefined) {
-    vr = vr.verdict;
-  }
-
-  var template  = HtmlService.createTemplateFromFile('validate_results');
-  template.data = vr;
-
-  var html = template.evaluate()
-    .setWidth(720)
-    .setHeight(520);
-
-  SpreadsheetApp.getUi().showModalDialog(html, 'Validation results');
-}
-```
-
-## Step 3 — `main.gs`: tighten `previewTemplate` (defense in depth)
-
-With Step 1 in place this branch is already correct, but this makes the container itself refuse to show a passing modal for an empty result — so if the library ever regresses, the symptom can't come back silently.
-
-**Find:**
-```js
-  if (r.ok && r.data && r.data.fileContent) {
-    showTemplatePreview_(r.data);                        // valid: saved-to-Drive notice
-  } else if (r.ok && r.data && r.data.validationResult) {
-    showValidationResults_(r.data.validationResult);     // invalid: reuse Validate's modal
-  } else {
-    showResult_(r);                                      // hard failure
-  }
-```
-
-**Replace with:**
-```js
-  if (!r.ok) { showResult_(r); return; }
-
-  var d = r.data || {};
-  if (d.fileContent) {
-    showTemplatePreview_(d);                             // valid: download modal
-    return;
-  }
-
-  // Only show the validation modal when the verdict actually says invalid.
-  // A missing file with a passing/absent verdict is a build error, not a
-  // validation outcome.
-  var verdict = d.validationResult || {};
-  var status  = String(verdict.status || '').toLowerCase();
-  if (status === 'invalid' || status === 'fail') {
-    showValidationResults_(verdict);
-  } else {
-    showResult_(r);
-  }
-```
-
-## Then test, in this order
-
-First run **Validate configuration**. One of three things happens, and each tells you something specific:
-
-- *Modal opens with the right errors/warnings* — validate's shape matches the template, you're done.
-- *Plain alert "Validation – failed at endpoint/config…"* — the call itself is failing. The most likely cause given last session's rename is the `_developer_settings` row: confirm it's `apiPlatformToken`, not still `previewApiToken`. The alert text names the stage.
-- *Modal opens but always says "passed"* even on config you know is broken — the recipe's field names aren't `template_errors`/`slot_warnings`. Step 2's unwrap handles *nesting* but not *renaming*; if it's renaming, that's the one remaining thing I'd need the actual field names for.
-
-Then run **Preview template**. With the `veryhidden` build bug still outstanding you should now get the "failed at build" alert with a correlation ID — not a false "passed" modal. That's the correct behavior until the Workato-side `"veryHidden"` casing fix lands; once it does and a real file comes back, you'll get the download modal.
-
-The reason I can give you concrete steps without the log is that Steps 1–3 are correct for *both* response shapes — the only case they don't cover is the recipe using entirely different field names than the template expects, which is the one thing the log would disambiguate. If you hit that third bullet above, grab the `Preview raw:` line from `_script_logs` and I'll give you the exact field-name mapping.
+To confirm Patch 1 landed: re-run Validate against a config you know is well-formed. It should now reach the success Result and render the modal rather than failing at `unknown`. If validation still fails with a body-related message after this, that's the Workato side, not the script.
