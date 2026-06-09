@@ -12,8 +12,10 @@ Aligned to TPL-02 geometry:
     rows 3..N  = supplier data-entry rows
 
 Template fields with no seed column are left blank; seed columns with no template
-field are ignored. `hydrate_template` is Workato-agnostic and unit-testable; the
-entrypoint at the bottom is a thin adapter -- map it to your connector's I/O.
+field are ignored. Seeded cells reflect their column's configured protection and
+display format, so the seeded file is configured exactly like the blank template.
+`hydrate_template` is Workato-agnostic and unit-testable; the entrypoint at the
+bottom is a thin adapter -- map it to your connector's I/O.
 """
 
 import base64
@@ -70,17 +72,37 @@ def _decode_csv_text(content):
     return _to_bytes(content).decode("utf-8-sig")
 
 
-def _column_locked(ws, col_letter, default=False):
-    """Read a column's locked state from the loaded template so seeded cells can
-    inherit it. Defaults to editable (False): seed pre-fills editable fields, and
-    VAL-01 remains the authority on read-only fields regardless of cell locking."""
+# --- Column configuration (copied onto seeded cells so they reflect template) -
+def _column_protection(ws, col_letter):
+    """The template's configured protection for a column, copied onto seeded
+    cells so they reflect it exactly. openpyxl stamps a freshly-written cell with
+    the default (locked) style; copying the column's Protection makes the seeded
+    cell behave like an empty cell in that column under sheet protection. A column
+    the template never explicitly unlocked stays locked -- the protected-sheet
+    default -- so read-only fields are honored without us tracking read_only here."""
     try:
         dim = ws.column_dimensions.get(col_letter)
-        if dim is not None and dim.protection is not None and dim.protection.locked is not None:
-            return bool(dim.protection.locked)
+        prot = dim.protection if dim is not None else None
+        if prot is not None:
+            locked = prot.locked if prot.locked is not None else True
+            hidden = prot.hidden if prot.hidden is not None else False
+            return Protection(locked=locked, hidden=hidden)
     except Exception:
         pass
-    return default
+    return Protection()   # locked=True, hidden=False -> protected-sheet default
+
+
+def _column_number_format(ws, col_letter):
+    """The template's configured display format for a column (date / currency /
+    percentage in TPL-02). Inert for the text values we write, but copying it
+    keeps the seeded cell faithful to its column."""
+    try:
+        dim = ws.column_dimensions.get(col_letter)
+        if dim is not None and dim.number_format:
+            return dim.number_format
+    except Exception:
+        pass
+    return None
 
 
 # --- Pure core --------------------------------------------------------------
@@ -115,29 +137,37 @@ def hydrate_template(template_bytes, seed_csv_bytes, index_key, match_value):
         )
     ws = wb[DATA_ENTRY_SHEET]
 
-    # 3) Map seed key -> (column, letter, locked) by reading ONLY the row-1 header.
+    # 3) Map seed key -> (column, protection, number_format) by reading ONLY the
+    #    row-1 header. Protection/format are read from the template so seeded cells
+    #    reflect the column's configuration.
     col_for_key = {}
     for col in range(1, ws.max_column + 1):
         key = _field_key(ws.cell(row=HEADER_ROW, column=col).value)
         if key and key in key_to_header and key not in col_for_key:
             letter = get_column_letter(col)
-            col_for_key[key] = (col, letter, _column_locked(ws, letter))
+            col_for_key[key] = (
+                col,
+                _column_protection(ws, letter),
+                _column_number_format(ws, letter),
+            )
 
     writable = list(col_for_key.keys())                       # template column order
     skipped = [k for k in key_to_header if k not in col_for_key and k != index_norm]
 
-    # 4) Write matched rows. Skip empties (blank cells stay truly empty). Mirror
-    #    each column's locked state so seeded cells honor the template's
-    #    editable / read-only intent under sheet protection.
+    # 4) Write matched rows. Skip empties (blank cells stay truly empty). Stamp
+    #    each seeded cell with its column's protection and display format so it is
+    #    configured exactly like an empty cell in that column.
     for i, row in enumerate(matched):
         excel_row = DATA_START_ROW + i
         for key in writable:
-            col, letter, locked = col_for_key[key]
+            col, protection, number_format = col_for_key[key]
             value = row.get(key_to_header[key], "")
             if value is None or value == "":
                 continue
             cell = ws.cell(row=excel_row, column=col, value=value)
-            cell.protection = Protection(locked=locked)
+            cell.protection = protection
+            if number_format and number_format != "General":
+                cell.number_format = number_format
 
     # 5) Serialize back to XLSX bytes.
     buf = io.BytesIO()
