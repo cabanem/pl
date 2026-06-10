@@ -1,0 +1,5467 @@
+openapi: 3.1.0
+info:
+  title: SDC Platform — Workato Recipe Specification
+  version: 1.0.0
+  description: 'Machine- and human-readable specification of the Supplier Data Collection (SDC) Workato
+    application, derived directly from recipe JSON.
+
+
+    Entry points appear under `paths`: API Platform HTTP endpoints (`x-trigger-type: api_platform_http`,
+    secured by the API-TOKEN header) and Workato webhooks (`x-trigger-type: workato_webhook`, secured
+    by the webhook URL suffix). Other recipes are internal: callable recipe functions (invoked via `call_recipe`),
+    Workflow App functions (invoked by the WFA portal runtime; see `wfa_function_type` = generic / load_table
+    / load_dropdown), and data-table real-time triggers (`x-trigger-type: data_table_realtime`, fired
+    by row changes — see `trigger_table`). Every recipe is fully described under the `x-recipes` vendor
+    extension and shares request/response object schemas in `components/schemas`.
+
+
+    Covers all 43 supplied recipes (complete set). The call graph is closed except for one call in PRV-04
+    made against a raw workspace-local flow ID (`flow_id:2066426`, passing only template_version_id) that
+    cannot be resolved from recipe JSON and should be repackaged as a named reference. Two recipes share
+    the prefix WFA-13 (disambiguated with a `--<slug>` suffix, flagged `code_collision: true`); renumber
+    at source.
+
+
+    Note on columns: data-table actions reference columns by UUID only; column names live in the table
+    definition files (not in recipe JSON), so tables are documented by name + read/write/trigger access.'
+tags:
+- name: Provisioning
+- name: Validation & Preview
+- name: Canonical Model
+- name: Seed & Integration
+- name: Invitation
+- name: Upload & Intake
+- name: Review
+- name: State Machine
+- name: Supplier Lifecycle
+- name: Dashboard
+- name: Observability
+- name: Utilities
+- name: Workflow App (Portal)
+paths:
+  /sdc/provisioning:
+    post:
+      operationId: API-00
+      tags:
+      - Provisioning
+      summary: API-00 — Provisioning
+      security:
+      - ApiToken: []
+      x-path-source: API Platform collection (not in recipe JSON); path shown is indicative
+      x-recipe: '#/x-recipes/API-00'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/API-00_Request'
+      responses:
+        '504':
+          description: 504 - Gateway Timeout
+        '200':
+          description: 200 - OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_details:
+                    type: object
+                    properties:
+                      correlation_id: {}
+                      config_json_file_id: {}
+                      analyst_email: {}
+                      timestamp: {}
+                      payload_version: {}
+                  workato_job_url: {}
+                  send_invitations:
+                    type: object
+                    properties:
+                      ready: {}
+                  parse_summary:
+                    type: object
+                    properties:
+                      field_count: {}
+                      visible_field_count: {}
+                      rule_count: {}
+                      lookup_count: {}
+                      variant_count: {}
+                      supplier_count: {}
+                      user_count: {}
+                      error_translation_count: {}
+                      skipped_rows:
+                        type: object
+                        properties:
+                          fields: {}
+                          lookups: {}
+                          suppliers: {}
+                          users: {}
+                      warnings:
+                        type: object
+                        properties:
+                          sheet: {}
+                          row: {}
+                          issue: {}
+                  validate_summary:
+                    type: object
+                    properties:
+                      status: {}
+                      error_count: {}
+                      warning_count: {}
+                      checks:
+                        type: object
+                        properties:
+                          check_name: {}
+                          status: {}
+                          message: {}
+                      warnings:
+                        type: object
+                        properties:
+                          check_name: {}
+                          message: {}
+                          details:
+                            type: object
+                            properties:
+                              entity: {}
+                              name: {}
+                              issue: {}
+                          c_status: {}
+                  seed_data:
+                    type: object
+                    properties:
+                      required: {}
+                      ok: {}
+        '500':
+          description: 500 - Internal Server Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_details:
+                    type: object
+                    properties:
+                      correlation_id: {}
+                      config_json_file_id: {}
+                      analyst_email: {}
+                      timestamp: {}
+                      payload_version: {}
+                  workato_job_url: {}
+                  error_details:
+                    type: object
+                    properties:
+                      errored_action: {}
+                      errored_step: {}
+                      error_message: {}
+                      failed_recipe_url: {}
+        '400':
+          description: 400 - Bad Request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_details:
+                    type: object
+                    properties:
+                      correlation_id: {}
+                      config_json_file_id: {}
+                      analyst_email: {}
+                      timestamp: {}
+                      payload_version: {}
+                  workato_job_url: {}
+                  error_details:
+                    type: object
+                    properties:
+                      errored_action: {}
+                      errored_step: {}
+                      failed_recipe_url: {}
+                      error_message: {}
+  /sdc/preview-template:
+    post:
+      operationId: API-01
+      tags:
+      - Validation & Preview
+      summary: API-01 — Preview template
+      security:
+      - ApiToken: []
+      x-path-source: API Platform collection (not in recipe JSON); path shown is indicative
+      x-recipe: '#/x-recipes/API-01'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/API-01_Request'
+      responses:
+        '200':
+          description: 200 - OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {}
+                  verdict:
+                    type: object
+                    properties:
+                      status: {}
+                      error_count: {}
+                      warning_count: {}
+                      checks:
+                        type: object
+                        properties:
+                          check_name: {}
+                          c_status: {}
+                          message: {}
+                          details:
+                            type: object
+                            properties:
+                              entity: {}
+                              name: {}
+                              issue: {}
+                  file_content: {}
+                  suggested_filename: {}
+                  metadata:
+                    type: object
+                    properties:
+                      byte_size: {}
+                      sheet_names: {}
+                      field_count: {}
+                      row_count: {}
+        '400':
+          description: 400 - Bad Request
+  /sdc/validate-configuration:
+    post:
+      operationId: API-02
+      tags:
+      - Validation & Preview
+      summary: API-02 — Validate configuration
+      security:
+      - ApiToken: []
+      x-path-source: API Platform collection (not in recipe JSON); path shown is indicative
+      x-recipe: '#/x-recipes/API-02'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/API-02_Request'
+      responses:
+        '200':
+          description: 200 - OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {}
+                  verdict:
+                    type: object
+                    properties:
+                      error_count: {}
+                      warning_count: {}
+                      checks:
+                        type: object
+                        properties:
+                          check_name: {}
+                          c_status: {}
+                          message: {}
+                          details:
+                            type: object
+                            properties:
+                              entity: {}
+                              name: {}
+                              issue: {}
+                      status: {}
+        '400':
+          description: 400 - Bad Request
+  /webhooks/issue-invitations:
+    post:
+      operationId: R-1
+      tags:
+      - Invitation
+      summary: R-1 — Issue invitations to the Workflow App
+      x-trigger-type: workato_webhook
+      x-auth-note: Authenticated by the unguessable Workato webhook URL (suffix), not API-TOKEN
+      x-recipe: '#/x-recipes/R-1'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/R-1_Request'
+      responses:
+        '200':
+          description: Event accepted (webhook trigger; no response body returned to caller)
+components:
+  securitySchemes:
+    ApiToken:
+      type: apiKey
+      in: header
+      name: API-TOKEN
+  schemas:
+    API-00_Request:
+      type: object
+      properties:
+        correlation_id:
+          type: string
+        client_name:
+          type: string
+        analyst_email:
+          type: string
+        target_vms:
+          type: string
+        config_file_id:
+          type: string
+        drive_id_config_json:
+          type: string
+        template_file_ids:
+          type: array
+        application_name:
+          type: array
+        is_initial:
+          type: boolean
+        output_drive_folder_id:
+          type: string
+        reminder_days_1:
+          type: number
+        reminder_days_2:
+          type: number
+        reminder_days_3:
+          type: number
+        supplier_instructions:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        payload_version:
+          type: string
+        kick_off_email_body:
+          type: string
+        has_seeded_data:
+          type: boolean
+        seeded_data_drive_id:
+          type: string
+        seeded_data_index_key:
+          type: string
+        seeded_data_sheet_name:
+          type: string
+    API-01_Request:
+      type: object
+      properties:
+        correlation_id:
+          type: string
+        config_json_file_id:
+          type: string
+        requester_email:
+          type: string
+        variant_id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        payload_version:
+          type: string
+    API-02_Request:
+      type: object
+      properties:
+        correlation_id:
+          type: string
+        config_json_file_id:
+          type: string
+        requester_email:
+          type: string
+        variant_id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        payload_version:
+          type: string
+    R-1_Request:
+      type: object
+      properties:
+        analyst_email:
+          type: string
+        ssId:
+          type: string
+    LNK-01_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+        file_storage_path:
+          type: string
+      required:
+      - supplier_request_id
+      - file_storage_path
+    LNK-01_Response:
+      type: object
+      properties:
+        refreshed_link:
+          type: string
+    WFA-01_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+        supplier_id:
+          type: string
+        validation_result_id:
+          type: string
+    WFA-01_Response:
+      type: object
+      properties:
+        supplier_name:
+          type: string
+        customer_name:
+          type: string
+        analyst_email:
+          type: string
+        validation_report_path:
+          type: string
+        last_upload_path:
+          type: string
+        review_note_from_analyst:
+          type: string
+        instructions:
+          type: string
+      required:
+      - supplier_name
+    WFA-02_Request:
+      type: object
+      properties:
+        supplier_name:
+          type: string
+        due_date:
+          type: string
+          format: date-time
+        supplier_request_id:
+          type: string
+        client_name:
+          type: string
+        template_download_url:
+          type: string
+        link_to_approved_upload:
+          type: string
+        link_to_report:
+          type: string
+        status:
+          type: string
+        supplier_message:
+          type: string
+      required:
+      - supplier_name
+      - supplier_request_id
+      - client_name
+    WFA-02_Response:
+      type: object
+      properties:
+        client:
+          type: string
+        due_date:
+          type: string
+          format: date-time
+        link_to_file_storage:
+          type: string
+        link_to_submission:
+          type: string
+        validation_report:
+          type: string
+        status:
+          type: string
+        supplier_message:
+          type: string
+      required:
+      - client
+    WFA-03_Response:
+      type: object
+      properties:
+        category:
+          type: string
+        supplier_id:
+          type: string
+        supplier_name:
+          type: string
+        subject:
+          type: string
+        detail:
+          type: string
+    WFA-05_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+      required:
+      - supplier_request_id
+    WFA-05_Response:
+      type: object
+      properties:
+        upload_time:
+          type: string
+          format: date-time
+        template_version:
+          type: string
+        submitted_path:
+          type: string
+        extracted_path:
+          type: string
+        status:
+          type: string
+        validation_status:
+          type: string
+        validation_valid_row_count:
+          type: integer
+        validation_invalid_row_count:
+          type: integer
+        validation_report_path:
+          type: string
+        validation_result_time:
+          type: string
+          format: date-time
+    WFA-06_Request:
+      type: object
+      properties:
+        response:
+          type: string
+        supplier_request_id:
+          type: string
+        review_note_text:
+          type: string
+        analyst_email:
+          type: string
+    WFA-07_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+        supplier_id:
+          type: string
+        validation_result_id:
+          type: string
+    WFA-07_Response:
+      type: object
+      properties:
+        supplier_name:
+          type: string
+        customer_name:
+          type: string
+        analyst_email:
+          type: string
+        path_upload:
+          type: string
+          description: Path to the upload in FileStorage
+        path_validation_report:
+          type: string
+          description: Path to validation report in FileStorage
+    WFA-08B_Response:
+      type: object
+      properties:
+        supplier_name:
+          type: string
+        supplier_id:
+          type: string
+        request_id:
+          type: string
+    WFA-09_Request:
+      type: object
+      properties:
+        email_address:
+          type: string
+        supplier_id:
+          type: string
+        supplier_name:
+          type: string
+          description: If a request exists for the supplier, this field will include the supplier_request_id
+            in parenthesis following the supplier name.
+        supplier_user_name:
+          type: string
+        role:
+          type: string
+          description: 'enum: primary | secondary'
+        analyst_email:
+          type: string
+      required:
+      - email_address
+      - supplier_id
+      - supplier_name
+      - analyst_email
+    WFA-09_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+        disposition:
+          type: string
+        role_assigned:
+          type: string
+        supplier_request_id:
+          type: string
+        supplier_user_id:
+          type: string
+      required:
+      - ok
+    WFA-10_Request:
+      type: object
+      properties:
+        email_address:
+          type: string
+      required:
+      - email_address
+    WFA-10_Response:
+      type: object
+      properties:
+        result:
+          type: string
+      required:
+      - result
+    WFA-13--populate-request-details_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+      required:
+      - supplier_request_id
+    WFA-13--populate-request-details_Response:
+      type: object
+      properties:
+        supplier_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+      required:
+      - supplier_name
+      - created_at
+    WFA-13--populate-results-table-supplier-facing_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+      required:
+      - supplier_request_id
+    WFA-13--populate-results-table-supplier-facing_Response:
+      type: object
+      properties:
+        status:
+          type: string
+        valid_rows:
+          type: integer
+        invalid_rows:
+          type: integer
+        upload_datetime:
+          type: string
+          format: date-time
+    CAN-01_Request:
+      type: object
+      properties:
+        parsed_config_json:
+          type: string
+        template_version_id:
+          type: string
+        version_number:
+          type: integer
+        project_id:
+          type: string
+        expected_sheet_name:
+          type: string
+          description: Default, "Data"
+      required:
+      - parsed_config_json
+      - template_version_id
+      - version_number
+      - project_id
+    CAN-01_Response:
+      type: object
+      properties:
+        canonical_model_json:
+          type: string
+        meta:
+          type: object
+          properties:
+            template_version_id:
+              type: string
+            version_number:
+              type: integer
+            project_id:
+              type: string
+            expected_sheet_name:
+              type: string
+            built_at:
+              type: string
+            built_by_recipe:
+              type: string
+        summary:
+          type: object
+          properties:
+            field_count:
+              type: integer
+            visible_field_count:
+              type: integer
+            rule_count:
+              type: integer
+            lookup_value_count:
+              type: integer
+            unique_lookup_name_count:
+              type: integer
+            variant_count:
+              type: integer
+            variant_field_count:
+              type: integer
+            form_slot_count:
+              type: integer
+            error_message_count:
+              type: integer
+            slot_pool_usage:
+              type: object
+              properties:
+                text:
+                  type: object
+                  properties:
+                    used:
+                      type: integer
+                    available:
+                      type: integer
+                num:
+                  type: object
+                  properties:
+                    used:
+                      type: integer
+                    available:
+                      type: integer
+                bool:
+                  type: object
+                  properties:
+                    used:
+                      type: integer
+                    available:
+                      type: integer
+                sel:
+                  type: object
+                  properties:
+                    used:
+                      type: integer
+                    available:
+                      type: integer
+                date:
+                  type: object
+                  properties:
+                    used:
+                      type: integer
+                    available:
+                      type: integer
+    CFG-01_Request:
+      type: object
+      properties:
+        parsed_config_path:
+          type: string
+          description: FileStorage path to the parsed config JSON file. Written by an upstream parse step.
+        form_field_limit:
+          type: integer
+          description: Maximum visible fields supported by the manual-input form. Passes through the connector's
+            'validate_config' action.
+      required:
+      - parsed_config_path
+    CFG-01_Response:
+      type: object
+      properties:
+        status:
+          type: string
+          description: valid | invalid
+        error_count:
+          type: integer
+        warning_count:
+          type: integer
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              check_name:
+                type: string
+                description: 'One of: lookup_references, depends_on_references, rule_target_field_exists,
+                  rule_condition_field_exists, variant_field_exists, user_supplier_exists, exactly_one_primary_user_per_supplier,
+                  dependent_dropdown_has_parent, no_duplicate_field_names, no_duplicate_supplier_names,
+                  no_duplicate_user_per_supplier, no_duplicate_lookup_entries, required_fields_present,
+                  variant_count_matches, form_field_limit, internal_notation_valid, email_format_valid,
+                  parsed_config_parseable (synthetic)'
+              c_status:
+                type: string
+                description: pass | fail | warn
+              message:
+                type: string
+              details:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    entity:
+                      type: string
+                    name:
+                      type: string
+                    issue:
+                      type: string
+        warnings:
+          type: array
+          items:
+            type: object
+            properties:
+              check_name:
+                type: string
+                description: 'One of: lookup_references, depends_on_references, rule_target_field_exists,
+                  rule_condition_field_exists, variant_field_exists, user_supplier_exists, exactly_one_primary_user_per_supplier,
+                  dependent_dropdown_has_parent, no_duplicate_field_names, no_duplicate_supplier_names,
+                  no_duplicate_user_per_supplier, no_duplicate_lookup_entries, required_fields_present,
+                  variant_count_matches, form_field_limit, internal_notation_valid, email_format_valid,
+                  parsed_config_parseable (synthetic)'
+              c_status:
+                type: string
+                description: pass | fail | warn
+              message:
+                type: string
+              details:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    entity:
+                      type: string
+                    name:
+                      type: string
+                    issue:
+                      type: string
+      required:
+      - status
+    DASH-01_Request:
+      type: object
+      properties:
+        template_version_id:
+          type: string
+          description: Resolves Project, which carries 'spreadsheet_id' for the workbook.
+      required:
+      - template_version_id
+    DASH-01_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          description: True on success.
+        error:
+          type: string
+          description: Empty on success; populated with reason on failure.
+        rows_written:
+          type: integer
+          description: Per-tab row count actually written
+      required:
+      - ok
+    INC-01_Request:
+      type: object
+      properties:
+        index:
+          type: object
+          properties:
+            index_key:
+              type: string
+          required:
+          - index_key
+        seed_data_attributes:
+          type: object
+          properties:
+            file_type:
+              type: string
+              description: 'Enum: ''drive_file_id'' || ''upload'''
+            sheet_name:
+              type: string
+            drive_id:
+              type: string
+              description: Drive ID (if supplied as a Drive file)
+            file_storage_path_existing:
+              type: string
+              description: Existing location in FileStorage
+          required:
+          - file_type
+          - sheet_name
+        client_name:
+          type: string
+      required:
+      - index
+      - client_name
+    INC-01_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        error_message:
+          type: string
+          description: Nullable if 'ok' === True
+        counts:
+          type: object
+          properties:
+            matched_count:
+              type: integer
+            unmatched_count:
+              type: integer
+            ambiguous_count:
+              type: integer
+            unmatched_keys:
+              type: string
+        ambiguous_keys:
+          type: array
+          items:
+            type: object
+            properties:
+              seed_value:
+                type: string
+              supplier_request_ids:
+                type: array
+        matched:
+          type: array
+          items:
+            type: object
+            properties:
+              seed_value:
+                type: string
+              supplier_id:
+                type: string
+              supplier_name:
+                type: string
+              supplier_request_id:
+                type: string
+        unmatched:
+          type: array
+        integration_results:
+          type: array
+          items:
+            type: object
+            properties:
+              supplier_name:
+                type: string
+              supplier_id:
+                type: string
+                description: PK (SUP_Supplier)
+              supplier_request_id:
+                type: string
+                description: PK (SUP_SupplierRequest)
+              ok:
+                type: boolean
+              error_message:
+                type: string
+                description: Nullable if 'ok'==True
+              error_details:
+                type: object
+                properties:
+                  workato_error_uuid:
+                    type: string
+                  error_action:
+                    type: string
+                  msg:
+                    type: string
+                  error_step_number:
+                    type: integer
+            required:
+            - supplier_name
+            - ok
+      required:
+      - ok
+    INC-02_Request:
+      type: object
+      properties:
+        supplier:
+          type: object
+          properties:
+            supplier_request_id:
+              type: string
+              description: Primary key to the data table, SUP_SupplierRequest.
+            supplier_id:
+              type: string
+              description: Primary key to the data table, SUP_Supplier.
+            supplier_name:
+              type: string
+              description: Human-readable supplier name.
+          required:
+          - supplier_request_id
+          - supplier_id
+        seed_data:
+          type: object
+          properties:
+            index:
+              type: object
+              properties:
+                match_value:
+                  type: string
+                index_key:
+                  type: string
+                  description: Key upon which the data should be filtered. Typically, 'supplier_name'.
+              required:
+              - match_value
+              - index_key
+            seed_data_file_path:
+              type: string
+              description: Path to the seed data file in Workato FileStorage.
+          required:
+          - index
+          - seed_data_file_path
+        seeded_template_filename:
+          type: string
+          description: File name (with extension) of the integrated template (on success).
+      required:
+      - supplier
+      - seed_data
+      - seeded_template_filename
+    INC-02_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        error_message:
+          type: string
+          description: Nullable if 'ok'==True
+        error_details:
+          type: object
+          properties:
+            workato_error_uuid:
+              type: string
+            error_action:
+              type: string
+            msg:
+              type: string
+            error_step_number:
+              type: integer
+      required:
+      - ok
+    INV-01_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+        analyst_email:
+          type: string
+      required:
+      - supplier_request_id
+      - analyst_email
+    INV-01_Response:
+      type: object
+      properties:
+        transitioned:
+          type: boolean
+        assignee_disposition:
+          type: string
+          description: sent | failed | already_invited
+        secondary_dispositions:
+          type: array
+          items:
+            type: object
+            properties:
+              disposition:
+                type: string
+              secondary_user_email:
+                type: string
+      required:
+      - transitioned
+    INV-01A_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+        client_name:
+          type: string
+        days_to_complete_task:
+          type: integer
+        assignee_email:
+          type: string
+        workflow_stage:
+          type: string
+          description: 'Enumerated: new | human review'
+        page:
+          type: string
+          description: The page bound to the indicated stage
+        task_name:
+          type: string
+          description: Human-readable task title
+        send_email:
+          type: boolean
+      required:
+      - supplier_request_id
+      - client_name
+      - days_to_complete_task
+      - assignee_email
+      - workflow_stage
+      - page
+      - task_name
+    INV-03_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+        user_email:
+          type: string
+        contact_name:
+          type: string
+        analyst_email:
+          type: string
+        role:
+          type: string
+          description: 'Enum: primary | secondary'
+      required:
+      - supplier_request_id
+      - user_email
+      - analyst_email
+    INV-03_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+        supplier_request_id:
+          type: string
+        user_was_created:
+          type: boolean
+        disposition:
+          type: string
+          description: 'Enum: sent | failed | already_existed'
+      required:
+      - ok
+      - user_was_created
+      - disposition
+    INV-USER_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+        user_email:
+          type: string
+        contact_name:
+          type: string
+        analyst_email:
+          type: string
+      required:
+      - supplier_request_id
+      - user_email
+      - analyst_email
+    INV-USER_Response:
+      type: object
+      properties:
+        disposition:
+          type: string
+          description: 'Enum: sent | failed'
+        email:
+          type: string
+          description: Echo for batch callers
+        error:
+          type: string
+          description: Empty on success
+      required:
+      - disposition
+    OBS-01_Request:
+      type: object
+      properties:
+        severity:
+          type: string
+          description: info | warn | error
+        source_recipe:
+          type: string
+          description: Handle of the calling recipe.
+        step_number:
+          type: integer
+        phase:
+          type: string
+        human_message:
+          type: string
+        details_json:
+          type: string
+          description: Caller-provided JSON string.
+        analyst_email:
+          type: string
+        supplier_request_id:
+          type: string
+        error_type:
+          type: string
+        alert_sent:
+          type: boolean
+        resolved:
+          type: boolean
+        resolved_at:
+          type: string
+          format: date-time
+      required:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+    OBS-01_Response:
+      type: object
+      properties:
+        event_id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+      required:
+      - event_id
+      - timestamp
+    PRV-01_Request:
+      type: object
+      properties:
+        correlation_id:
+          type: string
+        client_name:
+          type: string
+        analyst_email:
+          type: string
+        target_vms:
+          type: string
+        config_file_id:
+          type: string
+        drive_id_config_json:
+          type: string
+        template_file_ids:
+          type: array
+        is_initial:
+          type: boolean
+        output_drive_folder_id:
+          type: string
+        reminder_days_1:
+          type: integer
+        reminder_days_2:
+          type: integer
+        reminder_days_3:
+          type: integer
+        supplier_instructions:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        payload_version:
+          type: string
+        kickoff_email_body:
+          type: string
+    PRV-01_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+          description: Nullable if 'ok' == True
+        correlation_id:
+          type: string
+        template_version_id:
+          type: string
+          description: Nullable if 'ok' == False
+        project_id:
+          type: string
+          description: Nullable if 'ok' == False
+      required:
+      - ok
+      - correlation_id
+    PRV-02_Request:
+      type: object
+      properties:
+        template_version_id:
+          type: string
+        correlation_id:
+          type: string
+        project_id:
+          type: string
+      required:
+      - template_version_id
+      - project_id
+    PRV-02_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        template_version_id:
+          type: string
+          description: Nullable if 'ok' == False.
+        canonical_model_path:
+          type: string
+          description: Nullable if 'ok' == False
+        failure:
+          type: object
+          properties:
+            error_type:
+              type: string
+            human_message:
+              type: string
+            failed_at_step:
+              type: integer
+            details_json:
+              type: string
+              description: Step-specific structured details.
+          description: Populated only on error
+        parse_summary:
+          type: object
+          properties:
+            field_count:
+              type: integer
+            visible_field_count:
+              type: integer
+            rule_count:
+              type: integer
+            lookup_count:
+              type: integer
+            variant_count:
+              type: integer
+            supplier_count:
+              type: integer
+            user_count:
+              type: integer
+            error_translation_count:
+              type: integer
+            skipped_rows:
+              type: object
+              properties:
+                fields:
+                  type: integer
+                lookups:
+                  type: integer
+                suppliers:
+                  type: integer
+                users:
+                  type: integer
+            warnings:
+              type: array
+              items:
+                type: object
+                properties:
+                  sheet:
+                    type: string
+                  row:
+                    type: integer
+                  issue:
+                    type: string
+        validate_summary:
+          type: object
+          properties:
+            warnings:
+              type: array
+              items:
+                type: object
+                properties:
+                  check_name:
+                    type: string
+                    description: 'One of: lookup_references, depends_on_references, rule_target_field_exists,
+                      rule_condition_field_exists, variant_field_exists, user_supplier_exists, exactly_one_primary_user_per_supplier,
+                      dependent_dropdown_has_parent, no_duplicate_field_names, no_duplicate_supplier_names,
+                      no_duplicate_user_per_supplier, no_duplicate_lookup_entries, required_fields_present,
+                      variant_count_matches, form_field_limit, internal_notation_valid, email_format_valid,
+                      parsed_config_parseable (synthetic)'
+                  c_status:
+                    type: string
+                    description: pass | fail | warn
+                  message:
+                    type: string
+                  details:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        entity:
+                          type: string
+                        name:
+                          type: string
+                        issue:
+                          type: string
+            status:
+              type: string
+            error_count:
+              type: integer
+            warning_count:
+              type: integer
+            checks:
+              type: array
+              items:
+                type: object
+                properties:
+                  check_name:
+                    type: string
+                  status:
+                    type: string
+                  message:
+                    type: string
+      required:
+      - ok
+    PRV-03_Request:
+      type: object
+      properties:
+        template_version_id:
+          type: string
+        canonical_model_path:
+          type: string
+        wfa_instruction:
+          type: string
+      required:
+      - template_version_id
+      - canonical_model_path
+    PRV-03_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        result:
+          type: string
+        hydration_summary:
+          type: object
+          properties:
+            cfg_field_count:
+              type: integer
+            cfg_lookup_count:
+              type: integer
+            cfg_rule_count:
+              type: integer
+            cfg_variant_count:
+              type: integer
+            cfg_variant_field_count:
+              type: integer
+            cfg_form_slot_mapping_count:
+              type: integer
+            cfg_error_message_count:
+              type: integer
+        template_version_id:
+          type: string
+        error_message:
+          type: string
+      required:
+      - ok
+    PRV-04_Request:
+      type: object
+      properties:
+        template_version_id:
+          type: string
+      required:
+      - template_version_id
+    PRV-04_Response:
+      type: object
+      properties:
+        status:
+          type: string
+        variant_count:
+          type: integer
+        template_version_id:
+          type: string
+        error_message:
+          type: string
+      required:
+      - status
+      - template_version_id
+    PRV-05_Request:
+      type: object
+      properties:
+        template_version_id:
+          type: string
+      required:
+      - template_version_id
+    PRV-05_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+        rows_written:
+          type: integer
+      required:
+      - ok
+    REV-01_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+          description: PK of the SUP_SupplierRequest row to act upon.
+        decision:
+          type: string
+          description: approve | reject
+        review_note_text:
+          type: string
+          description: Required when 'decsion'='reject'
+        analyst_email:
+          type: string
+          description: The analyst taking the action; written to RUN_ReviewNote.author_email.
+      required:
+      - supplier_request_id
+      - decision
+      - analyst_email
+    REV-01_Response:
+      type: object
+      properties:
+        transitioned:
+          type: boolean
+          description: Bound from STS-01's 'success' field.
+        from_state:
+          type: string
+          description: Must be 'pending_reivew'.
+        to_state:
+          type: string
+          description: '''approved'' or ''supplier_action_required'' on success; empty on failure.'
+        approved_path:
+          type: string
+          description: Populated only on approve success; empty otherwise.
+      required:
+      - transitioned
+    STS-01_Request:
+      type: object
+      properties:
+        supplier_request_id:
+          type: string
+        target_state:
+          type: string
+          description: pending | sent | supplier_action_required | pending_review | approved | cancelled
+        trigger_context:
+          type: string
+          description: invitation_issued | system_validation_passed | system_validation_failed | analyst_rework
+            | analyst_approve | analyst_cancel | display_refresh
+        cancellation_reason:
+          type: string
+          description: Required when target_state=cancelled
+        due_date_override:
+          type: string
+          format: date-time
+          description: Falls back to `Project.default_due_days` logic.
+      required:
+      - supplier_request_id
+      - target_state
+      - trigger_context
+    STS-01_Response:
+      type: object
+      properties:
+        success:
+          type: boolean
+        prior_state:
+          type: string
+          description: The state read from the row before transition; empty if 'request_not_found'.
+        new_state:
+          type: string
+          description: The state written; empty on failure.
+        display_status:
+          type: string
+          description: What was written; empty on failure.
+        display_message:
+          type: string
+          description: What was written; empty on failure.
+        error_code:
+          type: string
+          description: Empty on success; otherwise, one of 'request_not_found' | 'illegal_transition'
+            | 'precondition_failed' | 'derivation_lookup_failed'.
+        error_message:
+          type: string
+          description: Empty on success; set only when transition refused.
+      required:
+      - success
+    SUP-01_Request:
+      type: object
+      properties:
+        correlation_id:
+          type: string
+        suppliers_json:
+          type: string
+          description: JSON string of suppliers as {'supplier_name', 'default_variant_id', 'users' [ {'user_email',
+            'contact_name', 'primary'}]
+      required:
+      - correlation_id
+      - suppliers_json
+    SUP-01_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+        added_supplier_count:
+          type: integer
+        added_user_count:
+          type: integer
+        added_request_count:
+          type: integer
+        skipped_supplier_names:
+          type: array
+        supplier_request_ids:
+          type: array
+        template_version_id:
+          type: string
+      required:
+      - ok
+      - added_supplier_count
+      - added_user_count
+      - added_request_count
+    SUP-02_Request:
+      type: object
+      properties:
+        supplier_id:
+          type: string
+        user_email:
+          type: string
+        contact_name:
+          type: string
+        variant_id:
+          type: string
+        analyst_email:
+          type: string
+      required:
+      - supplier_id
+      - user_email
+      - analyst_email
+    SUP-02_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+        supplier_request_id:
+          type: string
+        supplier_user_id:
+          type: string
+        disposition:
+          type: string
+          description: 'Enum: sent | failed'
+      required:
+      - ok
+      - disposition
+    TPL-01_Request:
+      type: object
+      properties:
+        template_version_id:
+          type: string
+        variant_id:
+          type: string
+        customer_name:
+          type: string
+        variant_name:
+          type: string
+      required:
+      - template_version_id
+      - customer_name
+    TPL-01_Response:
+      type: object
+      properties:
+        verdict:
+          type: object
+          properties:
+            status:
+              type: string
+            error:
+              type: object
+              properties:
+                where:
+                  type: string
+                what:
+                  type: string
+                severity:
+                  type: string
+          required:
+          - status
+        file_content:
+          type: string
+        suggested_filename:
+          type: string
+        metadata:
+          type: object
+          properties:
+            sheet_names:
+              type: array
+            byte_size:
+              type: integer
+            row_count:
+              type: integer
+            field_count:
+              type: integer
+      required:
+      - verdict
+    TPL-02_Request:
+      type: object
+      properties:
+        canonical_model_json:
+          type: string
+        variant_id:
+          type: string
+        customer_name:
+          type: string
+        variant_name:
+          type: string
+      required:
+      - canonical_model_json
+      - customer_name
+    TPL-02_Response:
+      type: object
+      properties:
+        status:
+          type: string
+          description: success | empty_variant
+        file_content:
+          type: string
+          description: Populated on success
+        suggested_filename:
+          type: string
+        metadata:
+          type: object
+          properties:
+            sheet_names:
+              type: array
+            byte_size:
+              type: integer
+            row_count:
+              type: integer
+            field_count:
+              type: integer
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: 'Machine-readable: empty_variant, ...'
+            message:
+              type: string
+              description: Human-readable detail
+          required:
+          - code
+          - message
+          description: Populated when status != 'success'
+      required:
+      - status
+    UTL-01_Request:
+      type: object
+      properties:
+        path:
+          type: string
+          description: FileStorage path.
+      required:
+      - path
+    UTL-01_Response:
+      type: object
+      properties:
+        link:
+          type: string
+          description: Shareable URL.
+        expires_at:
+          type: string
+          format: date-time
+          description: Write-time + 7 days (computed for caller convenience).
+      required:
+      - link
+    UTL-03_Request:
+      type: object
+      properties:
+        now:
+          type: string
+          format: date-time
+      required:
+      - now
+    UTL-03_Response:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        details_json:
+          type: string
+        error_message:
+          type: string
+          description: Optional if 'ok' == True
+        request_time:
+          type: string
+          format: date-time
+        suppliers:
+          type: array
+          items:
+            type: object
+            properties:
+              label:
+                type: string
+              value:
+                type: string
+              has_request:
+                type: boolean
+              request_id:
+                type: string
+      required:
+      - ok
+      - details_json
+      - request_time
+    VAL-01_Request:
+      type: object
+      properties:
+        upload_id:
+          type: string
+          description: UUID of the RUN_Upload row to validate. The caller has already created the row
+            and populated 'submitted_path' or 'extracted_path' prior to calling.
+        submission_source:
+          type: string
+          description: file | manual_entry
+      required:
+      - upload_id
+      - submission_source
+    VAL-01_Response:
+      type: object
+      properties:
+        validation_result_id:
+          type: string
+          description: UUID of the RUN_Upload row to validate. The caller has already created the row
+            and populated 'submitted_path' or 'extracted_path' prior to calling.
+        verdict:
+          type: string
+          description: passed | failed | empty | structural_failure | error
+        valid_row_count:
+          type: integer
+        invalid_row_count:
+          type: integer
+      required:
+      - verdict
+      - valid_row_count
+      - invalid_row_count
+x-data-tables:
+  CFG_ErrorMessage:
+    read_by: []
+    written_by:
+    - PRV-03
+  CFG_Field:
+    read_by: []
+    written_by:
+    - PRV-03
+  CFG_FormSlotMapping:
+    read_by: []
+    written_by:
+    - PRV-03
+  CFG_Lookup:
+    read_by: []
+    written_by:
+    - PRV-03
+  CFG_Rule:
+    read_by: []
+    written_by:
+    - PRV-03
+  CFG_TemplateVersion:
+    read_by:
+    - PRV-01
+    - PRV-02
+    - PRV-04
+    - R-1
+    - SUP-01
+    - SUP-02
+    - TPL-01
+    - VAL-01
+    - WFA-12
+    written_by:
+    - PRV-01
+    - PRV-02
+    - PRV-04
+  CFG_Variant:
+    read_by:
+    - INC-02
+    - INV-01
+    - PRV-04
+    - SUP-01
+    - SUP-02
+    - TPL-01
+    - WFA-12
+    written_by:
+    - PRV-03
+    - PRV-04
+  CFG_VariantField:
+    read_by:
+    - INV-01
+    written_by:
+    - PRV-03
+  DASH_SuppliersStaging:
+    read_by:
+    - DASH-01
+    written_by:
+    - DASH-01
+  EventLog:
+    read_by: []
+    written_by:
+    - OBS-01
+  Project:
+    read_by:
+    - DASH-01
+    - INV-01
+    - PRV-01
+    - PRV-02
+    - PRV-04
+    - REV-01
+    - STS-01
+    - SUP-01
+    - UPL-01
+    - VAL-01
+    - WFA-01
+    - WFA-07
+    written_by:
+    - PRV-01
+    - PRV-02
+  RUN_FieldError:
+    read_by: []
+    written_by:
+    - VAL-01
+  RUN_ReviewNote:
+    read_by:
+    - STS-01
+    - WFA-01
+    written_by:
+    - REV-01
+  RUN_Upload:
+    read_by:
+    - REV-01
+    - VAL-01
+    - WFA-01
+    - WFA-05
+    - WFA-07
+    - WFA-13--populate-results-table-supplier-facing
+    written_by:
+    - UPL-01
+    - VAL-01
+  RUN_ValidationResult:
+    read_by:
+    - REV-01
+    - STS-01
+    - WFA-01
+    - WFA-05
+    - WFA-07
+    - WFA-13--populate-results-table-supplier-facing
+    written_by:
+    - VAL-01
+  SUP_Supplier:
+    read_by:
+    - INC-01
+    - SUP-01
+    - SUP-02
+    - UTL-03
+    - WFA-01
+    - WFA-03
+    - WFA-07
+    - WFA-13--populate-request-details
+    written_by:
+    - PRV-04
+    - SUP-01
+  SUP_SupplierRequest:
+    read_by:
+    - DASH-01
+    - INC-01
+    - INC-02
+    - INV-01
+    - INV-03
+    - INV-USER
+    - R-1
+    - REV-01
+    - STS-01
+    - SUP-01
+    - SUP-02
+    - UTL-03
+    - VAL-01
+    - WFA-03
+    - WFA-09
+    - WFA-13--populate-request-details
+    - WFA-13--populate-results-table-supplier-facing
+    written_by:
+    - INC-02
+    - REV-01
+    - STS-01
+    - SUP-01
+    - SUP-02
+    - UPL-01
+    - VAL-01
+    triggers_recipe:
+    - UPL-01
+  SUP_SupplierUser:
+    read_by:
+    - DASH-01
+    - INV-01
+    - INV-03
+    - WFA-03
+    - WFA-09
+    - WFA-10
+    written_by:
+    - INV-01
+    - INV-03
+    - PRV-04
+    - SUP-01
+    - SUP-02
+  table_id:20605:
+    read_by: []
+    written_by:
+    - PRV-04
+x-recipes:
+  API-00:
+    code: API-00
+    kind: api_endpoint
+    summary: Provisioning
+    domain: Provisioning
+    source_file: api_00_provisioning_recipe.json
+    version: 80
+    trigger: workato_api_platform.receive_request
+    trigger_type: api_platform_http
+    auth:
+      type: apiKey
+      in: header
+      name: API-TOKEN
+    declared_status_codes:
+    - 504 - Gateway Timeout
+    - 200 - OK
+    - 500 - Internal Server Error
+    - 400 - Bad Request
+    response_bodies:
+    - status: '400'
+      body:
+        request_details:
+          correlation_id: null
+          config_json_file_id: null
+          analyst_email: null
+          timestamp: null
+          payload_version: null
+        workato_job_url: null
+        error_details:
+          errored_action: null
+          errored_step: null
+          failed_recipe_url: null
+          error_message: null
+    - status: '500'
+      body:
+        request_details:
+          correlation_id: null
+          config_json_file_id: null
+          analyst_email: null
+          timestamp: null
+          payload_version: null
+        workato_job_url: null
+        error_details:
+          errored_action: null
+          errored_step: null
+          error_message: null
+          failed_recipe_url: null
+    - status: '200'
+      body:
+        request_details:
+          correlation_id: null
+          config_json_file_id: null
+          analyst_email: null
+          timestamp: null
+          payload_version: null
+        workato_job_url: null
+        send_invitations:
+          ready: null
+        parse_summary:
+          field_count: null
+          visible_field_count: null
+          rule_count: null
+          lookup_count: null
+          variant_count: null
+          supplier_count: null
+          user_count: null
+          error_translation_count: null
+          skipped_rows:
+            fields: null
+            lookups: null
+            suppliers: null
+            users: null
+          warnings:
+            sheet: null
+            row: null
+            issue: null
+        validate_summary:
+          status: null
+          error_count: null
+          warning_count: null
+          checks:
+            check_name: null
+            status: null
+            message: null
+          warnings:
+            check_name: null
+            message: null
+            details:
+              entity: null
+              name: null
+              issue: null
+            c_status: null
+        seed_data:
+          required: null
+          ok: null
+    request_schema: '#/components/schemas/API-00_Request'
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - details_json
+    - recipe: PRV-01
+      name: PRV-01 Provisioning (read config file, create directories, invite analyst to workspace)
+      mode: sync
+      parameters:
+      - correlation_id
+      - client_name
+      - analyst_email
+      - target_vms
+      - config_file_id
+      - drive_id_config_json
+      - template_file_ids
+      - is_initial
+      - output_drive_folder_id
+      - reminder_days_1
+      - reminder_days_2
+      - reminder_days_3
+      - supplier_instructions
+      - timestamp
+      - payload_version
+      - kickoff_email_body
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - analyst_email
+      - error_type
+    - recipe: PRV-02
+      name: PRV-02 Parse and build canonical model
+      mode: sync
+      parameters:
+      - template_version_id
+      - correlation_id
+      - project_id
+    - recipe: PRV-03
+      name: PRV-03 Hydrate configuration (CFG_*) tables
+      mode: sync
+      parameters:
+      - template_version_id
+      - canonical_model_path
+    - recipe: PRV-04
+      name: PRV-04 Publish template and variants, populate SUP_Suppliers and SUP_SupplierUsers
+      mode: sync
+      parameters:
+      - template_version_id
+    - recipe: INC-01
+      name: INC-01 Seed data (all suppliers with requests in non-terminal states)
+      mode: sync
+      parameters:
+      - index
+      - seed_data_attributes
+      - client_name
+    - recipe: PRV-05
+      name: PRV-05 Prepare for supplier user invitations
+      mode: sync
+      parameters:
+      - template_version_id
+    python_steps: 1
+    declared_variables:
+    - name: request_details
+      type: object
+    - name: request_details.correlation_id
+      type: string
+    - name: request_details.config_json_file_id
+      type: string
+    - name: request_details.analyst_email
+      type: string
+    - name: request_details.client_name
+      type: string
+    - name: request_details.timestamp
+      type: date_time
+    - name: request_details.payload_version
+      type: string
+    - name: parse_summary
+      type: object
+    - name: parse_summary.field_count
+      type: integer
+    - name: parse_summary.visible_field_count
+      type: integer
+    - name: parse_summary.rule_count
+      type: integer
+    - name: parse_summary.lookup_count
+      type: integer
+    - name: parse_summary.variant_count
+      type: integer
+    - name: parse_summary.supplier_count
+      type: integer
+    - name: parse_summary.user_count
+      type: integer
+    - name: parse_summary.error_translation_count
+      type: integer
+    - name: parse_summary.skipped_rows
+      type: object
+    - name: parse_summary.skipped_rows.fields
+      type: integer
+    - name: parse_summary.skipped_rows.lookups
+      type: integer
+    - name: parse_summary.skipped_rows.suppliers
+      type: integer
+    - name: parse_summary.skipped_rows.users
+      type: integer
+    - name: parse_summary.warnings
+      type: array
+    - name: parse_summary.warnings.sheet
+      type: string
+    - name: parse_summary.warnings.row
+      type: integer
+    - name: parse_summary.warnings.issue
+      type: string
+    - name: validate_summary
+      type: object
+    - name: validate_summary.warnings
+      type: array
+    - name: validate_summary.warnings.check_name
+      type: string
+    - name: validate_summary.warnings.c_status
+      type: string
+    - name: validate_summary.warnings.message
+      type: string
+    - name: validate_summary.warnings.details
+      type: array
+    - name: validate_summary.warnings.details.entity
+      type: string
+    - name: validate_summary.warnings.details.name
+      type: string
+    - name: validate_summary.warnings.details.issue
+      type: string
+    - name: validate_summary.status
+      type: string
+    - name: validate_summary.error_count
+      type: integer
+    - name: validate_summary.warning_count
+      type: integer
+    - name: validate_summary.checks
+      type: array
+    - name: validate_summary.checks.check_name
+      type: string
+    - name: validate_summary.checks.status
+      type: string
+    - name: validate_summary.checks.message
+      type: string
+    - name: workato_job_url
+      type: string
+    - name: template_version_id
+      type: string
+    - name: seed_data
+      type: object
+    - name: seed_data.required
+      type: boolean
+    - name: seed_data.ok
+      type: boolean
+    - name: seed_data.successful
+      type: integer
+    - name: seed_data.failed
+      type: integer
+    - name: seed_data.ambiguous
+      type: integer
+    control_flow:
+    - 'trigger: workato_api_platform.receive_request'
+    - '  <try>'
+    - '    action: workato_variable.declare_variable'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_api_platform.return_response'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_api_platform.return_response'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_variable.update_variables'
+    - '    <if>'
+    - '      action: workato_api_platform.return_response'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    <if>'
+    - '      action: workato_api_platform.return_response'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    <if>'
+    - '      action: workato_api_platform.return_response'
+    - '    <if>'
+    - '      <try>'
+    - '        action: workato_recipe_function.call_recipe'
+    - '        action: workato_variable.update_variables'
+    - '        <catch>'
+    - '          action: workato_variable.update_variables'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    <if>'
+    - '      action: workato_api_platform.return_response'
+    - '    action: workato_api_platform.return_response'
+    - '    <catch>'
+    - '      action: workato_api_platform.return_response'
+  API-01:
+    code: API-01
+    kind: api_endpoint
+    summary: Preview template
+    domain: Validation & Preview
+    source_file: api_01_preview_template_recipe.json
+    version: 29
+    trigger: workato_api_platform.receive_request
+    trigger_type: api_platform_http
+    auth:
+      type: apiKey
+      in: header
+      name: API-TOKEN
+    declared_status_codes:
+    - 200 - OK
+    - 400 - Bad Request
+    response_bodies:
+    - status: '200'
+      body:
+        ok: null
+        verdict:
+          status: null
+          error_count: null
+          warning_count: null
+          checks:
+            check_name: null
+            c_status: null
+            message: null
+            details:
+              entity: null
+              name: null
+              issue: null
+    - status: '200'
+      body:
+        ok: null
+        verdict:
+          status: null
+          error_count: null
+          warning_count: null
+          checks:
+            check_name: null
+            c_status: null
+            message: null
+            details:
+              entity: null
+              name: null
+              issue: null
+        file_content: null
+        suggested_filename: null
+        metadata:
+          byte_size: null
+          sheet_names: null
+          field_count: null
+          row_count: null
+    request_schema: '#/components/schemas/API-01_Request'
+    calls:
+    - recipe: CFG-01
+      name: CFG-01 Validate config
+      mode: sync
+      parameters:
+      - parsed_config_path
+      - form_field_limit
+    - recipe: CAN-01
+      name: CAN-01 Build canonical model
+      mode: sync
+      parameters:
+      - expected_sheet_name
+      - parsed_config_json
+      - template_version_id
+      - version_number
+      - project_id
+    - recipe: TPL-02
+      name: TPL-02 Build XLSX
+      mode: sync
+      parameters:
+      - canonical_model_json
+      - customer_name
+    connector_actions:
+    - parse_config_file
+    file_storage_ops:
+    - store_file
+    google_drive_ops:
+    - download_file_contents
+    pubsub_ops:
+    - publish_to_topic
+    declared_variables:
+    - name: name_parsed_config_FileStorage
+      type: string
+    control_flow:
+    - 'trigger: workato_api_platform.receive_request'
+    - '  <try>'
+    - '    action: workato_variable.declare_variable'
+    - '    action: google_drive.download_file_contents'
+    - '    action: SDC_Connector.parse_config_file'
+    - '    action: workato_files.store_file'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    <if>'
+    - '      action: workato_api_platform.return_response'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_api_platform.return_response'
+    - '    <catch>'
+    - '      action: workato_pub_sub.publish_to_topic'
+    - '      action: workato_api_platform.return_response'
+  API-02:
+    code: API-02
+    kind: api_endpoint
+    summary: Validate configuration
+    domain: Validation & Preview
+    source_file: api_02_validate_configuration_recipe.json
+    version: 9
+    trigger: workato_api_platform.receive_request
+    trigger_type: api_platform_http
+    auth:
+      type: apiKey
+      in: header
+      name: API-TOKEN
+    declared_status_codes:
+    - 200 - OK
+    - 400 - Bad Request
+    response_bodies:
+    - status: '200'
+      body:
+        ok: null
+        verdict:
+          error_count: null
+          warning_count: null
+          checks:
+            check_name: null
+            c_status: null
+            message: null
+            details:
+              entity: null
+              name: null
+              issue: null
+          status: null
+    request_schema: '#/components/schemas/API-02_Request'
+    calls:
+    - recipe: CFG-01
+      name: CFG-01 Validate config
+      mode: sync
+      parameters:
+      - parsed_config_path
+      - form_field_limit
+    connector_actions:
+    - parse_config_file
+    file_storage_ops:
+    - store_file
+    google_drive_ops:
+    - download_file_contents
+    declared_variables:
+    - name: parsed_config_name_FileStorage
+      type: string
+    control_flow:
+    - 'trigger: workato_api_platform.receive_request'
+    - '  <try>'
+    - '    action: workato_variable.declare_variable'
+    - '    action: google_drive.download_file_contents'
+    - '    action: SDC_Connector.parse_config_file'
+    - '    action: workato_files.store_file'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_api_platform.return_response'
+    - '    <catch>'
+    - '      action: workato_api_platform.return_response'
+  R-1:
+    code: R-1
+    kind: event_webhook
+    summary: Issue invitations to the Workflow App
+    domain: Invitation
+    source_file: r_1_issue_invitations_to_the_workflow_app_recipe.json
+    version: 31
+    trigger: workato_webhooks.new_event
+    trigger_type: workato_webhook
+    webhook_suffix: issue-invitations
+    request_schema: '#/components/schemas/R-1_Request'
+    data_tables:
+    - table: CFG_TemplateVersion
+      access: READ
+      action: get_records
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+      - analyst_email
+    - recipe: INV-01
+      name: INV-01 Invite supplier user(s) per request ID
+      mode: sync
+      parameters:
+      - supplier_request_id
+      - analyst_email
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - analyst_email
+      - error_type
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - analyst_email
+      - details_json
+    declared_variables:
+    - name: batch_results
+      type: array
+    - name: batch_results.transitioned
+      type: boolean
+    - name: batch_results.assignee_disposition
+      type: string
+    - name: batch_results.secondary_dispositions
+      type: string
+    control_flow:
+    - 'trigger: workato_webhooks.new_event'
+    - '  <try>'
+    - '    action: workato_variable.declare_variable'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    <foreach>'
+    - '      <try>'
+    - '        action: workato_recipe_function.call_recipe'
+    - '        <catch>'
+    - '          action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_variable.update_variables'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+  UPL-01:
+    code: UPL-01
+    kind: data_table_trigger
+    summary: File submission intake (request-scoped)
+    domain: Upload & Intake
+    source_file: upl_01_file_submission_intake_request_scoped_recipe.json
+    version: 87
+    trigger: workato_db_table.updated_records_realtime
+    trigger_type: data_table_realtime
+    trigger_table: SUP_SupplierRequest
+    trigger_event: updated_records_realtime
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: WRITE(update)
+      action: update_record
+    - table: RUN_Upload
+      access: WRITE(create)
+      action: add_record
+    - table: Project
+      access: READ
+      action: get_records
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - supplier_request_id
+      - error_type
+    - recipe: VAL-01
+      name: VAL-01 Validate supplier input
+      mode: sync
+      parameters:
+      - upload_id
+      - submission_source
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - analyst_email
+      - supplier_request_id
+      - error_type
+    - recipe: STS-01
+      name: STS-01 Status-change handler
+      mode: sync
+      parameters:
+      - supplier_request_id
+      - target_state
+      - trigger_context
+    - recipe: INV-01A
+      name: INV-01a Assign task to user in Workflow App
+      mode: async
+      parameters:
+      - supplier_request_id
+      - client_name
+      - days_to_complete_task
+      - assignee_email
+      - workflow_stage
+      - page
+      - task_name
+      - send_email
+    connector_actions:
+    - finalize_verdict
+    file_storage_ops:
+    - ensure_dir_exists
+    - store_file
+    workflow_app_tasks:
+    - complete_task
+    - share_request
+    declared_variables:
+    - name: CONSTANTS
+      type: object
+    - name: CONSTANTS.SOURCE_RECIPE
+      type: string
+    - name: CONSTANTS.UPLOAD_PATH_PREFIX
+      type: string
+    - name: CONSTANTS.SUBMISSION_SOURCE_FILE
+      type: string
+    - name: variables
+      type: object
+    - name: variables.default_due_days
+      type: integer
+    - name: variables.customer_name
+      type: string
+    - name: variables.analyst_email
+      type: string
+    - name: variables.upload_id
+      type: string
+    - name: variables.supplier_request_id
+      type: string
+    - name: variables.prior_status
+      type: string
+    - name: variables.assigned_version_id
+      type: string
+    - name: variables.prior_submission_attempt
+      type: integer
+    - name: variables.submitted_filename
+      type: string
+    - name: variables.submitted_path
+      type: string
+    - name: variables.verdict
+      type: string
+    - name: variables.validation_result_id
+      type: string
+    - name: variables.valid_row_count
+      type: integer
+    - name: variables.invalid_row_count
+      type: integer
+    - name: variables.val01_trigger_context
+      type: string
+    - name: variables.target_state
+      type: string
+    - name: variables.sts_result_success
+      type: boolean
+    - name: variables.sts_result_new_state
+      type: string
+    - name: variables.sts_result_error_code
+      type: string
+    control_flow:
+    - 'trigger: workato_db_table.updated_records_realtime'
+    - '  action: workato_variable.declare_variable'
+    - '  <if>'
+    - '    action: workato_db_table.update_record'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  <try>'
+    - '    action: workato_files.ensure_dir_exists'
+    - '    action: workato_files.store_file'
+    - '    action: workato_variable.update_variables'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '  action: workato_workflow_task.complete_task'
+    - '  action: workato_db_table.update_record'
+    - '  action: workato_db_table.add_record'
+    - '  action: workato_recipe_function.call_recipe'
+    - '  action: workato_variable.update_variables'
+    - '  action: workato_db_table.update_record'
+    - '  action: SDC_Connector.finalize_verdict'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: workato_variable.update_variables'
+    - '  action: workato_recipe_function.call_recipe'
+    - '  action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.update_variables'
+    - '    <if>'
+    - '      action: workato_workflow_task.share_request'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      elsif: '
+    - '        action: workato_recipe_function.call_recipe_async'
+    - '  action: workato_recipe_function.return_result'
+  LNK-01:
+    code: LNK-01
+    kind: workflow_app_function
+    summary: Generate download link for FileStorage file
+    domain: Utilities
+    source_file: lnk_01_generate_download_link_for_filestorage_file_recipe.json
+    version: 16
+    trigger: workato_workflow_task.app_function_generic_request
+    trigger_type: workflow_app_function
+    wfa_function_type: generic
+    request_schema: '#/components/schemas/LNK-01_Request'
+    response_schema: '#/components/schemas/LNK-01_Response'
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    file_storage_ops:
+    - create_shareable_link
+    workflow_app_tasks:
+    - app_function_return
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_generic_request'
+    - '  <try>'
+    - '    action: workato_files.create_shareable_link'
+    - '    action: workato_workflow_task.app_function_return'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_workflow_task.app_function_return'
+  WFA-01:
+    code: WFA-01
+    kind: workflow_app_function
+    summary: 'Hydrate WFA page with context (scope: per-request, audience: supplier)'
+    domain: Workflow App (Portal)
+    source_file: wfa_01_hydrate_wfa_page_with_context_scope_per_request_audience_supplier_recipe.json
+    version: 17
+    trigger: workato_workflow_task.app_function_generic_request
+    trigger_type: workflow_app_function
+    wfa_function_type: generic
+    request_schema: '#/components/schemas/WFA-01_Request'
+    response_schema: '#/components/schemas/WFA-01_Response'
+    data_tables:
+    - table: Project
+      access: READ
+      action: get_records
+    - table: SUP_Supplier
+      access: READ
+      action: get_records
+    - table: RUN_ValidationResult
+      access: READ
+      action: get_records
+    - table: RUN_ReviewNote
+      access: READ
+      action: get_records
+    - table: RUN_Upload
+      access: READ
+      action: get_records
+    workflow_app_tasks:
+    - app_function_return
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_generic_request'
+    - '  action: workato_db_table.get_records'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_db_table.get_records'
+    - '  action: workato_workflow_task.app_function_return'
+  WFA-02:
+    code: WFA-02
+    kind: workflow_app_function
+    summary: Hydrate supplier input context table
+    domain: Workflow App (Portal)
+    source_file: wfa_02_hydrate_supplier_input_context_table_recipe.json
+    version: 18
+    trigger: workato_workflow_task.app_function_load_table_request
+    trigger_type: workflow_app_function
+    wfa_function_type: load_table
+    output_is_table: true
+    request_schema: '#/components/schemas/WFA-02_Request'
+    response_schema: '#/components/schemas/WFA-02_Response'
+    workflow_app_tasks:
+    - app_function_return
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_load_table_request'
+    - '  action: workato_variable.declare_list'
+    - '  action: workato_workflow_task.app_function_return'
+  WFA-03:
+    code: WFA-03
+    kind: workflow_app_function
+    summary: Hydrate invite suppliers (analyst)
+    domain: Workflow App (Portal)
+    source_file: wfa_03_hydrate_invite_suppliers_analyst_recipe.json
+    version: 34
+    trigger: workato_workflow_task.app_function_load_table_request
+    trigger_type: workflow_app_function
+    wfa_function_type: load_table
+    output_is_table: true
+    response_schema: '#/components/schemas/WFA-03_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: SUP_Supplier
+      access: READ
+      action: get_records
+    - table: SUP_SupplierUser
+      access: READ
+      action: get_records
+    workflow_app_tasks:
+    - app_function_return
+    python_steps: 1
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_load_table_request'
+    - '  action: workato_db_table.get_records'
+    - '  action: workato_db_table.get_records'
+    - '  action: workato_db_table.get_records'
+    - '  action: py_eval.invoke_custom_py_code'
+    - '  action: workato_workflow_task.app_function_return'
+  WFA-05:
+    code: WFA-05
+    kind: workflow_app_function
+    summary: Load uploads to analyst review page
+    domain: Workflow App (Portal)
+    source_file: wfa_05_load_uploads_to_analyst_review_page_recipe.json
+    version: 14
+    trigger: workato_workflow_task.app_function_load_table_request
+    trigger_type: workflow_app_function
+    wfa_function_type: load_table
+    output_is_table: true
+    request_schema: '#/components/schemas/WFA-05_Request'
+    response_schema: '#/components/schemas/WFA-05_Response'
+    data_tables:
+    - table: RUN_Upload
+      access: READ
+      action: get_records
+    - table: RUN_ValidationResult
+      access: READ
+      action: get_records
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    workflow_app_tasks:
+    - app_function_return
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_load_table_request'
+    - '  <try>'
+    - '    action: workato_variable.declare_list'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_workflow_task.app_function_return'
+    - '    <foreach>'
+    - '      action: workato_db_table.get_records'
+    - '      action: workato_variable.insert_to_list'
+    - '    action: workato_workflow_task.app_function_return'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_workflow_task.app_function_return'
+  WFA-06:
+    code: WFA-06
+    kind: workflow_app_function
+    summary: Record human approval
+    domain: Workflow App (Portal)
+    source_file: wfa_06_record_human_approval_recipe.json
+    version: 7
+    trigger: workato_workflow_task.app_function_generic_request
+    trigger_type: workflow_app_function
+    wfa_function_type: generic
+    request_schema: '#/components/schemas/WFA-06_Request'
+    calls:
+    - recipe: REV-01
+      name: REV-01 Analyst review handler
+      mode: sync
+      parameters:
+      - supplier_request_id
+      - decision
+      - review_note_text
+      - analyst_email
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_generic_request'
+    - '  <try>'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+  WFA-07:
+    code: WFA-07
+    kind: workflow_app_function
+    summary: Hydrate WFA with analyst context
+    domain: Workflow App (Portal)
+    source_file: wfa_07_hydrate_wfa_with_analyst_context_recipe.json
+    version: 10
+    trigger: workato_workflow_task.app_function_generic_request
+    trigger_type: workflow_app_function
+    wfa_function_type: generic
+    request_schema: '#/components/schemas/WFA-07_Request'
+    response_schema: '#/components/schemas/WFA-07_Response'
+    data_tables:
+    - table: Project
+      access: READ
+      action: get_records
+    - table: SUP_Supplier
+      access: READ
+      action: get_records
+    - table: RUN_ValidationResult
+      access: READ
+      action: get_records
+    - table: RUN_Upload
+      access: READ
+      action: get_records
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    workflow_app_tasks:
+    - app_function_return
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_generic_request'
+    - '  <try>'
+    - '    <if>'
+    - '      action: workato_workflow_task.app_function_return'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_db_table.get_records'
+    - '      action: workato_db_table.get_records'
+    - '    action: workato_workflow_task.app_function_return'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_workflow_task.app_function_return'
+  WFA-08A:
+    code: WFA-08A
+    kind: workflow_app_function
+    summary: Load suppliers to drop-down
+    domain: Workflow App (Portal)
+    source_file: wfa_08a_load_suppliers_to_drop_down_recipe.json
+    version: 31
+    trigger: workato_workflow_task.app_function_load_dropdown_request
+    trigger_type: workflow_app_function
+    wfa_function_type: load_dropdown
+    search_enabled: 'false'
+    calls:
+    - recipe: UTL-03
+      name: UTL-03 Fetch suppliers
+      mode: sync
+      parameters:
+      - now
+    workflow_app_tasks:
+    - app_function_return
+    pubsub_ops:
+    - publish_to_topic
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_load_dropdown_request'
+    - '  <try>'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    <if>'
+    - '      action: workato_pub_sub.publish_to_topic'
+    - '    action: workato_workflow_task.app_function_return'
+    - '    <catch>'
+    - '      action: workato_pub_sub.publish_to_topic'
+  WFA-08B:
+    code: WFA-08B
+    kind: workflow_app_function
+    summary: Load suppliers
+    domain: Workflow App (Portal)
+    source_file: wfa_08b_load_suppliers_recipe.json
+    version: 11
+    trigger: workato_workflow_task.app_function_load_table_request
+    trigger_type: workflow_app_function
+    wfa_function_type: load_table
+    output_is_table: true
+    response_schema: '#/components/schemas/WFA-08B_Response'
+    calls:
+    - recipe: UTL-03
+      name: UTL-03 Fetch suppliers
+      mode: sync
+      parameters:
+      - now
+    workflow_app_tasks:
+    - app_function_return
+    pubsub_ops:
+    - publish_to_topic
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_load_table_request'
+    - '  <try>'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_workflow_task.app_function_return'
+    - '    <catch>'
+    - '      action: workato_pub_sub.publish_to_topic'
+  WFA-09:
+    code: WFA-09
+    kind: workflow_app_function
+    summary: Add supplier user via WFA
+    domain: Workflow App (Portal)
+    source_file: wfa_09_add_supplier_user_via_wfa_recipe.json
+    version: 23
+    trigger: workato_workflow_task.app_function_generic_request
+    trigger_type: workflow_app_function
+    wfa_function_type: generic
+    request_schema: '#/components/schemas/WFA-09_Request'
+    response_schema: '#/components/schemas/WFA-09_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: SUP_SupplierUser
+      access: READ
+      action: get_records
+    calls:
+    - recipe: SUP-02
+      name: SUP-02 Activation
+      mode: sync
+      parameters:
+      - supplier_id
+      - user_email
+      - analyst_email
+      - contact_name
+    - recipe: INV-03
+      name: INV-03 Invite user to request
+      mode: sync
+      parameters:
+      - supplier_request_id
+      - user_email
+      - analyst_email
+      - contact_name
+      - role
+    workflow_app_tasks:
+    - app_function_return
+    declared_variables:
+    - name: supplier_request_id
+      type: string
+    - name: role
+      type: string
+    - name: supplier_user_id
+      type: string
+    - name: disposition
+      type: string
+    - name: error
+      type: string
+    - name: ok
+      type: boolean
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_generic_request'
+    - '  action: workato_variable.declare_variable'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_variable.update_variables'
+    - '    <else>'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_db_table.get_records'
+    - '      <if>'
+    - '        action: workato_variable.update_variables'
+    - '        <else>'
+    - '          action: workato_db_table.get_records'
+    - '          <if>'
+    - '            action: workato_variable.update_variables'
+    - '            <else>'
+    - '              action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe'
+    - '      action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_workflow_task.app_function_return'
+    - '  action: workato_workflow_task.app_function_return'
+  WFA-10:
+    code: WFA-10
+    kind: workflow_app_function
+    summary: Check if user exists
+    domain: Workflow App (Portal)
+    source_file: wfa_10_check_if_user_exists_recipe.json
+    version: 4
+    trigger: workato_workflow_task.app_function_generic_request
+    trigger_type: workflow_app_function
+    wfa_function_type: generic
+    request_schema: '#/components/schemas/WFA-10_Request'
+    response_schema: '#/components/schemas/WFA-10_Response'
+    data_tables:
+    - table: SUP_SupplierUser
+      access: READ
+      action: get_records
+    workflow_app_tasks:
+    - app_function_return
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_generic_request'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_workflow_task.app_function_return'
+    - '  action: workato_workflow_task.app_function_return'
+  WFA-12:
+    code: WFA-12
+    kind: workflow_app_function
+    summary: List template variants
+    domain: Workflow App (Portal)
+    source_file: wfa_12_list_template_variants_recipe.json
+    version: 30
+    trigger: workato_workflow_task.app_function_load_dropdown_request
+    trigger_type: workflow_app_function
+    wfa_function_type: load_dropdown
+    search_enabled: 'false'
+    data_tables:
+    - table: CFG_TemplateVersion
+      access: READ
+      action: get_records
+    - table: CFG_Variant
+      access: READ
+      action: get_records
+    workflow_app_tasks:
+    - app_function_return
+    pubsub_ops:
+    - publish_to_topic
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_load_dropdown_request'
+    - '  action: workato_db_table.get_records'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_pub_sub.publish_to_topic'
+    - '  action: workato_workflow_task.app_function_return'
+  WFA-13--populate-request-details:
+    code: WFA-13
+    code_collision: true
+    collision_note: Filename prefix resolves to WFA-13, shared with another recipe — needs renumbering
+    kind: workflow_app_function
+    summary: Populate request details
+    domain: Workflow App (Portal)
+    source_file: wfa_13_populate_request_details_recipe.json
+    version: 7
+    trigger: workato_workflow_task.app_function_load_table_request
+    trigger_type: workflow_app_function
+    wfa_function_type: load_table
+    output_is_table: true
+    request_schema: '#/components/schemas/WFA-13--populate-request-details_Request'
+    response_schema: '#/components/schemas/WFA-13--populate-request-details_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: SUP_Supplier
+      access: READ
+      action: get_records
+    workflow_app_tasks:
+    - app_function_return
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_load_table_request'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '  action: workato_db_table.get_records'
+    - '  action: workato_variable.declare_list'
+    - '  action: workato_variable.insert_to_list_batch'
+    - '  action: workato_workflow_task.app_function_return'
+  WFA-13--populate-results-table-supplier-facing:
+    code: WFA-13
+    code_collision: true
+    collision_note: Filename prefix resolves to WFA-13, shared with another recipe — needs renumbering
+    kind: workflow_app_function
+    summary: Populate results table (supplier-facing)
+    domain: Workflow App (Portal)
+    source_file: wfa_13_populate_results_table_supplier_facing_recipe.json
+    version: 15
+    trigger: workato_workflow_task.app_function_load_table_request
+    trigger_type: workflow_app_function
+    wfa_function_type: load_table
+    output_is_table: true
+    request_schema: '#/components/schemas/WFA-13--populate-results-table-supplier-facing_Request'
+    response_schema: '#/components/schemas/WFA-13--populate-results-table-supplier-facing_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: RUN_Upload
+      access: READ
+      action: get_records
+    - table: RUN_ValidationResult
+      access: READ
+      action: get_records
+    workflow_app_tasks:
+    - app_function_return
+    control_flow:
+    - 'trigger: workato_workflow_task.app_function_load_table_request'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    stop: '
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    stop: '
+    - '  action: workato_variable.declare_list'
+    - '  <foreach>'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.insert_to_list'
+    - '  action: workato_workflow_task.app_function_return'
+  CAN-01:
+    code: CAN-01
+    kind: callable_recipe
+    summary: Build canonical model
+    domain: Canonical Model
+    source_file: can_01_build_canonical_model_recipe.json
+    version: 15
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/CAN-01_Request'
+    response_schema: '#/components/schemas/CAN-01_Response'
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    python_steps: 1
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '  action: workato_recipe_function.return_result'
+  CFG-01:
+    code: CFG-01
+    kind: callable_recipe
+    summary: Validate config
+    domain: Validation & Preview
+    source_file: cfg_01_validate_config_recipe.json
+    version: 43
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/CFG-01_Request'
+    response_schema: '#/components/schemas/CFG-01_Response'
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - error_type
+      - human_message
+      - details_json
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: sync
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    connector_actions:
+    - validate_config
+    file_storage_ops:
+    - get_file_contents
+    python_steps: 1
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: workato_files.get_file_contents'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '  action: py_eval.invoke_custom_py_code'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  <try>'
+    - '    action: SDC_Connector.validate_config'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe'
+    - '      action: workato_recipe_function.return_result'
+    - '  action: workato_recipe_function.return_result'
+  DASH-01:
+    code: DASH-01
+    kind: callable_recipe
+    summary: Dashboard synchronization
+    domain: Dashboard
+    source_file: dash_01_dashboard_synchronization_recipe.json
+    version: 29
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/DASH-01_Request'
+    response_schema: '#/components/schemas/DASH-01_Response'
+    data_tables:
+    - table: Project
+      access: READ
+      action: get_records
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: SUP_SupplierUser
+      access: READ
+      action: get_records
+    - table: DASH_SuppliersStaging
+      access: READ
+      action: get_records
+    - table: DASH_SuppliersStaging
+      access: WRITE(truncate)
+      action: truncate_table
+    - table: DASH_SuppliersStaging
+      access: WRITE(create-batch)
+      action: create_records_batch
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+    python_steps: 1
+    declared_variables:
+    - name: project_id
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.declare_variable'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_db_table.get_records'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_db_table.truncate_table'
+    - '    action: workato_db_table.create_records_batch'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '  action: workato_recipe_function.return_result'
+  INC-01:
+    code: INC-01
+    kind: callable_recipe
+    summary: Seed data (all suppliers with requests in non-terminal states)
+    domain: Seed & Integration
+    source_file: inc_01_seed_data_all_suppliers_with_requests_in_non_terminal_states_recipe.json
+    version: 92
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/INC-01_Request'
+    response_schema: '#/components/schemas/INC-01_Response'
+    data_tables:
+    - table: SUP_Supplier
+      access: READ
+      action: get_records
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    - recipe: INC-02
+      name: INC-02 Integrate seed data for a single supplier (write file and location to table)
+      mode: sync
+      parameters:
+      - supplier
+      - seed_data
+      - seeded_template_filename
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+      - severity
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+    file_storage_ops:
+    - get_file_contents
+    - store_file
+    google_drive_ops:
+    - download_file_contents
+    python_steps: 1
+    declared_variables:
+    - name: ok
+      type: boolean
+    - name: error_message
+      type: string
+    - name: severity
+      type: string
+    - name: file_path
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_variable.declare_variable'
+    - '  <try>'
+    - '    <if>'
+    - '      action: google_drive.download_file_contents'
+    - '      <if>'
+    - '        action: workato_recipe_function.call_recipe_async'
+    - '        action: workato_recipe_function.return_result'
+    - '      action: workato_files.store_file'
+    - '      action: workato_variable.update_variables'
+    - '    action: workato_files.get_file_contents'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_db_table.get_records'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_variable.declare_list'
+    - '    <foreach>'
+    - '      <try>'
+    - '        action: workato_recipe_function.call_recipe'
+    - '        <catch>'
+    - '          action: workato_variable.insert_to_list'
+    - '    <if>'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      <else>'
+    - '        action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+  INC-02:
+    code: INC-02
+    kind: callable_recipe
+    summary: Integrate seed data for a single supplier (write file and location to table)
+    domain: Seed & Integration
+    source_file: inc_02_integrate_seed_data_for_a_single_supplier_write_file_and_location_to_table_recipe.json
+    version: 39
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/INC-02_Request'
+    response_schema: '#/components/schemas/INC-02_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: CFG_Variant
+      access: READ
+      action: get_records
+    - table: SUP_SupplierRequest
+      access: WRITE(update)
+      action: update_record
+    file_storage_ops:
+    - get_file_contents
+    - store_file
+    python_steps: 1
+    declared_variables:
+    - name: assigned_variant_id
+      type: string
+    - name: assigned_version_id
+      type: string
+    - name: seed_template_file_path
+      type: string
+    - name: template_file_path_blank
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: workato_files.get_file_contents'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_variable.declare_variable'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_files.get_file_contents'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    action: workato_files.store_file'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_db_table.update_record'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.return_result'
+  INV-01:
+    code: INV-01
+    kind: callable_recipe
+    summary: Invite supplier user(s) per request ID
+    domain: Invitation
+    source_file: inv_01_invite_supplier_user_s_per_request_id_recipe.json
+    version: 103
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/INV-01_Request'
+    response_schema: '#/components/schemas/INV-01_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: Project
+      access: READ
+      action: get_records
+    - table: SUP_SupplierUser
+      access: READ
+      action: get_records
+    - table: SUP_SupplierUser
+      access: WRITE(update-batch)
+      action: update_records_batch
+    - table: CFG_VariantField
+      access: READ
+      action: get_records
+    - table: CFG_Variant
+      access: READ
+      action: get_records
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - supplier_request_id
+      - error_type
+      - human_message
+      - details_json
+      - analyst_email
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - supplier_request_id
+      - details_json
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - supplier_request_id
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - analyst_email
+      - supplier_request_id
+      - error_type
+    - recipe: INV-01A
+      name: INV-01a Assign task to user in Workflow App
+      mode: async
+      parameters:
+      - supplier_request_id
+      - client_name
+      - days_to_complete_task
+      - assignee_email
+      - workflow_stage
+      - page
+      - task_name
+      - send_email
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - supplier_request_id
+      - analyst_email
+      - details_json
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - analyst_email
+      - supplier_request_id
+      - error_type
+      - details_json
+    - recipe: STS-01
+      name: STS-01 Status-change handler
+      mode: sync
+      parameters:
+      - supplier_request_id
+      - target_state
+      - trigger_context
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - supplier_request_id
+      - analyst_email
+      - details_json
+    workflow_app_tasks:
+    - invite_user
+    - share_request
+    sends_email: true
+    template_ops:
+    - create_document
+    python_steps: 2
+    declared_variables:
+    - name: recipe_name
+      type: string
+    - name: prior_state
+      type: string
+    - name: prior_entered_at
+      type: date_time
+    - name: supplier_id
+      type: string
+    - name: assigned_variant_id
+      type: string
+    - name: request_due_date
+      type: date_time
+    - name: customer_name
+      type: string
+    - name: due_in_days
+      type: integer
+    - name: assignee_email
+      type: string
+    - name: assignee_contact_name
+      type: string
+    - name: secondaries
+      type: array
+    - name: assignee_disposition
+      type: string
+    - name: transition_success
+      type: boolean
+    - name: sts01_error_code
+      type: string
+    - name: secondary_disposition
+      type: array
+    - name: secondary_disposition.secondary_user_email
+      type: string
+    - name: secondary_disposition.disposition
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_variable.declare_variable'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: workato_variable.update_variables'
+    - '  action: workato_db_table.get_records'
+    - '  action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_recipe_function.return_result'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: py_eval.invoke_custom_py_code'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: workato_variable.update_variables'
+    - '  <try>'
+    - '    action: workato_template.create_document'
+    - '    action: email.send_mail'
+    - '    action: workato_db_table.update_records_batch'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '  action: workato_db_table.get_records'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  <try>'
+    - '    action: workato_workflow_task.invite_user'
+    - '    <catch>'
+    - '  <try>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_variable.update_variables'
+    - '    <catch>'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '  <foreach>'
+    - '    <try>'
+    - '      action: workato_workflow_task.invite_user'
+    - '      action: workato_workflow_task.share_request'
+    - '      action: workato_variable.update_variables'
+    - '      <catch>'
+    - '        action: workato_variable.update_variables'
+    - '        action: workato_recipe_function.call_recipe_async'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_variable.update_variables'
+    - '    <if>'
+    - '      action: py_eval.invoke_custom_py_code'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '  action: workato_recipe_function.return_result'
+  INV-01A:
+    code: INV-01A
+    kind: callable_recipe
+    summary: Assign task to user in Workflow App
+    domain: Invitation
+    source_file: inv_01a_assign_task_to_user_in_workflow_app_recipe.json
+    version: 32
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/INV-01A_Request'
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - details_json
+    workflow_app_tasks:
+    - get_requests
+    - human_review_on_existing_record
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: workato_workflow_task.get_requests'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '    <if>'
+    - '      action: workato_workflow_task.human_review_on_existing_record'
+    - '      elsif: '
+    - '        action: workato_workflow_task.human_review_on_existing_record'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+  INV-03:
+    code: INV-03
+    kind: callable_recipe
+    summary: Invite user to request
+    domain: Invitation
+    source_file: inv_03_invite_user_to_request_recipe.json
+    version: 28
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/INV-03_Request'
+    response_schema: '#/components/schemas/INV-03_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: SUP_SupplierUser
+      access: READ
+      action: get_records
+    - table: SUP_SupplierUser
+      access: WRITE(create)
+      action: add_record
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - analyst_email
+      - error_type
+      - supplier_request_id
+      - details_json
+    - recipe: INV-USER
+      name: INV-USER
+      mode: sync
+      parameters:
+      - supplier_request_id
+      - user_email
+      - contact_name
+      - analyst_email
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - analyst_email
+      - supplier_request_id
+    declared_variables:
+    - name: supplier_user_id
+      type: string
+    - name: user_was_created
+      type: boolean
+    - name: disposition
+      type: string
+    - name: error
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_variable.declare_variable'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  <if>'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  <if>'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_recipe_function.return_result'
+    - '    <else>'
+    - '      action: workato_db_table.add_record'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe'
+    - '      action: workato_variable.update_variables'
+    - '      <if>'
+    - '        action: workato_recipe_function.call_recipe_async'
+    - '  action: workato_recipe_function.return_result'
+  INV-USER:
+    code: INV-USER
+    kind: callable_recipe
+    summary: INV-USER
+    domain: Invitation
+    source_file: inv_user_recipe.json
+    version: 25
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/INV-USER_Request'
+    response_schema: '#/components/schemas/INV-USER_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - analyst_email
+      - supplier_request_id
+      - error_type
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - supplier_request_id
+      - analyst_email
+      - details_json
+    workflow_app_tasks:
+    - invite_user
+    - share_request
+    declared_variables:
+    - name: disposition
+      type: string
+    - name: error
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_variable.declare_variable'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  <try>'
+    - '    action: workato_workflow_task.invite_user'
+    - '    action: workato_workflow_task.share_request'
+    - '    action: workato_variable.update_variables'
+    - '    <catch>'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '  action: workato_recipe_function.return_result'
+  OBS-01:
+    code: OBS-01
+    kind: callable_recipe
+    summary: Event emitter
+    domain: Observability
+    source_file: obs_01_event_emitter_recipe.json
+    version: 16
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/OBS-01_Request'
+    response_schema: '#/components/schemas/OBS-01_Response'
+    data_tables:
+    - table: EventLog
+      access: WRITE(create)
+      action: add_record
+    python_steps: 1
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: py_eval.invoke_custom_py_code'
+    - '  action: workato_db_table.add_record'
+    - '  action: workato_recipe_function.return_result'
+  PRV-01:
+    code: PRV-01
+    kind: callable_recipe
+    summary: Provisioning (read config file, create directories, invite analyst to workspace)
+    domain: Provisioning
+    source_file: prv_01_provisioning_read_config_file_create_directories_invite_analyst_to_workspace_recipe.json
+    version: 29
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/PRV-01_Request'
+    response_schema: '#/components/schemas/PRV-01_Response'
+    data_tables:
+    - table: Project
+      access: READ
+      action: get_records
+    - table: CFG_TemplateVersion
+      access: READ
+      action: get_records
+    - table: Project
+      access: WRITE(create)
+      action: add_record
+    - table: CFG_TemplateVersion
+      access: WRITE(create)
+      action: add_record
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - details_json
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - analyst_email
+      - error_type
+      - details_json
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - analyst_email
+      - error_type
+    file_storage_ops:
+    - ensure_dir_exists
+    - store_file
+    google_drive_ops:
+    - download_file_contents
+    workflow_app_tasks:
+    - invite_user
+    python_steps: 2
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: workato_db_table.get_records'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: google_drive.download_file_contents'
+    - '    action: workato_files.ensure_dir_exists'
+    - '    action: workato_files.ensure_dir_exists'
+    - '    action: workato_files.ensure_dir_exists'
+    - '    action: workato_files.store_file'
+    - '    <if>'
+    - '      action: workato_db_table.add_record'
+    - '      <try>'
+    - '        action: workato_workflow_task.invite_user'
+    - '        <catch>'
+    - '          action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_db_table.add_record'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+  PRV-02:
+    code: PRV-02
+    kind: callable_recipe
+    summary: Parse and build canonical model
+    domain: Provisioning
+    source_file: prv_02_parse_and_build_canonical_model_recipe.json
+    version: 33
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/PRV-02_Request'
+    response_schema: '#/components/schemas/PRV-02_Response'
+    data_tables:
+    - table: CFG_TemplateVersion
+      access: READ
+      action: get_records
+    - table: Project
+      access: READ
+      action: get_records
+    - table: Project
+      access: WRITE(update)
+      action: update_record
+    - table: CFG_TemplateVersion
+      access: WRITE(update)
+      action: update_record
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - details_json
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+    - recipe: CFG-01
+      name: CFG-01 Validate config
+      mode: sync
+      parameters:
+      - parsed_config_path
+      - form_field_limit
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: sync
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    - recipe: CAN-01
+      name: CAN-01 Build canonical model
+      mode: sync
+      parameters:
+      - expected_sheet_name
+      - parsed_config_json
+      - template_version_id
+      - version_number
+      - project_id
+    connector_actions:
+    - parse_config_file
+    file_storage_ops:
+    - get_file_contents
+    - store_file
+    declared_variables:
+    - name: gas_export_path
+      type: string
+    - name: version_number
+      type: integer
+    - name: parse_summary
+      type: object
+    - name: parse_summary.field_count
+      type: integer
+    - name: parse_summary.visible_field_count
+      type: integer
+    - name: parse_summary.rule_count
+      type: integer
+    - name: parse_summary.lookup_count
+      type: integer
+    - name: parse_summary.variant_count
+      type: integer
+    - name: parse_summary.supplier_count
+      type: integer
+    - name: parse_summary.user_count
+      type: integer
+    - name: parse_summary.error_translation_count
+      type: integer
+    - name: parse_summary.skipped_rows
+      type: object
+    - name: parse_summary.skipped_rows.fields
+      type: integer
+    - name: parse_summary.skipped_rows.lookups
+      type: integer
+    - name: parse_summary.skipped_rows.suppliers
+      type: integer
+    - name: parse_summary.skipped_rows.users
+      type: integer
+    - name: parse_summary.warnings
+      type: array
+    - name: parse_summary.warnings.sheet
+      type: string
+    - name: parse_summary.warnings.row
+      type: integer
+    - name: parse_summary.warnings.issue
+      type: string
+    - name: validate_summary
+      type: object
+    - name: validate_summary.warnings
+      type: array
+    - name: validate_summary.warnings.check_name
+      type: string
+    - name: validate_summary.warnings.c_status
+      type: string
+    - name: validate_summary.warnings.message
+      type: string
+    - name: validate_summary.warnings.details
+      type: array
+    - name: validate_summary.warnings.details.entity
+      type: string
+    - name: validate_summary.warnings.details.name
+      type: string
+    - name: validate_summary.warnings.details.issue
+      type: string
+    - name: validate_summary.status
+      type: string
+    - name: validate_summary.error_count
+      type: integer
+    - name: validate_summary.warning_count
+      type: integer
+    - name: validate_summary.checks
+      type: array
+    - name: validate_summary.checks.check_name
+      type: string
+    - name: validate_summary.checks.status
+      type: string
+    - name: validate_summary.checks.message
+      type: string
+    - name: parsed_config_file_path
+      type: string
+    - name: canonical_model_path
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: workato_variable.declare_variable'
+    - '  action: workato_files.get_file_contents'
+    - '  action: SDC_Connector.parse_config_file'
+    - '  action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: workato_files.store_file'
+    - '  action: workato_recipe_function.call_recipe_async'
+    - '  action: workato_variable.declare_variable'
+    - '  action: workato_db_table.get_records'
+    - '  action: workato_db_table.update_record'
+    - '  action: workato_recipe_function.call_recipe'
+    - '  action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: workato_recipe_function.call_recipe'
+    - '  action: workato_files.store_file'
+    - '  action: workato_variable.update_variables'
+    - '  action: workato_db_table.update_record'
+    - '  action: workato_recipe_function.return_result'
+  PRV-03:
+    code: PRV-03
+    kind: callable_recipe
+    summary: Hydrate configuration (CFG_*) tables
+    domain: Provisioning
+    source_file: prv_03_hydrate_configuration_cfg_tables_recipe.json
+    version: 22
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/PRV-03_Request'
+    response_schema: '#/components/schemas/PRV-03_Response'
+    data_tables:
+    - table: CFG_Field
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: CFG_Rule
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: CFG_Lookup
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: CFG_Variant
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: CFG_VariantField
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: CFG_FormSlotMapping
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: CFG_ErrorMessage
+      access: WRITE(create-batch)
+      action: create_records_batch
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    file_storage_ops:
+    - get_file_contents
+    python_steps: 2
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: workato_files.get_file_contents'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.create_records_batch'
+    - '    <if>'
+    - '      action: workato_db_table.create_records_batch'
+    - '    <if>'
+    - '      <foreach>'
+    - '        action: workato_db_table.create_records_batch'
+    - '    action: workato_db_table.create_records_batch'
+    - '    action: workato_db_table.create_records_batch'
+    - '    <if>'
+    - '      action: workato_db_table.create_records_batch'
+    - '    action: workato_db_table.create_records_batch'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+  PRV-04:
+    code: PRV-04
+    kind: callable_recipe
+    summary: Publish template and variants, populate SUP_Suppliers and SUP_SupplierUsers
+    domain: Provisioning
+    source_file: prv_04_publish_template_and_variants_populate_sup_suppliers_and_sup_supplierusers_recipe.json
+    version: 23
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/PRV-04_Request'
+    response_schema: '#/components/schemas/PRV-04_Response'
+    data_tables:
+    - table: CFG_TemplateVersion
+      access: READ
+      action: get_records
+    - table: Project
+      access: READ
+      action: get_records
+    - table: CFG_Variant
+      access: READ
+      action: get_records
+    - table: CFG_Variant
+      access: WRITE(update)
+      action: update_record
+    - table: CFG_TemplateVersion
+      access: WRITE(update)
+      action: update_record
+    - table: SUP_Supplier
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: SUP_SupplierUser
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: table_id:20605
+      access: WRITE(create-batch)
+      action: create_records_batch
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    - recipe: TPL-01
+      name: TPL-01 Build XLSX template
+      mode: sync
+      parameters:
+      - template_version_id
+      - customer_name
+      - variant_id
+      - variant_name
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - analyst_email
+      - error_type
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+    - recipe: flow_id:2066426
+      name: flow_id:2066426
+      mode: async
+      parameters:
+      - template_version_id
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - error_type
+      - details_json
+      - human_message
+    file_storage_ops:
+    - get_file_contents
+    - store_file
+    workflow_app_tasks:
+    - add_request
+    python_steps: 3
+    declared_variables:
+    - name: template_path
+      type: string
+    - name: is_e2
+      type: boolean
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_files.get_file_contents'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_variable.declare_list'
+    - '    action: workato_variable.declare_list'
+    - '    action: workato_variable.declare_variable'
+    - '    <foreach>'
+    - '      action: workato_recipe_function.call_recipe'
+    - '      <if>'
+    - '        action: workato_variable.insert_to_list'
+    - '        <else>'
+    - '          action: workato_files.store_file'
+    - '          action: workato_variable.insert_to_list'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    <foreach>'
+    - '      action: workato_db_table.update_record'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.declare_variable'
+    - '    <if>'
+    - '      action: workato_db_table.update_record'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_db_table.update_record'
+    - '    <if>'
+    - '      action: workato_files.get_file_contents'
+    - '      action: py_eval.invoke_custom_py_code'
+    - '      <if>'
+    - '        action: workato_recipe_function.call_recipe_async'
+    - '        action: workato_recipe_function.return_result'
+    - '      action: workato_db_table.create_records_batch'
+    - '      action: workato_db_table.create_records_batch'
+    - '      <foreach>'
+    - '        action: workato_workflow_task.add_request'
+    - '      action: workato_db_table.create_records_batch'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+  PRV-05:
+    code: PRV-05
+    kind: callable_recipe
+    summary: Prepare for supplier user invitations
+    domain: Provisioning
+    source_file: prv_05_prepare_for_supplier_user_invitations_recipe.json
+    version: 3
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/PRV-05_Request'
+    response_schema: '#/components/schemas/PRV-05_Response'
+    calls:
+    - recipe: DASH-01
+      name: DASH-01 Dashboard synchronization
+      mode: sync
+      parameters:
+      - template_version_id
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+  REV-01:
+    code: REV-01
+    kind: callable_recipe
+    summary: Analyst review handler
+    domain: Review
+    source_file: rev_01_analyst_review_handler_recipe.json
+    version: 85
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/REV-01_Request'
+    response_schema: '#/components/schemas/REV-01_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: Project
+      access: READ
+      action: get_records
+    - table: RUN_ValidationResult
+      access: READ
+      action: get_records
+    - table: RUN_Upload
+      access: READ
+      action: get_records
+    - table: SUP_SupplierRequest
+      access: WRITE(update)
+      action: update_record
+    - table: RUN_ReviewNote
+      access: WRITE(create)
+      action: add_record
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - analyst_email
+      - supplier_request_id
+    - recipe: STS-01
+      name: STS-01 Status-change handler
+      mode: sync
+      parameters:
+      - supplier_request_id
+      - target_state
+      - trigger_context
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - analyst_email
+      - supplier_request_id
+    file_storage_ops:
+    - get_file_contents
+    - store_file
+    python_steps: 3
+    declared_variables:
+    - name: CONSTANTS
+      type: object
+    - name: CONSTANTS.CUSTOMER_NAME
+      type: string
+    - name: CONSTANTS.ANALYST_EMAIL
+      type: string
+    - name: CONSTANTS.SOURCE_RECIPE
+      type: string
+    - name: recipe_variables
+      type: object
+    - name: recipe_variables.review_action
+      type: string
+    - name: recipe_variables.supplier_request_id
+      type: string
+    - name: recipe_variables.request_status
+      type: string
+    - name: recipe_variables.current_validation_result_id
+      type: string
+    - name: recipe_variables.upload_id
+      type: string
+    - name: recipe_variables.submitted_path
+      type: string
+    - name: recipe_variables.target_state
+      type: string
+    - name: recipe_variables.trigger_context
+      type: string
+    - name: recipe_variables.approved_at
+      type: date_time
+    - name: recipe_variables.approved_path
+      type: string
+    - name: recipe_variables.sts_result_success
+      type: boolean
+    - name: recipe_variables.sts_result_new_state
+      type: string
+    - name: recipe_variables.sts_result_error_code
+      type: string
+    - name: recipe_variables.rev_error_type
+      type: string
+    - name: recipe_variables.review_note_id
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_db_table.get_records'
+    - '  action: workato_variable.declare_variable'
+    - '  action: workato_db_table.get_records'
+    - '  action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  <if>'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: py_eval.invoke_custom_py_code'
+    - '  action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.update_variables'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.update_variables'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    <try>'
+    - '      action: workato_files.get_file_contents'
+    - '      action: workato_files.store_file'
+    - '      <catch>'
+    - '        action: workato_recipe_function.call_recipe_async'
+    - '        action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.update_record'
+    - '    <if>'
+    - '      action: workato_db_table.add_record'
+    - '      action: workato_variable.update_variables'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_variable.update_variables'
+    - '    <if>'
+    - '      action: py_eval.invoke_custom_py_code'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    elsif: '
+    - '      action: workato_db_table.add_record'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe'
+    - '      action: workato_variable.update_variables'
+    - '      <if>'
+    - '        action: py_eval.invoke_custom_py_code'
+    - '        action: workato_variable.update_variables'
+    - '        action: workato_recipe_function.call_recipe_async'
+    - '        action: workato_recipe_function.return_result'
+    - '  action: workato_recipe_function.call_recipe_async'
+    - '  action: workato_recipe_function.return_result'
+  STS-01:
+    code: STS-01
+    kind: callable_recipe
+    summary: Status-change handler
+    domain: State Machine
+    source_file: sts_01_status_change_handler_recipe.json
+    version: 44
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/STS-01_Request'
+    response_schema: '#/components/schemas/STS-01_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: RUN_ValidationResult
+      access: READ
+      action: get_records
+    - table: Project
+      access: READ
+      action: get_records
+    - table: RUN_ReviewNote
+      access: READ
+      action: get_records
+    - table: SUP_SupplierRequest
+      access: WRITE(update)
+      action: update_record
+    calls:
+    - recipe: UTL-01
+      name: UTL-01 Generate shareable link
+      mode: sync
+      parameters:
+      - path
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: sync
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - supplier_request_id
+      - details_json
+    python_steps: 2
+    declared_variables:
+    - name: due_date
+      type: date_time
+    - name: invalid_row_count
+      type: integer
+    - name: validated_at
+      type: date_time
+    - name: validation_report_link
+      type: string
+    - name: review_note_text
+      type: string
+    - name: reviewed_at
+      type: date_time
+    - name: submitted_at
+      type: date_time
+    - name: approved_at
+      type: date_time
+    - name: analyst_email
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_db_table.get_records'
+    - '  <if>'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: py_eval.invoke_custom_py_code'
+    - '  <if>'
+    - '    action: workato_recipe_function.return_result'
+    - '  <if>'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '  <if>'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '      <else>'
+    - '        action: workato_db_table.get_records'
+    - '        <if>'
+    - '          action: workato_recipe_function.return_result'
+    - '  <if>'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '  <if>'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '  action: workato_variable.declare_variable'
+    - '  <if>'
+    - '    <if>'
+    - '      action: workato_variable.update_variables'
+    - '      elsif: '
+    - '        action: workato_variable.update_variables'
+    - '      <else>'
+    - '        action: workato_db_table.get_records'
+    - '        action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_variable.update_variables'
+    - '  <if>'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.update_variables'
+    - '  action: py_eval.invoke_custom_py_code'
+    - '  <if>'
+    - '    action: workato_recipe_function.return_result'
+    - '  action: workato_db_table.update_record'
+    - '  action: workato_recipe_function.call_recipe'
+    - '  action: workato_recipe_function.return_result'
+  SUP-01:
+    code: SUP-01
+    kind: callable_recipe
+    summary: Add supplier from configuration
+    domain: Supplier Lifecycle
+    source_file: sup_01_add_supplier_from_configuration_recipe.json
+    version: 72
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/SUP-01_Request'
+    response_schema: '#/components/schemas/SUP-01_Response'
+    data_tables:
+    - table: Project
+      access: READ
+      action: get_records
+    - table: CFG_TemplateVersion
+      access: READ
+      action: get_records
+    - table: CFG_Variant
+      access: READ
+      action: get_records
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: SUP_Supplier
+      access: READ
+      action: get_records
+    - table: SUP_Supplier
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: SUP_SupplierUser
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: SUP_SupplierRequest
+      access: WRITE(create-batch)
+      action: create_records_batch
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+    python_steps: 2
+    declared_variables:
+    - name: template_version_id
+      type: string
+    - name: added_counts
+      type: object
+    - name: added_counts.added_users_ct
+      type: integer
+    - name: added_counts.added_requests_ct
+      type: integer
+    - name: added_counts.added_suppliers_ct
+      type: integer
+    - name: recipe
+      type: object
+    - name: recipe.job_url
+      type: string
+    - name: recipe.recipe_url
+      type: string
+    - name: recipe.source_recipe
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_variable.declare_variable'
+    - '  <try>'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_db_table.get_records'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    <if>'
+    - '      action: workato_db_table.create_records_batch'
+    - '    <if>'
+    - '      action: workato_db_table.create_records_batch'
+    - '    <if>'
+    - '      action: workato_db_table.create_records_batch'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+  SUP-02:
+    code: SUP-02
+    kind: callable_recipe
+    summary: Activation
+    domain: Supplier Lifecycle
+    source_file: sup_02_activation_recipe.json
+    version: 28
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/SUP-02_Request'
+    response_schema: '#/components/schemas/SUP-02_Response'
+    data_tables:
+    - table: SUP_Supplier
+      access: READ
+      action: get_records
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: CFG_TemplateVersion
+      access: READ
+      action: get_records
+    - table: CFG_Variant
+      access: READ
+      action: get_records
+    - table: SUP_SupplierUser
+      access: WRITE(create)
+      action: add_record
+    - table: SUP_SupplierRequest
+      access: WRITE(create)
+      action: add_record
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - analyst_email
+      - error_type
+      - details_json
+    - recipe: INV-01
+      name: INV-01 Invite supplier user(s) per request ID
+      mode: sync
+      parameters:
+      - supplier_request_id
+      - analyst_email
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - analyst_email
+      - supplier_request_id
+      - details_json
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - analyst_email
+      - supplier_request_id
+      - details_json
+      - error_type
+    python_steps: 2
+    declared_variables:
+    - name: error
+      type: string
+    - name: disposition
+      type: string
+    - name: ok
+      type: boolean
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_variable.declare_variable'
+    - '  <try>'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: py_eval.invoke_custom_py_code'
+    - '      <if>'
+    - '        action: workato_variable.update_variables'
+    - '        action: workato_recipe_function.call_recipe_async'
+    - '        action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    <if>'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.add_record'
+    - '    action: workato_db_table.add_record'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_recipe_function.call_recipe_async'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_variable.update_variables'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+  TPL-01:
+    code: TPL-01
+    kind: callable_recipe
+    summary: Build XLSX template
+    domain: ''
+    source_file: tpl_01_build_xlsx_template_recipe.json
+    version: 50
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/TPL-01_Request'
+    response_schema: '#/components/schemas/TPL-01_Response'
+    data_tables:
+    - table: CFG_TemplateVersion
+      access: READ
+      action: get_records
+    - table: CFG_Variant
+      access: READ
+      action: get_records
+    calls:
+    - recipe: TPL-02
+      name: TPL-02 Build XLSX
+      mode: sync
+      parameters:
+      - canonical_model_json
+      - customer_name
+      - variant_id
+      - variant_name
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: sync
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+    file_storage_ops:
+    - get_file_contents
+    declared_variables:
+    - name: started_at
+      type: date_time
+    - name: recipe_handle
+      type: string
+    - name: resolved_variant_name
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: workato_variable.declare_variable'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '    <if>'
+    - '      action: workato_db_table.get_records'
+    - '      action: workato_variable.update_variables'
+    - '    action: workato_files.get_file_contents'
+    - '    action: workato_recipe_function.call_recipe'
+    - '    <if>'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.call_recipe'
+    - '      action: workato_recipe_function.return_result'
+  TPL-02:
+    code: TPL-02
+    kind: callable_recipe
+    summary: Build XLSX
+    domain: ''
+    source_file: tpl_02_build_xlsx_recipe.json
+    version: 26
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/TPL-02_Request'
+    response_schema: '#/components/schemas/TPL-02_Response'
+    python_steps: 1
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: py_eval.invoke_custom_py_code'
+    - '  action: workato_recipe_function.return_result'
+  UTL-01:
+    code: UTL-01
+    kind: callable_recipe
+    summary: Generate shareable link
+    domain: Utilities
+    source_file: utl_01_generate_shareable_link_recipe.json
+    version: 4
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/UTL-01_Request'
+    response_schema: '#/components/schemas/UTL-01_Response'
+    file_storage_ops:
+    - create_shareable_link
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_files.create_shareable_link'
+    - '  action: workato_recipe_function.return_result'
+  UTL-03:
+    code: UTL-03
+    kind: callable_recipe
+    summary: Fetch suppliers
+    domain: Utilities
+    source_file: utl_03_fetch_suppliers_recipe.json
+    version: 13
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/UTL-03_Request'
+    response_schema: '#/components/schemas/UTL-03_Response'
+    data_tables:
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: SUP_Supplier
+      access: READ
+      action: get_records
+    python_steps: 1
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  <try>'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_db_table.get_records'
+    - '    action: py_eval.invoke_custom_py_code'
+    - '    action: workato_recipe_function.return_result'
+    - '    <catch>'
+    - '      action: workato_recipe_function.return_result'
+  VAL-01:
+    code: VAL-01
+    kind: callable_recipe
+    summary: Validate supplier input
+    domain: Validation & Preview
+    source_file: val_01_validate_supplier_input_recipe.json
+    version: 125
+    trigger: workato_recipe_function.execute
+    trigger_type: recipe_function
+    request_schema: '#/components/schemas/VAL-01_Request'
+    response_schema: '#/components/schemas/VAL-01_Response'
+    data_tables:
+    - table: RUN_Upload
+      access: READ
+      action: get_records
+    - table: Project
+      access: READ
+      action: get_records
+    - table: CFG_TemplateVersion
+      access: READ
+      action: get_records
+    - table: RUN_Upload
+      access: WRITE(update)
+      action: update_record
+    - table: RUN_ValidationResult
+      access: WRITE(create)
+      action: add_record
+    - table: RUN_FieldError
+      access: WRITE(create-batch)
+      action: create_records_batch
+    - table: SUP_SupplierRequest
+      access: READ
+      action: get_records
+    - table: SUP_SupplierRequest
+      access: WRITE(update)
+      action: update_record
+    calls:
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - error_type
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - details_json
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - supplier_request_id
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - details_json
+      - human_message
+      - supplier_request_id
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - details_json
+      - supplier_request_id
+      - error_type
+    - recipe: OBS-01
+      name: OBS-01 Event emitter
+      mode: async
+      parameters:
+      - severity
+      - source_recipe
+      - step_number
+      - phase
+      - human_message
+      - error_type
+      - supplier_request_id
+      - details_json
+    connector_actions:
+    - generate_validation_report
+    - validate_upload
+    file_storage_ops:
+    - ensure_dir_exists
+    - get_file_contents
+    - store_file
+    csv_parser_ops:
+    - create_csv_lines
+    python_steps: 2
+    declared_variables:
+    - name: started_at
+      type: date_time
+    - name: recipe_handle
+      type: string
+    - name: verdict_status
+      type: string
+    - name: verdict_errors
+      type: array
+    - name: verdict_errors.row_number
+      type: integer
+    - name: verdict_errors.field_id
+      type: string
+    - name: verdict_errors.field_name
+      type: string
+    - name: verdict_errors.submitted_value
+      type: string
+    - name: verdict_errors.error_code
+      type: string
+    - name: verdict_errors.error_message
+      type: string
+    - name: verdict_errors.strict
+      type: boolean
+    - name: verdict_errors.source
+      type: string
+    - name: verdict_valid_row_count
+      type: integer
+    - name: verdict_invalid_row_count
+      type: integer
+    - name: validation_result_id
+      type: string
+    - name: row_count
+      type: integer
+    - name: extracted_rows
+      type: array
+    - name: supplier_request_id
+      type: string
+    - name: template_version_id
+      type: string
+    - name: canonical_model_content
+      type: string
+    control_flow:
+    - 'trigger: workato_recipe_function.execute'
+    - '  action: workato_variable.declare_variable'
+    - '  <try>'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_db_table.get_records'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      action: workato_recipe_function.return_result'
+    - '    action: workato_files.get_file_contents'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_db_table.update_record'
+    - '    <if>'
+    - '      action: workato_files.get_file_contents'
+    - '      action: py_eval.invoke_custom_py_code'
+    - '      <if>'
+    - '        action: workato_variable.update_variables'
+    - '        <else>'
+    - '          action: workato_files.ensure_dir_exists'
+    - '          action: workato_files.store_file'
+    - '          action: workato_db_table.update_record'
+    - '          action: workato_variable.update_variables'
+    - '      <else>'
+    - '        action: workato_files.get_file_contents'
+    - '        action: py_eval.invoke_custom_py_code'
+    - '        <if>'
+    - '          action: workato_variable.update_variables'
+    - '          <else>'
+    - '            action: workato_variable.update_variables'
+    - '    <if>'
+    - '      action: workato_variable.update_variables'
+    - '    <if>'
+    - '      <try>'
+    - '        action: SDC_Connector.validate_upload'
+    - '        action: workato_variable.update_variables'
+    - '        <catch>'
+    - '          action: workato_recipe_function.call_recipe_async'
+    - '          action: workato_variable.update_variables'
+    - '    action: workato_variable.update_variables'
+    - '    action: workato_variable.update_variables'
+    - '    <if>'
+    - '      action: SDC_Connector.generate_validation_report'
+    - '      <if>'
+    - '        action: csv_parser.create_csv_lines'
+    - '        action: workato_files.store_file'
+    - '    action: workato_db_table.add_record'
+    - '    <if>'
+    - '      action: workato_db_table.create_records_batch'
+    - '    action: workato_db_table.get_records'
+    - '    action: workato_db_table.update_record'
+    - '    action: workato_db_table.update_record'
+    - '    <if>'
+    - '      action: workato_recipe_function.call_recipe_async'
+    - '      elsif: '
+    - '        action: workato_recipe_function.call_recipe_async'
+    - '      <else>'
