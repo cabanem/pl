@@ -1986,11 +1986,13 @@ x-data-tables:
     written_by:
     - PRV-04
 x-request-write-paths:
-  description: Two distinct mechanisms mutate the supplier-request record. (1) Data Table actions (workato_db_table)
-    address the row by table_id + record id and are authoritative for SUP_SupplierRequest. (2) Workflow
-    App actions (workato_workflow_task) address the request by app_id + record_id; the recipe JSON does
-    not name the backing table, so whether the WFA app is backed by SUP_SupplierRequest or a separate
-    WFA-side table is defined in the Workflow App config, not here. Listed for visibility either way.
+  description: Two distinct mechanisms mutate the supplier-request record, both hitting the same row.
+    (1) Data Table actions (workato_db_table) address it by table_id + record id and own the user-defined
+    columns including SUP_SupplierRequest.status (the state-machine column). (2) Workflow App actions
+    (workato_workflow_task) address the request by app_id + record_id; per the app config the MARS RC
+    Data Collection app is backed by SUP_SupplierRequest, and these actions write WFA-native fields (CURRENT_STAGE
+    / CURRENT_TASK / ASSIGNED_TO) that are NOT in the data-table schema and are separate from the .status
+    column.
   via_data_table:
   - recipe: UPL-01
     action: update_record
@@ -2032,6 +2034,67 @@ x-request-write-paths:
   - recipe: PRV-04
     action: add_request
     op: create
+x-status-writers:
+  description: The state machine runs on SUP_SupplierRequest.status (uuid 84d52734-..., a free-text column
+    with no DB-level enum, so recipe discipline is the only thing enforcing valid state tokens). This
+    is distinct from the Workflow App task/stage status (CURRENT_TASK / CURRENT_STAGE), which is WFA-native
+    and not in the table schema. Column names resolved from the SUP_SupplierRequest data-table trigger
+    (UPL-01).
+  state_machine_status_column: SUP_SupplierRequest.status
+  writes_state_machine_status:
+  - recipe: STS-01
+    action: update_record
+    write_kind: update
+    all_columns_written:
+    - current_state_entered_at
+    - status
+    - supplier_display_status
+    - supplier_message
+  - recipe: SUP-02
+    action: add_record
+    write_kind: create
+    all_columns_written:
+    - assigned_variant_id
+    - assigned_version_id
+    - assignee_email
+    - current_state_entered_at
+    - has_seeded_data
+    - last_reminder_tier
+    - reminders_enabled
+    - status
+    - submission_attempt
+    - supplier_display_status
+    - supplier_id
+    - supplier_request_id
+    - template_path
+  writes_supplier_display_status:
+  - recipe: STS-01
+    action: update_record
+  - recipe: SUP-02
+    action: add_record
+  batch_create_indeterminate:
+  - recipe: SUP-01
+    action: create_records_batch
+    note: batch payload is a list pill; per-column writes not statically visible — may set status at creation
+  writes_wfa_task_status:
+  - recipe: UPL-01
+    action: complete_task
+    sets:
+    - status
+    - status_label
+  writes_wfa_stage:
+  - recipe: INV-01A
+    action: human_review_on_existing_record
+    sets:
+    - workflow_stage_id
+  - recipe: INV-01A
+    action: human_review_on_existing_record
+    sets:
+    - workflow_stage_id
+  - recipe: PRV-04
+    action: add_request
+    sets:
+    - workflow_stage_id
 x-recipes:
   API-00:
     code: API-00
@@ -2674,6 +2737,9 @@ x-recipes:
     - action: complete_task
       op: update
       addressing: app_id+record_id
+      sets_fields:
+      - status
+      - status_label
     - action: share_request
       op: share
       addressing: app_id+record_id
@@ -3898,6 +3964,8 @@ x-recipes:
     - action: human_review_on_existing_record
       op: update
       addressing: app_id+record_id
+      sets_fields:
+      - workflow_stage_id
     control_flow:
     - 'trigger: workato_recipe_function.execute'
     - '  <try>'
@@ -4572,6 +4640,8 @@ x-recipes:
     - action: add_request
       op: create
       addressing: app_id+record_id
+      sets_fields:
+      - workflow_stage_id
     python_steps: 3
     declared_variables:
     - name: template_path
