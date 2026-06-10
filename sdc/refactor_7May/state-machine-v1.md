@@ -2,7 +2,8 @@
 
 ## Status
 
-Workstream 2 of Phase 0. Locked decisions on status values, transitions, and the `supplier_display_status` / `supplier_message` derivation rule are recorded here. Companion document to `sdc-data-model-v1.md`. Naming and prefix conventions, ADR triage, and callable reuse-vs-rebuild are still pending in subsequent sessions.
+- Accepted 2026-06-01
+- Ammended for the pilot 2026-06-01
 
 ## Foundational decisions
 
@@ -11,28 +12,6 @@ Three answers shaped the state machine design:
 1. **The audit chain carries the "why," the state machine carries the "what."** System-driven rework (failed validation) and analyst-driven rework (rejected submission) both land in the same state. The reason lives in ValidationResult/FieldError or ReviewNote, not in the state name.
 2. **Upload owns the in-flight pipeline; SupplierRequest tracks resting states only.** The `received → extracting → validating → validated|error` arc lives on Upload. SupplierRequest never transitions through `submitted` — it waits in `sent` or `supplier_action_required` until Upload completes and the resting situation changes.
 3. **State knows nothing about reminders.** The state machine defines reminder *eligibility*. *Firing* — cadence, opt-out, per-supplier overrides, batched analyst-driven nudges — is a policy-layer decision inside the reminder workflow.
-
-## Summary of changes from the prior model
-
-**Removed:**
-- `in_progress` (no behavior distinguished it from `sent`)
-- `submitted` (Upload owns the in-flight pipeline)
-- The two parallel tracking systems (`status_StateMachine` and WFA stages); WFA stage is now a derived view of `status`
-- `rejected` as a state (demoted to a transition, captured in ReviewNote)
-- The `validated` / `pending_review` split (collapsed; validation passing and analyst notification co-occur)
-
-**Added:**
-- `cancelled` as a single terminal-not-approved state covering pre-submission cancellation and post-engagement give-up
-- Explicit derivation rule for `supplier_display_status` / `supplier_message`
-- Reminder eligibility as a state-machine concern; reminder *firing* as a policy-layer concern
-
-**Renamed:**
-- `accepted` → `approved` (canonical)
-- `data_entry` → `supplier_action_required` (canonical)
-- `validation_success` → folded into `pending_review`
-- `Upload.status: failed` → `error` (symmetry with ValidationResult; disambiguates from "validation found bad data")
-
-**Net:** twelve candidate names (documented enum plus recipe-side drift) → six SupplierRequest states.
 
 ---
 
@@ -267,18 +246,6 @@ These are the contracts the recipes must honor. Documented here so they're not r
 
 ---
 
-## Backports queued for end-of-Phase-0
-
-Small data model amendments that fall out of this workstream. Each folds into a `sdc-data-model-v1.md` revision once Phase 0 is complete; none requires reopening the data model session.
-
-- `SupplierRequest.current_state_entered_at` (datetime, write-on-transition). Cycle boundary for reminder cadence and "how long has X been waiting" reporting.
-- `SupplierRequest.reminders_enabled` (boolean, default true). Per-request opt-out. Per-supplier or per-project policy is an additive change later if a use case forces it.
-- `SupplierRequest.due_date` (date, optional) **or** `Project.default_due_days` (int). Drives the `sent` derivation message. Pick the location based on whether due dates are per-request or per-engagement; Project-level is simpler if the project default is the common case.
-- `Upload.status` enum: rename `failed` → `error` for symmetry with `ValidationResult.status` and to disambiguate from "validation found bad data."
-- Add pipeline_error_alert as a recognized display-refresh trigger context. Document VAL-01's responsibility to invoke STS-01 in display-refresh mode (not transition mode) when the validation engine crashes. STS-01 needs to support a "refresh-only" invocation that takes a target state matching the row's current state — confirms no transition occurs, just a display field rewrite.
-
----
-
 ## Deliberately omitted
 
 - **`in_progress` as a state** — no recipe behavior distinguished it from `sent`. UI flavor masquerading as state.
@@ -289,3 +256,77 @@ Small data model amendments that fall out of this workstream. Each folds into a 
 - **A separate "cancellation" state distinct from `cancelled`** — one terminal-not-approved state covers all closure reasons. EventLog carries the reason.
 - **WFA stage as an independent state machine** — collapsed into a derived view of `SupplierRequest.status`. The two-system drift problem from the prior model is gone by construction.
 - **A `ReminderPolicy` table** — speculative complexity. Add when a use case forces it; the current per-request `reminders_enabled` covers the immediately-anticipated need.
+
+# Pilot deviation — analyst decision point after validation
+
+**Status:** Active for the analyst pilot only. Scoped override of the locked Phase 0 routing for validation outcomes; the Phase 0 body above is unchanged and remains authoritative for post-pilot. Revert criteria at the end of this section. *Added 2026-06-10.*
+
+## Intent
+
+During the pilot the system no longer decides pass/fail routing. Every submission that produces a ValidationResult — `passed` or `failed` — routes to `pending_review`, where the analyst reviews the validation result *and* the supplier input and actions it as **(a) approve** or **(b) rework**. The supplier sees the same neutral "under review" message either way and is not shown the system verdict.
+
+## The single redefinition this rests on
+
+`pending_review` changes from *"validation passed, analyst owes a decision"* to
+*"validation completed (passed **or** failed), analyst owes the decision."*
+Every override below is a consequence of that one change.
+
+## Overrides
+
+### `pending_review` — entry condition
+- **Phase 0:** entered when `current_validation_result_id` points at a ValidationResult
+  with `status=passed`.
+- **Pilot:** entered when it points at a ValidationResult with `status ∈ {passed, failed}`.
+  (`error` and `running` remain excluded.)
+
+### Field-level precondition (`pending_review`)
+- **Phase 0:** ValidationResult `status=passed`.
+- **Pilot:** ValidationResult `status ∈ {passed, failed}`. Rejects only
+  `error` / `running` / absent. (Mirrors the STS-01 precondition relax.)
+
+### Transition table — affected rows
+
+| From | To | Trigger | Pilot status |
+|---|---|---|---|
+| sent | pending_review | Validation passes | unchanged (active) |
+| sent | pending_review | Validation fails (`status=failed`) | **NEW — active in pilot** |
+| sent | supplier_action_required | Validation fails | **dormant** (system no longer auto-bounces) |
+| supplier_action_required | pending_review | Resubmission passes | unchanged (active) |
+| supplier_action_required | pending_review | Resubmission fails | **NEW — active in pilot** |
+| supplier_action_required | supplier_action_required | Repeated failure (no-op, inv. 7) | **dormant** (see Invariant 7) |
+| pending_review | approved / supplier_action_required / cancelled | Analyst action | unchanged |
+
+Dormant rows stay in the Phase 0 tables — not deleted. Revert re-activates them by reverting the orchestrator override (UPL-01 step 23).
+
+### Derivation table — new row
+
+| Target state | Trigger context | supplier_display_status | supplier_message |
+|---|---|---|---|
+| pending_review | system validation failed | "Submitted — under review" | "Your submission was received and validated on {validated_at} and is now under review. No further action is needed at this time." |
+
+The existing `pending_review / submission validated` row (pass case) is unchanged.
+The `supplier_action_required / system validation failed` and `/ system_structural_failure` rows become **dormant**; the `supplier_action_required / analyst rework` row stays active and is the *only* live entry to `supplier_action_required` during the pilot.
+
+### Invariant 7 (repeated failures don't churn state) — dormant, not violated
+
+The no-op self-transition existed because a repeated system failure did not change the resting situation (the supplier still owed corrections). In the pilot the system never bounces failures back to the supplier, so that scenario does not arise: a completed resubmission always changes the resting situation (the supplier has acted; the analyst now owes a decision), so it legitimately transitions to `pending_review`. The "state moves only when the resting situation changes" principle is upheld — the no-op is simply never triggered. Restore to active behavior on revert.
+
+## Open decision the doc must settle: structural failures
+
+A structurally unparseable submission surfaces as `ValidationResult.status=failed` (VAL-01 collapses `structural_failure → failed` on write), so it satisfies the relaxed precondition and will route to `pending_review` alongside content failures. Choose one:
+
+- **(A) Treat structural like content — recommended for pilot.** Structural failures also go to the analyst. Normalize their `trigger_context` to `system validation failed` so the single new derivation row above covers them. The supplier sees the neutral "under review" message; the analyst sees the structural detail via the ValidationResult / report (the audit chain carries the *why*). One derivation row, no structural-specific supplier wording during the pilot.
+- **(B) Keep structural distinct.** Add a second derivation row `pending_review / system_structural_failure` and pass that trigger through unchanged. More faithful to the Phase 0 distinction; one extra row to maintain.
+
+This hinges on what `finalize_verdict` emits as `trigger_context` for a structural failure — confirm before mirroring into STS-01.
+
+## Tension with locked Phase 0 decisions (recorded, not resolved)
+
+- Foundational decision #1 (system-driven and analyst-driven rework land in the same state) and the collapse of `validated` into `pending_review` (premised on "validation passing and analyst notification co-occur") are **temporarily widened**: analyst notification now occurs on validation *completion*, pass or fail. The premise resumes on revert.
+- During the pilot, `supplier_action_required` has a single live entry path (analyst rework); its system-failed entry is dormant. The "one state, two entry paths" justification stays intact for when the system path re-activates.
+
+These are scoped, reversible deviations. The Phase 0 body remains authoritative for post-pilot.
+
+## Revert criteria
+
+Revert when the pilot ends, or promote to permanent if the analyst decision point is adopted. To revert: restore the orchestrator (UPL-01 step 23) to route by verdict — which re-activates the dormant transition rows and restores Invariant 7 — and remove the new derivation row and the precondition widening from STS-01. No data migration is required (display fields are snapshots, not derived at render).
