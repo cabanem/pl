@@ -71,21 +71,26 @@
       end
 
       [here] + children
-    end,
-
-    # Fresh field list on every call. Never share one array across two
-    # `properties:` slots — Workato tags/namespaces schema objects in place,
-    # so a shared reference makes the second field collide with the first.
-    contract_fields: lambda do
-      [
-        { name: 'name' },
-        { name: 'label' },
-        { name: 'type' },
-        { name: 'control_type' },
-        { name: 'optional', type: 'boolean' },
-        { name: 'hint' }
-      ]
     end
+  },
+
+  # Reusable schema shapes. object_definitions is the first-class home for a
+  # field set referenced from more than one place (here, both contract outputs,
+  # and any future action that emits the same shape). The SDK manages copies per
+  # reference site, which is why this is safe where a shared local was not.
+  object_definitions: {
+    contract_field: {
+      fields: lambda do |_connection, _config_fields, _object_definitions|
+        [
+          { name: 'name' },
+          { name: 'label' },
+          { name: 'type' },
+          { name: 'control_type' },
+          { name: 'optional', type: 'boolean' },
+          { name: 'hint' }
+        ]
+      end
+    }
   },
 
   actions: {
@@ -168,7 +173,7 @@
         }
       end,
 
-      output_fields: lambda do |_object_definitions|
+      output_fields: lambda do |object_definitions|
         [
           { name: 'spec_json',        label: 'Spec (JSON string)' },
           { name: 'recipe_name' },
@@ -176,7 +181,7 @@
           { name: 'trigger_name' },
           { name: 'step_count', type: 'integer' },
           { name: 'connectors_used', type: 'array', of: 'string' },
-          { name: 'input_contract',  type: 'array', of: 'object', properties: call('contract_fields') },
+          { name: 'input_contract',  type: 'array', of: 'object', properties: object_definitions['contract_field'] },
           { name: 'output_contract', type: 'array', of: 'object', properties: call('contract_fields') },
           { name: 'steps', type: 'array', of: 'object', properties: [
             { name: 'path' },
