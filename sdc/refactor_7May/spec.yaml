@@ -1985,6 +1985,53 @@ x-data-tables:
     read_by: []
     written_by:
     - PRV-04
+x-request-write-paths:
+  description: Two distinct mechanisms mutate the supplier-request record. (1) Data Table actions (workato_db_table)
+    address the row by table_id + record id and are authoritative for SUP_SupplierRequest. (2) Workflow
+    App actions (workato_workflow_task) address the request by app_id + record_id; the recipe JSON does
+    not name the backing table, so whether the WFA app is backed by SUP_SupplierRequest or a separate
+    WFA-side table is defined in the Workflow App config, not here. Listed for visibility either way.
+  via_data_table:
+  - recipe: UPL-01
+    action: update_record
+    access: WRITE(update)
+  - recipe: INC-02
+    action: update_record
+    access: WRITE(update)
+  - recipe: REV-01
+    action: update_record
+    access: WRITE(update)
+  - recipe: STS-01
+    action: update_record
+    access: WRITE(update)
+  - recipe: SUP-01
+    action: create_records_batch
+    access: WRITE(create-batch)
+  - recipe: SUP-02
+    action: add_record
+    access: WRITE(create)
+  - recipe: VAL-01
+    action: update_record
+    access: WRITE(update)
+  via_workflow_app:
+  - recipe: UPL-01
+    action: complete_task
+    op: update
+  - recipe: UPL-01
+    action: share_request
+    op: share
+  - recipe: INV-01
+    action: share_request
+    op: share
+  - recipe: INV-01A
+    action: human_review_on_existing_record
+    op: update
+  - recipe: INV-USER
+    action: share_request
+    op: share
+  - recipe: PRV-04
+    action: add_request
+    op: create
 x-recipes:
   API-00:
     code: API-00
@@ -2623,6 +2670,13 @@ x-recipes:
     workflow_app_tasks:
     - complete_task
     - share_request
+    wfa_request_actions:
+    - action: complete_task
+      op: update
+      addressing: app_id+record_id
+    - action: share_request
+      op: share
+      addressing: app_id+record_id
     declared_variables:
     - name: CONSTANTS
       type: object
@@ -3711,6 +3765,10 @@ x-recipes:
     sends_email: true
     template_ops:
     - create_document
+    wfa_request_actions:
+    - action: share_request
+      op: share
+      addressing: app_id+record_id
     python_steps: 2
     declared_variables:
     - name: recipe_name
@@ -3833,6 +3891,13 @@ x-recipes:
     workflow_app_tasks:
     - get_requests
     - human_review_on_existing_record
+    wfa_request_actions:
+    - action: get_requests
+      op: read
+      addressing: app_id+record_id
+    - action: human_review_on_existing_record
+      op: update
+      addressing: app_id+record_id
     control_flow:
     - 'trigger: workato_recipe_function.execute'
     - '  <try>'
@@ -3984,6 +4049,10 @@ x-recipes:
     workflow_app_tasks:
     - invite_user
     - share_request
+    wfa_request_actions:
+    - action: share_request
+      op: share
+      addressing: app_id+record_id
     declared_variables:
     - name: disposition
       type: string
@@ -4499,6 +4568,10 @@ x-recipes:
     - store_file
     workflow_app_tasks:
     - add_request
+    wfa_request_actions:
+    - action: add_request
+      op: create
+      addressing: app_id+record_id
     python_steps: 3
     declared_variables:
     - name: template_path
