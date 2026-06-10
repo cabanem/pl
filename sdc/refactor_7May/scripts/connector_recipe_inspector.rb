@@ -71,6 +71,20 @@
       end
 
       [here] + children
+    end,
+
+    # Fresh field list on every call. Never share one array across two
+    # `properties:` slots — Workato tags/namespaces schema objects in place,
+    # so a shared reference makes the second field collide with the first.
+    contract_fields: lambda do
+      [
+        { name: 'name' },
+        { name: 'label' },
+        { name: 'type' },
+        { name: 'control_type' },
+        { name: 'optional', type: 'boolean' },
+        { name: 'hint' }
+      ]
     end
   },
 
@@ -155,15 +169,6 @@
       end,
 
       output_fields: lambda do |_object_definitions|
-        contract = [
-          { name: 'name' },
-          { name: 'label' },
-          { name: 'type' },
-          { name: 'control_type' },
-          { name: 'optional', type: 'boolean' },
-          { name: 'hint' }
-        ]
-
         [
           { name: 'spec_json',        label: 'Spec (JSON string)' },
           { name: 'recipe_name' },
@@ -171,8 +176,8 @@
           { name: 'trigger_name' },
           { name: 'step_count', type: 'integer' },
           { name: 'connectors_used', type: 'array', of: 'string' },
-          { name: 'input_contract',  type: 'array', of: 'object', properties: contract },
-          { name: 'output_contract', type: 'array', of: 'object', properties: contract },
+          { name: 'input_contract',  type: 'array', of: 'object', properties: call('contract_fields') },
+          { name: 'output_contract', type: 'array', of: 'object', properties: call('contract_fields') },
           { name: 'steps', type: 'array', of: 'object', properties: [
             { name: 'path' },
             { name: 'depth', type: 'integer' },
