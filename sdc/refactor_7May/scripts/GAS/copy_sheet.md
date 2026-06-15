@@ -118,14 +118,12 @@ Capturing the original sheets and deleting them *after* the copy (rather than de
 Add this conditional block after step 6 (audit-share) and before step 7 (payload build). It mirrors your config-JSON pattern: create, then share with the Workato OAuth account — which Workato needs in order to read the file by ID.
 
 ```javascript
-    // 6b. Seed data: if the customer provided incumbent data, copy the
-    //     named sheet into a standalone XLSX and share it with Workato.
-    //     The new file ID rides along on the provision payload.
+// 6b. Seed data: the analyst declared incumbent data, so Preflight has
+    //     already guaranteed driveId + sheetName are present. Copy the
+    //     named sheet to a standalone XLSX, share it with Workato, and
+    //     carry the new file ID on the provision payload.
     var seedDataFileId = '';
-    if (Util.coerceTruthy(pf.hasSeedData) &&
-        String(pf.seedDataDriveId || '').trim() &&
-        String(pf.seedDataSheetName || '').trim()) {
-
+    if (Util.coerceTruthy(pf.hasSeedData)) {
       var seed = Stage.run('seed-data-export', function() {
         return Drive.copySheetToXlsx(
           String(pf.seedDataDriveId).trim(),
