@@ -31,10 +31,13 @@ class NormStep:
 def normalize(code: dict) -> list[NormStep]:
     out: list[NormStep] = []
 
-    def walk(node: dict, path: str, frame: str) -> None:
+    # Path format ported verbatim from the GAS walkSteps_: children are
+    # addressed as `block[i].`-chained prefixes, root visited with "". This
+    # keeps Python anchors identical to what inspectProviderSamples emits.
+    def walk(node: dict, prefix: str, frame: str) -> None:
         out.append(NormStep(
             uuid=node.get("uuid", ""),
-            path=path,
+            path=prefix if prefix else "(root)",
             keyword=node.get("keyword", "action"),
             provider=node.get("provider"),
             name=node.get("name"),
@@ -44,7 +47,7 @@ def normalize(code: dict) -> list[NormStep]:
         kw = node.get("keyword")
         child_frame = kw if kw in CONTROL_KEYWORDS else frame
         for i, child in enumerate(node.get("block", []) or []):
-            walk(child, f"{path}/{i}", child_frame)
+            walk(child, f"{prefix}block[{i}].", child_frame)
 
-    walk(code, "0", "none")
+    walk(code, "", "none")
     return out
