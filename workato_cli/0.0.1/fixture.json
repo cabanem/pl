@@ -9,7 +9,7 @@
   "input": {},
   "block": [
     { "number": 1, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
-      "uuid": "s-0001", "input": { "table": "tbl-supreq" } },
+      "uuid": "s-0001", "input": { "data_table_id": "tbl-supreq" } },
 
     { "number": 2, "keyword": "if", "uuid": "s-0002", "input": { "conditions": "record_not_found" },
       "block": [
@@ -21,17 +21,17 @@
       "uuid": "s-0004", "input": { "code": "# guard: legality of prior_state -> target_state", "prior_state": "#{sr.status}" } },
 
     { "number": 5, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
-      "uuid": "s-0005", "input": { "table": "tbl-valres" } },
+      "uuid": "s-0005", "input": { "data_table_id": "tbl-valres" } },
     { "number": 6, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
-      "uuid": "s-0006", "input": { "table": "tbl-project" } },
+      "uuid": "s-0006", "input": { "data_table_id": "tbl-project" } },
     { "number": 7, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
-      "uuid": "s-0007", "input": { "table": "tbl-revnote" } },
+      "uuid": "s-0007", "input": { "data_table_id": "tbl-revnote" } },
 
     { "number": 8, "keyword": "action", "provider": "py_eval", "name": "invoke_custom_py_code",
       "uuid": "s-0008", "input": { "code": "# derive display_status + supplier_message from verdict", "invalid_row_count": "#{vr.invalid}" } },
 
     { "number": 9, "keyword": "action", "provider": "workato_db_table", "name": "update_record",
-      "uuid": "s-0009", "input": { "table": "tbl-supreq", "record": {
+      "uuid": "s-0009", "input": { "data_table_id": "tbl-supreq", "record": {
         "84d52734-0000-0000-0000-000000000000": "#{new_state}",
         "col-disp-0001": "#{display_status}",
         "col-msg-0002": "#{display_message}",
