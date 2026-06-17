@@ -90,8 +90,9 @@ Variable:
 Step:
   anchor:
     uuid: "string   (PRIMARY)"
-    path: "string   (SECONDARY; positional path through the NORMALIZED control-flow tree,
-            branches labeled semantically, e.g. 'try/0 > if[0]/then/2')"
+    path: "string   (SECONDARY; positional block[i].-chained path through the NORMALIZED
+            control-flow tree, ported from the GAS walkSteps_, e.g. 'block[0].block[2].'.
+            Semantic branch labels are a possible future enrichment, not v1.)"
   action_type: "string   (workato action, e.g. workato_db_table.get_records)"
   frame: "none | if | else | elsif | try | catch | foreach   (enclosing control context)"
   python: "PyEvalBody?   (present iff action_type == py_eval.invoke_custom_py_code)"
