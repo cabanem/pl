@@ -1,0 +1,52 @@
+{
+  "_fixture_note": "Reconstruction of STS-01 in the Workato `code` tree shape (number/keyword/provider/name/input/block/uuid), populated from the OpenAPI spec's STS-01 facts. Trimmed to a representative subset of the real ~40-step control flow. The if/else branch encoding and the input key names (table / recipe_id / record) are the pieces to reconcile against real JSON at stage 1.",
+  "number": 0,
+  "keyword": "trigger",
+  "provider": "workato_recipe_function",
+  "name": "execute",
+  "as": "sr",
+  "uuid": "t-0000",
+  "input": {},
+  "block": [
+    { "number": 1, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
+      "uuid": "s-0001", "input": { "table": "tbl-supreq" } },
+
+    { "number": 2, "keyword": "if", "uuid": "s-0002", "input": { "conditions": "record_not_found" },
+      "block": [
+        { "number": 3, "keyword": "action", "provider": "workato_recipe_function", "name": "return_result",
+          "uuid": "s-0003", "input": {} }
+      ] },
+
+    { "number": 4, "keyword": "action", "provider": "py_eval", "name": "invoke_custom_py_code",
+      "uuid": "s-0004", "input": { "code": "# guard: legality of prior_state -> target_state", "prior_state": "#{sr.status}" } },
+
+    { "number": 5, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
+      "uuid": "s-0005", "input": { "table": "tbl-valres" } },
+    { "number": 6, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
+      "uuid": "s-0006", "input": { "table": "tbl-project" } },
+    { "number": 7, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
+      "uuid": "s-0007", "input": { "table": "tbl-revnote" } },
+
+    { "number": 8, "keyword": "action", "provider": "py_eval", "name": "invoke_custom_py_code",
+      "uuid": "s-0008", "input": { "code": "# derive display_status + supplier_message from verdict", "invalid_row_count": "#{vr.invalid}" } },
+
+    { "number": 9, "keyword": "action", "provider": "workato_db_table", "name": "update_record",
+      "uuid": "s-0009", "input": { "table": "tbl-supreq", "record": {
+        "84d52734-0000-0000-0000-000000000000": "#{new_state}",
+        "col-disp-0001": "#{display_status}",
+        "col-msg-0002": "#{display_message}",
+        "col-entered-0003": "#{now}"
+      } } },
+
+    { "number": 10, "keyword": "action", "provider": "workato_recipe_function", "name": "call_recipe",
+      "uuid": "s-0010", "input": { "recipe_id": 4, "input": { "path": "#{report_path}" } } },
+
+    { "number": 11, "keyword": "action", "provider": "workato_recipe_function", "name": "call_recipe",
+      "uuid": "s-0011", "input": { "recipe_id": 16, "input": {
+        "severity": "info", "source_recipe": "STS-01", "step_number": 99, "phase": "done",
+        "human_message": "transition complete", "supplier_request_id": "#{sr.id}", "details_json": "{}" } } },
+
+    { "number": 12, "keyword": "action", "provider": "workato_recipe_function", "name": "return_result",
+      "uuid": "s-0012", "input": {} }
+  ]
+}
