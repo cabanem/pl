@@ -20,8 +20,8 @@ from __future__ import annotations
 import os
 import sys
 
-from workato_client import WorkatoClient, WorkatoConfig, WorkatoHTTPError, safe_parse_json
-from registries import derive_handle, build_recipe_registry, build_table_schema_registry, fetch_needed_schemas
+from workato_client import WorkatoClient, WorkatoConfig, WorkatoHTTPError, safe_parse_json, load_dotenv
+from registries import derive_handle, build_recipe_registry, build_table_schema_registry
 from inspect_corpus import inspect_connector_usage, inspect_recipe_keywords, inspect_provider_input_keys
 
 
@@ -91,27 +91,26 @@ def stage3_folder_assets(client, folder_id):
     return build_recipe_registry(assets)
 
 
-# Stage 4 — data tables + schema GET (2 calls, records host) ----------------
+# Stage 4 — data tables: list carries schema inline (1 call) ----------------
 def stage4_tables(client):
-    _hr("4  data tables + schema GET  (2 calls; schema is on the records host)")
+    _hr("4  data tables  (1 call; the list carries each table's schema inline)")
     tables = client.list_data_tables()
     if not tables:
-        print("note: no data tables returned — skipping schema check.")
+        print("note: no data tables returned — skipping.")
         return
+    first = tables[0]
     print("table count :", len(tables))
-    print("first table :", {k: tables[0].get(k) for k in ("id", "name")})
-    tid = tables[0].get("id")
-    try:
-        schema = client.get_table_schema(tid)
-    except WorkatoHTTPError as e:
-        sys.exit(f"STOP: schema GET failed on the records host — {e}\n"
-                 "Confirm records_host (stage 0) is reachable and the path is /api/v1/tables/:id.")
-    cols = schema.get("schema") or []
-    print(f"schema for {tid}: {len(cols)} columns")
-    if cols:
-        print("first column keys:", sorted(cols[0].keys()), " (need 'field_id' + 'name')")
-    print("PASS: records host reachable and column shape understood." if cols
-          else "LOOK: schema had no columns — verify the response shape.")
+    print("first table :", {k: first.get(k) for k in ("id", "numeric_id", "name")})
+    cols = first.get("schema") or []
+    if not cols:
+        sys.exit("STOP: the list row has no inline 'schema'. Print tables[0] in full "
+                 "to see where the columns live.")
+    print(f"inline schema: {len(cols)} columns; first column keys:", sorted(cols[0].keys()))
+
+    treg = build_table_schema_registry(tables)
+    probe = treg.resolve_column(str(first.get("id")), cols[0].get("field_id"))
+    print(f"resolve_column({first.get('name')}, {cols[0].get('name')!r}) -> {probe.resolved_label!r}")
+    print("PASS: registry built from the list; columns resolve by UUID and numeric_id." )
 
 
 # Stage 5 — the inspectors (the flag-settlers; N+1 calls for the folder) -----
@@ -139,6 +138,7 @@ def stage5_inspectors(client, folder_id):
 
 
 def main():
+    load_dotenv()                       # pull constants from .env (real exports still win)
     folder_id = os.environ.get("SDC_FOLDER_ID")
     if not folder_id:
         sys.exit("STOP: set SDC_FOLDER_ID to the folder you want to test against.")
