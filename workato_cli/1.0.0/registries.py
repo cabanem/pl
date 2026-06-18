@@ -54,31 +54,38 @@ def build_recipe_registry(assets: list, derive=derive_handle) -> M.RecipeRegistr
     return M.RecipeRegistry(by_flow_id=by_flow_id)
 
 
-def build_table_schema_registry(table_list: list, schemas_by_table_id: dict) -> M.TableSchemaRegistry:
-    """data_tables list (id->name) plus per-table schema GETs ((id,field_id)->name).
+def build_table_schema_registry(table_list: list) -> M.TableSchemaRegistry:
+    """Build entirely from the /api/data_tables list.
 
-    Table names come cheaply from the one paged /api/data_tables sweep
-    (replicateTableDiscovery). Column names require the per-table schema GET, so
-    pass only the schemas for tables that actually need column resolution."""
+    That list already carries each table's `schema` inline (columns with
+    field_id / name / type), so no per-table records GET is needed — and the
+    records API (/api/v1/tables/:id) keys on a different identifier than this
+    list anyway. Each table is indexed under BOTH ids the list exposes (the UUID
+    `id` and the integer `numeric_id`), so resolution holds whichever one a
+    recipe step references."""
     tables: dict[str, str] = {}
-    for t in table_list:
-        if t and t.get("id"):
-            tables[t["id"]] = t.get("name") or "(unnamed)"
-
     columns: dict[tuple, dict] = {}
-    for tid, schema in schemas_by_table_id.items():
-        for col in (schema.get("schema") or []):
+
+    for t in table_list:
+        if not t:
+            continue
+        name = t.get("name") or "(unnamed)"
+        keys = [str(k) for k in (t.get("id"), t.get("numeric_id")) if k is not None]
+        for k in keys:
+            tables[k] = name
+        for col in (t.get("schema") or []):
             fid = col.get("field_id")
-            if fid:
-                columns[(tid, fid)] = {"name": col.get("name"), "type": col.get("type")}
-        # schema GET also carries the table name; backfill if the list missed it
-        if schema.get("name") and tid not in tables:
-            tables[tid] = schema["name"]
+            if not fid:
+                continue
+            entry = {"name": col.get("name"), "type": col.get("type")}
+            for k in keys:
+                columns[(k, fid)] = entry
 
     return M.TableSchemaRegistry(tables=tables, columns=columns)
 
 
 def fetch_needed_schemas(client, table_ids) -> dict:
-    """On-demand: fetch schemas only for tables that need column resolution
-    (the write targets), not every table in the workspace."""
+    """Records-API per-table schema GET. NOT on the resolution path anymore
+    (the /api/data_tables list already carries schemas); kept only for callers
+    that specifically need the records API, which keys on numeric_id."""
     return {tid: client.get_table_schema(tid) for tid in table_ids}
