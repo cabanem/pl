@@ -138,7 +138,7 @@ def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
                         edges.append(M.Edge(
                             source_flow_id, anchor, M.Relation.writes_column,
                             M.Target(M.TargetKind.column, (table, field_id), None, M.Resolution.unresolved),
-                            M.ColumnAttrs(write_kind=col_kind),
+                            M.ColumnAttrs(write_kind=col_kind, recipe_label=s.field_labels.get(field_id)),
                         ))
             continue
 
