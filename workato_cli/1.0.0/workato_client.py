@@ -214,3 +214,14 @@ class WorkatoClient:
             f"/api/export_manifests/folder_assets?folder_id={folder_id}", "Folder assets"
         )
         return ((data or {}).get("result") or {}).get("assets") or []
+
+    # -- folders (for production scoping) -----------------------------------
+    def list_folders(self, parent_id=None) -> list:
+        # GET /api/folders?parent_id= -> flat list of {id, name, parent_id, ...}
+        path = "/api/folders"
+        if parent_id is not None:
+            path += f"?parent_id={urllib.parse.quote(str(parent_id))}"
+        data = self.get(path, "List folders")
+        if isinstance(data, dict):
+            return data.get("result") or data.get("items") or []
+        return data or []
