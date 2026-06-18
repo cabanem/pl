@@ -1,0 +1,30 @@
+sdc-recipe-model/
+│
+├── sdc_recipe_model.contract.yaml   # the authoritative one-page contract: relations,
+│                                    #   identity model, provenance, projection catalog
+├── sdc_recipe_model.py              # typed realization of the contract — the spine
+│                                    #   everything else imports (enums, Edge, Target,
+│                                    #   Recipe, the two registries)
+│
+│   ── stage 1: fetch (the only impure boundary) ──
+├── workato_client.py                # config + host derivation + retry + list/detail/
+│                                    #   tables/schema/folder_assets; transport injected
+│
+│   ── stages 2–3: the transform (pure) ──
+├── normalize.py                     # recipe code tree → ordered NormStep list (block[i]. paths)
+├── extract.py                       # NormStep list → typed Edges (toolkit-confirmed keys)
+│
+│   ── resolution + analysis ──
+├── registries.py                    # folder_assets → RecipeRegistry (+ <DOM>-NN handles),
+│                                    #   data_tables + schema → TableSchemaRegistry
+├── inspect_corpus.py                # the inspectors — the instruments that settle the
+│                                    #   open vocabulary flags against a real corpus
+│
+│   ── validation harnesses ──
+├── slice_run.py                     # STS-01 vertical slice: spine → projections → oracle
+│                                    #   diff (also holds resolve + projections, inlined)
+├── fetch_selftest.py                # offline stage-1 proof against canned responses
+├── live_smoke.py                    # staged, GET-only verification against a real workspace
+│
+└── fixtures/
+    └── sts_01.recipe.fixture.json   # hand-reconstructed STS-01 (pending the real pull)
