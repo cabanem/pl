@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sys
 
+import sdc_recipe_model as M
 from workato_client import WorkatoClient, WorkatoConfig, safe_parse_json, load_dotenv
 from registries import build_recipe_registry, build_table_schema_registry
 from normalize import normalize
@@ -63,6 +64,21 @@ def run(client, target, folder_id) -> bool:
     print("writes:", sorted(got["writes"]))
     print("status:", sorted(got["status_columns"]))
     print("calls :", call_graph(edges))            # informational; not part of the diff
+
+    # surface column-name drift: where the recipe's logical label differs from the
+    # live data-table column name (same field_id, two names).
+    drift = []
+    for e in edges:
+        if e.relation == M.Relation.writes_column:
+            tid, fid = e.target.durable_key
+            live = treg.resolve_column(tid, fid).resolved_label
+            rec = getattr(e.attrs, "recipe_label", None)
+            if live and rec and live != rec:
+                drift.append((rec, live, fid))
+    if drift:
+        print("\n--- column-name drift (recipe label vs live table name) ---")
+        for rec, live, fid in drift:
+            print(f"  {rec}  ~=  {live!r}   ({fid})")
 
     print("\n--- oracle diff ---")
     ok = True
