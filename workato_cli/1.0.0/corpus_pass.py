@@ -50,15 +50,33 @@ def classify_steps(steps, edges):
     return covered, control, py, unhandled
 
 
-def run(client, folder_id) -> bool:
+def _resolve_scope_folder(client, project_folder_id, name) -> object:
+    """Find the folder named `name` directly under the project folder. Returns
+    its id, or None if absent (caller falls back to the whole subtree)."""
+    for f in client.list_folders(parent_id=project_folder_id):
+        if (f.get("name") or "").strip().lower() == name.strip().lower():
+            return f.get("id")
+    return None
+
+
+def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
+    # Registry spans the FULL subtree, so call targets in subfolders still resolve.
     assets = client.folder_assets(folder_id)
-    recipes = [a for a in assets if a.get("type") == "recipe"]
     rreg = build_recipe_registry(assets)
     treg = build_table_schema_registry(client.list_data_tables())
 
-    print(f"corpus: {len(recipes)} recipes under folder {folder_id} (via folder_assets)")
-    print("If that count is short of what you expect, folder_assets may not span the")
-    print("full subtree — say so and we'll walk the folders API instead.\n")
+    # Processing set is scoped: recipes directly in the "Recipes" folder, excluding
+    # its subfolders (/api/recipes?folder_id is flat — that flatness is the filter).
+    if scope_id is None:
+        scope_id = _resolve_scope_folder(client, folder_id, scope_name)
+    if scope_id is not None:
+        recipes = list(client.list_recipes(folder_id=scope_id))
+        print(f"corpus: {len(recipes)} recipes directly in folder {scope_name!r} "
+              f"(id {scope_id}); subfolders excluded.\n")
+    else:
+        recipes = [a for a in assets if a.get("type") == "recipe"]
+        print(f"corpus: scope folder {scope_name!r} not found under {folder_id}; "
+              f"falling back to all {len(recipes)} recipes in the subtree.\n")
 
     rel_counts: Counter = Counter()
     unhandled: Counter = Counter()
@@ -148,8 +166,10 @@ def main():
     folder_id = os.environ.get("SDC_FOLDER_ID")
     if not folder_id:
         sys.exit("STOP: set SDC_FOLDER_ID (the project / top-level folder).")
+    scope_name = os.environ.get("SDC_RECIPES_FOLDER_NAME", "Recipes")
+    scope_id = os.environ.get("SDC_RECIPES_FOLDER_ID")          # optional fast-path override
     client = WorkatoClient(config=WorkatoConfig.from_env())
-    run(client, folder_id)
+    run(client, folder_id, scope_name=scope_name, scope_id=scope_id)
 
 
 if __name__ == "__main__":
