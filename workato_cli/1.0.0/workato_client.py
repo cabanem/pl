@@ -20,11 +20,42 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterator, Optional
 
 
 class WorkatoHTTPError(RuntimeError):
     pass
+
+
+# --- .env loader (stdlib; no python-dotenv dependency) ---------------------
+def load_dotenv(path=None, override: bool = False) -> dict:
+    """Populate os.environ from a KEY=VALUE .env file.
+
+    Defaults to the .env next to this module (the project root), so it works
+    regardless of your shell's current directory. Existing environment variables
+    are NOT overwritten unless override=True, so a real `export` always wins.
+    Returns the keys it set, for debugging. A missing file is a no-op.
+    """
+    path = Path(path) if path else Path(__file__).resolve().parent / ".env"
+    if not path.exists():
+        return {}
+    loaded = {}
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")          # split on first '=' only
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")     # tolerate quoted values
+        if override or key not in os.environ:
+            os.environ[key] = val
+            loaded[key] = val
+    return loaded
 
 
 # --- config (getWorkatoConfig_) -------------------------------------------
