@@ -42,15 +42,31 @@ def _field_labels(node: dict) -> dict:
     Schema rows carry `name` = the field UUID in datapill-safe (underscored) form
     and `label` = the author's logical name. Hyphenate the name to the canonical
     field_id so it joins the table registry / write-step parameter keys.
+
+    Recurses into nested objects, emitting dotted leaf paths (e.g. the key and
+    label `planes.data_row`). Data-table column schemas are flat, so their entries
+    stay bare field_ids; only genuinely nested return schemas produce dotted keys,
+    and those never match a column lookup, so column resolution is unaffected.
     """
     out: dict = {}
+
+    def walk(props, key_prefix: str, label_prefix: str) -> None:
+        for prop in props or []:
+            name, label = prop.get("name"), prop.get("label")
+            if not name:
+                continue
+            fid = name.replace("_", "-") if _UUID_USCORE.match(name) else name
+            key = key_prefix + fid
+            lbl = label_prefix + (label or name)
+            sub = prop.get("properties")
+            if sub:
+                walk(sub, key + ".", lbl + ".")     # descend; the object node itself isn't a leaf
+            elif label:
+                out.setdefault(key, lbl)
+
     for src in ("extended_output_schema", "extended_input_schema"):
         for entry in node.get(src) or []:
-            for prop in (entry.get("properties") or []):
-                name, label = prop.get("name"), prop.get("label")
-                if name and label:
-                    fid = name.replace("_", "-") if _UUID_USCORE.match(name) else name
-                    out.setdefault(fid, label)
+            walk(entry.get("properties"), "", "")   # the `result`/`record` envelope is implicit
     return out
 
 
