@@ -1,32 +1,26 @@
 PYTHONPATH=/path/to/sdc-recipe-model python3 - <<'PY'
-import os, json
-from workato_client import WorkatoClient, WorkatoConfig, WorkatoHTTPError, load_dotenv
-from inspect_corpus import walk_steps
+import os
+from workato_client import WorkatoClient, WorkatoConfig, load_dotenv
+from inspect_corpus import (
+    inspect_connector_usage, inspect_provider_input_keys, inspect_provider_samples,
+)
 load_dotenv()
-
 client = WorkatoClient(config=WorkatoConfig.from_env())
-print("records_host:", client.config.records_host, " (must match your data center)")
-
-tables = client.list_data_tables()
-print("\n/api/data_tables first row — ALL fields:")
-print(json.dumps(tables[0], indent=2))
-
 recipes = client.get_structured_recipes(folder_id=os.environ["SDC_FOLDER_ID"], include_code=True)
-tids = []
-for r in recipes:
-    for node in walk_steps(r.get("code") or {}):
-        if node.get("provider") in ("workato_db_table", "data_tables"):
-            di = node.get("input") or {}
-            t = di.get("data_table_id") or di.get("table_id") or di.get("data_table")
-            if t:
-                tids.append(t)
-print("\nrecipe data_table_id(s) actually in use:", tids[:3])
 
-tid = tids[0] if tids else tables[0].get("id")
-print("\nlist id == recipe id ?", any(t == tables[0].get("id") for t in tids))
-try:
-    s = client.get_table_schema(tid)
-    print("schema GET OK — name:", s.get("name"), "| first column:", (s.get("schema") or [None])[0])
-except WorkatoHTTPError as e:
-    print("schema GET FAILED:", e)
+usage = inspect_connector_usage(recipes)
+print("provider :: action   (count)")
+for (prov, name), n in usage.most_common():
+    print(f"  {n:4}  {prov} :: {name}")
+
+# drill into anything that looks like a data-table op
+suspects = {p for (p, n) in usage
+            if any(w in f"{p} {n}".lower() for w in ("table", "data", "record", "row"))}
+for prov in sorted(suspects):
+    print(f"\n--- {prov} ---")
+    for action, keys in inspect_provider_input_keys(recipes, prov).items():
+        print(f"  {action}: {dict(keys)}")
+    s = inspect_provider_samples(recipes, prov, limit=1)
+    if s:
+        print("  sample input:", s[0]["input"])
 PY
