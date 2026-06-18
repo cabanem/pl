@@ -43,7 +43,12 @@ def resolve(edges, rreg: M.RecipeRegistry, treg: M.TableSchemaRegistry):
             e.target = treg.resolve_table(t.durable_key)
         elif t.kind == M.TargetKind.column:
             tid, fid = t.durable_key
-            e.target = treg.resolve_column(tid, fid)
+            resolved = treg.resolve_column(tid, fid)
+            # Prefer the recipe author's logical name; the live table name can drift.
+            label = getattr(e.attrs, "recipe_label", None)
+            if label:
+                resolved = M.Target(M.TargetKind.column, t.durable_key, label, M.Resolution.resolved)
+            e.target = resolved
     return edges
 
 
@@ -62,10 +67,10 @@ def stub_registries():
             "tbl-revnote": "RUN_ReviewNote",
         },
         columns={
-            ("tbl-supreq", "84d52734-0000-0000-0000-000000000000"): {"name": "status", "type": "string"},
-            ("tbl-supreq", "col-disp-0001"): {"name": "supplier_display_status", "type": "string"},
-            ("tbl-supreq", "col-msg-0002"): {"name": "supplier_message", "type": "string"},
-            ("tbl-supreq", "col-entered-0003"): {"name": "current_state_entered_at", "type": "date_time"},
+            ("tbl-supreq", "84d52734-cdab-48c5-af42-76a3f72575e4"): {"name": "status", "type": "string"},
+            ("tbl-supreq", "c060f6fc-6256-4285-a88d-e2b323f3152b"): {"name": "supplier_display_status", "type": "string"},
+            ("tbl-supreq", "e1257e22-026e-406d-8bf0-bd432b14d78d"): {"name": "supplier_message", "type": "string"},
+            ("tbl-supreq", "d4b0feff-ea32-45a9-aa62-cf4927b5d093"): {"name": "current_state_entered_at", "type": "date_time"},
         },
     )
     return rreg, treg
