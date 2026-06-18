@@ -1,0 +1,52 @@
+{
+  "_fixture_note": "Reconstruction of STS-01 in the Workato `code` tree shape, now using the CONFIRMED real input shapes: data-table refs under table_id, the write's column->value map under `parameters` keyed by datapill-safe (underscored) field UUIDs, and call targets under input.flow_id (string). Trimmed to a representative subset of the real control flow.",
+  "number": 0,
+  "keyword": "trigger",
+  "provider": "workato_recipe_function",
+  "name": "execute",
+  "as": "sr",
+  "uuid": "t-0000",
+  "input": {},
+  "block": [
+    { "number": 1, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
+      "uuid": "s-0001", "input": { "data_table_id": "tbl-supreq" } },
+
+    { "number": 2, "keyword": "if", "uuid": "s-0002", "input": { "conditions": "record_not_found" },
+      "block": [
+        { "number": 3, "keyword": "action", "provider": "workato_recipe_function", "name": "return_result",
+          "uuid": "s-0003", "input": {} }
+      ] },
+
+    { "number": 4, "keyword": "action", "provider": "py_eval", "name": "invoke_custom_py_code",
+      "uuid": "s-0004", "input": { "code": "# guard: legality of prior_state -> target_state", "prior_state": "#{sr.status}" } },
+
+    { "number": 5, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
+      "uuid": "s-0005", "input": { "data_table_id": "tbl-valres" } },
+    { "number": 6, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
+      "uuid": "s-0006", "input": { "data_table_id": "tbl-project" } },
+    { "number": 7, "keyword": "action", "provider": "workato_db_table", "name": "get_records",
+      "uuid": "s-0007", "input": { "data_table_id": "tbl-revnote" } },
+
+    { "number": 8, "keyword": "action", "provider": "py_eval", "name": "invoke_custom_py_code",
+      "uuid": "s-0008", "input": { "code": "# derive display_status + supplier_message from verdict", "invalid_row_count": "#{vr.invalid}" } },
+
+    { "number": 9, "keyword": "action", "provider": "workato_db_table", "name": "update_record",
+      "uuid": "s-0009", "input": { "table_id": "tbl-supreq", "parameters": {
+        "84d52734_cdab_48c5_af42_76a3f72575e4": "#{new_state}",
+        "c060f6fc_6256_4285_a88d_e2b323f3152b": "#{display_status}",
+        "e1257e22_026e_406d_8bf0_bd432b14d78d": "#{display_message}",
+        "d4b0feff_ea32_45a9_aa62_cf4927b5d093": "=now"
+      } } },
+
+    { "number": 10, "keyword": "action", "provider": "workato_recipe_function", "name": "call_recipe",
+      "uuid": "s-0010", "input": { "flow_id": "4", "parameters": { "path": "#{report_path}" } } },
+
+    { "number": 11, "keyword": "action", "provider": "workato_recipe_function", "name": "call_recipe",
+      "uuid": "s-0011", "input": { "flow_id": "16", "parameters": {
+        "severity": "info", "source_recipe": "STS-01", "step_number": 99, "phase": "done",
+        "human_message": "transition complete", "supplier_request_id": "#{sr.id}", "details_json": "{}" } } },
+
+    { "number": 12, "keyword": "action", "provider": "workato_recipe_function", "name": "return_result",
+      "uuid": "s-0012", "input": {} }
+  ]
+}
