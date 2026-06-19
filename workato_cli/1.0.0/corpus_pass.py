@@ -27,17 +27,17 @@ import sdc_recipe_model as M
 from workato_client import WorkatoClient, WorkatoConfig, safe_parse_json, load_dotenv
 from registries import build_recipe_registry, build_table_schema_registry
 from normalize import normalize, CONTROL_KEYWORDS
-from extract import extract, PY_PROVIDERS, STATE_PROVIDERS
+from extract import extract, PY_PROVIDERS, STATE_PROVIDERS, TRANSFORM_PROVIDERS
 from slice_run import resolve
 
 
 def classify_steps(steps, edges):
     """Per-step coverage. A step is covered if any edge carries its uuid; control
-    frames, py_eval bodies, and recipe-internal state (workato_variable) are
-    intentionally edge-less (known); anything else an action step leaves behind is
-    UNHANDLED — a relation extract doesn't model yet."""
+    frames, py_eval bodies, recipe-internal state (workato_variable), and pure
+    transforms (csv/json parsers) are intentionally edge-less (known); anything else
+    an action step leaves behind is UNHANDLED — a relation extract doesn't model yet."""
     edge_uuids = {e.anchor.uuid for e in edges if e.anchor and e.anchor.uuid}
-    covered = control = py = state = 0
+    covered = control = py = state = transform = 0
     unhandled = []                                    # (provider, action)
     for s in steps:
         if s.keyword in CONTROL_KEYWORDS:
@@ -46,11 +46,13 @@ def classify_steps(steps, edges):
             py += 1
         elif s.provider in STATE_PROVIDERS:
             state += 1
+        elif s.provider in TRANSFORM_PROVIDERS:
+            transform += 1
         elif s.uuid in edge_uuids or s.keyword == "trigger":
             covered += 1
         else:
             unhandled.append((s.provider or "(none)", s.name or "(none)"))
-    return covered, control, py, state, unhandled
+    return covered, control, py, state, transform, unhandled
 
 
 def _resolve_scope_folder(client, project_folder_id, name) -> object:
@@ -93,7 +95,7 @@ def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
     zero_edge = []
     per_recipe = []
     errors = []
-    cov_tot = ctrl_tot = py_tot = state_tot = unh_tot = 0
+    cov_tot = ctrl_tot = py_tot = state_tot = xform_tot = unh_tot = 0
 
     for a in recipes:
         fid = a.get("id")
@@ -122,8 +124,8 @@ def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
                 if live and rec and live != rec:
                     drift.append((handle, rec, live, fcol))
 
-        cov, ctrl, py, state, unh = classify_steps(steps, edges)
-        cov_tot += cov; ctrl_tot += ctrl; py_tot += py; state_tot += state; unh_tot += len(unh)
+        cov, ctrl, py, state, xform, unh = classify_steps(steps, edges)
+        cov_tot += cov; ctrl_tot += ctrl; py_tot += py; state_tot += state; xform_tot += xform; unh_tot += len(unh)
         for prov_name in unh:
             unhandled[prov_name] += 1
         if not edges:
@@ -131,9 +133,9 @@ def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
         per_recipe.append((handle, len(steps), len(edges), len(unh)))
 
     # ---------------- report ----------------
-    total = cov_tot + ctrl_tot + py_tot + state_tot + unh_tot
+    total = cov_tot + ctrl_tot + py_tot + state_tot + xform_tot + unh_tot
     print(f"coverage (steps): {total} total = {cov_tot} covered, {ctrl_tot} control, "
-          f"{py_tot} py, {state_tot} state, {unh_tot} unhandled\n")
+          f"{py_tot} py, {state_tot} state, {xform_tot} transform, {unh_tot} unhandled\n")
 
     print("edges by relation:")
     for rel, n in rel_counts.most_common():
