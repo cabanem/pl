@@ -32,6 +32,12 @@ RETURN_NAMES = ("return_result",)                          # recipe-function out
 DB_PROVIDERS = {"workato_db_table", "data_tables"}
 # Python provider, confirmed from datapill provenance: py_eval.
 PY_PROVIDERS = {"py_eval", "workato_python", "python"}
+# Recipe-internal state: declare/mutate variables and lists. Intentionally
+# edge-less — these cross no boundary. The values they hold are sourced from
+# other steps' datapills and, where they later reach a table/call/return, that
+# effect is already edged at its own boundary. Edging the variable too would be
+# dataflow/taint tracking, which is a different model than effects-and-interfaces.
+STATE_PROVIDERS = {"workato_variable"}
 
 # Read/write action vocab ported from DATA_TABLES_PROFILE.
 READ_NAMES = {"search_records", "lookup_record", "list_records", "get_record", "get_records"}
@@ -104,6 +110,9 @@ def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
 
         if s.provider in PY_PROVIDERS:
             continue                                        # body captured at the step layer; no semantic edge yet
+
+        if s.provider in STATE_PROVIDERS:
+            continue                                        # recipe-internal state; effects edged at their boundaries
 
         # Call detection accepts BOTH representations until inspectRecipeKeywords
         # settles it: keyword 'call' (toolkit's labelStep_) or the
