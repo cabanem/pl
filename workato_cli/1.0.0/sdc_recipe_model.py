@@ -195,9 +195,10 @@ class ExposedAttrs:
 @dataclass(frozen=True)
 class StorageAttrs:
     surface: Surface = field(default=Surface.storage, init=False)
-    operation: str = ""       # store_file | get_file_contents | ensure_dir_exists | create_shareable_link
-    path: Optional[str] = None
-    expires_at: Optional[str] = None
+    operation: str = ""       # store_file | get_file_contents | ensure_dir_exists | create_shareable_link | ...
+    path: Optional[str] = None       # location: file_path / directory_path, raw (often a datapill formula)
+    name: Optional[str] = None       # leaf: file_name / directory_name, when supplied separately
+    expires_in: Optional[str] = None  # create_shareable_link TTL in seconds (e.g. "604800" = 7d)
 
 
 @dataclass(frozen=True)
