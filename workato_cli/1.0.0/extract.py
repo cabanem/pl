@@ -44,6 +44,9 @@ PY_PROVIDERS = {"py_eval", "workato_python", "python"}
 # effect is already edged at its own boundary. Edging the variable too would be
 # dataflow/taint tracking, which is a different model than effects-and-interfaces.
 STATE_PROVIDERS = {"workato_variable"}
+FILES_PROVIDER = "workato_files"
+FILE_LOC_KEYS = ("file_path", "directory_path", "path")    # the location (parent dir / full path)
+FILE_NAME_KEYS = ("file_name", "directory_name")           # the leaf, when given separately
 
 # Read/write action vocab ported from DATA_TABLES_PROFILE.
 READ_NAMES = {"search_records", "lookup_record", "list_records", "get_record", "get_records"}
@@ -197,5 +200,19 @@ def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
                         ))
             continue
 
-        # connector / wfa / files / pubsub / email / csv providers -> later relations; out of slice scope
+        # FileStorage -> touches_external (surface: storage). One edge per file step,
+        # targeting the path. Paths are frequently datapill formulas, captured raw;
+        # read/write is derivable from the operation, so it isn't stored separately.
+        if s.provider == FILES_PROVIDER:
+            loc = _first(s.input, FILE_LOC_KEYS)
+            edges.append(M.Edge(
+                source_flow_id, anchor, M.Relation.touches_external,
+                M.Target(M.TargetKind.external, loc, loc, M.Resolution.not_applicable),
+                M.StorageAttrs(operation=s.name or "", path=loc,
+                               name=_first(s.input, FILE_NAME_KEYS),
+                               expires_in=s.input.get("expires_in")),
+            ))
+            continue
+
+        # connector / wfa / pubsub / email / csv providers -> later relations; out of slice scope
     return edges
