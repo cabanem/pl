@@ -49,6 +49,10 @@ STATE_PROVIDERS = {"workato_variable"}
 TRANSFORM_PROVIDERS = {"csv_parser", "json_parser"}
 FILES_PROVIDER = "workato_files"
 WFA_PROVIDER = "workato_workflow_task"
+# A custom-connector provider carries a "_connector_<id>..." instance suffix
+# (e.g. functional_core_for_sdc..._connector_500787859_1778246042). Built-in
+# providers never do. Strip the suffix for an environment-independent identity.
+_CONNECTOR_RE = re.compile(r"_+connector_\d.*$")
 FILE_LOC_KEYS = ("file_path", "directory_path", "path")    # the location (parent dir / full path)
 FILE_NAME_KEYS = ("file_name", "directory_name")           # the leaf, when given separately
 
@@ -285,6 +289,21 @@ def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
                 M.WfaAttrs(operation=s.name or "", addressing=addressing,
                            sets_fields=sets_fields,
                            workflow_stage_id=s.input.get("workflow_stage_id")),
+            ))
+            continue
+
+        # invokes_connector — a call into a CUSTOM connector (your functional_core, etc.),
+        # a separately-versioned artifact the recipe depends on. Built-in transforms
+        # (csv/json) are edge-less; a custom connector is a tracked dependency. Target
+        # is the env-independent connector::action; args are the supplied argument keys.
+        if s.provider and _CONNECTOR_RE.search(s.provider):
+            connector = _CONNECTOR_RE.sub("", s.provider)
+            edges.append(M.Edge(
+                source_flow_id, anchor, M.Relation.invokes_connector,
+                M.Target(M.TargetKind.connector_action, (connector, s.name),
+                         f"{connector}::{s.name}", M.Resolution.not_applicable),
+                M.ConnectorAttrs(connector=connector, action=s.name or "",
+                                 args=tuple(s.input.keys())),
             ))
             continue
 
