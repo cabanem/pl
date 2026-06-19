@@ -15,12 +15,13 @@ for r in client.list_recipes(folder_id=rf):
         continue
     code = safe_parse_json(client.get_recipe(r["id"])["code"])
     for n in walk_steps(code):
-        if n.get("provider") == "workato_workflow_task" and n.get("name") != "app_function_return":
-            key = (n.get("name"), )
+        prov = n.get("provider") or ""
+        if prov.startswith("functional_core_for_sdc"):
+            key = (prov, n.get("name"))
             if len(samples[key]) < 2:
-                samples[key].append({"name": n.get("name"), "input": n.get("input")})
+                samples[key].append({"provider": prov, "name": n.get("name"), "input": n.get("input")})
 for key, exs in sorted(samples.items()):
-    print("="*60, key[0])
+    print("="*60, f"{key[1]}")
     for ex in exs:
-        print(json.dumps(ex, indent=2)[:2000])
+        print(json.dumps(ex, indent=2)[:1800])
 PY
