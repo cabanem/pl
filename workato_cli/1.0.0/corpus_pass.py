@@ -64,15 +64,19 @@ def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
     assets = client.folder_assets(folder_id)
     rreg = build_recipe_registry(assets)
     treg = build_table_schema_registry(client.list_data_tables())
+    n_subtree = sum(1 for a in assets if a.get("type") == "recipe")
 
-    # Processing set is scoped: recipes directly in the "Recipes" folder, excluding
-    # its subfolders (/api/recipes?folder_id is flat — that flatness is the filter).
+    # Processing set is scoped: recipes whose PARENT folder is "Recipes", excluding
+    # its subfolders. Filtering on folder_id makes this exact whether the list
+    # endpoint returns the folder flat or its subtree.
     if scope_id is None:
         scope_id = _resolve_scope_folder(client, folder_id, scope_name)
     if scope_id is not None:
-        recipes = list(client.list_recipes(folder_id=scope_id))
-        print(f"corpus: {len(recipes)} recipes directly in folder {scope_name!r} "
-              f"(id {scope_id}); subfolders excluded.\n")
+        recipes = [r for r in client.list_recipes(folder_id=scope_id)
+                   if str(r.get("folder_id")) == str(scope_id)]
+        print(f"corpus: {len(recipes)} recipes directly in folder {scope_name!r} (id {scope_id}); "
+              f"excluded {n_subtree - len(recipes)} of {n_subtree} subtree recipes "
+              f"(subfolders + dev/test).\n")
     else:
         recipes = [a for a in assets if a.get("type") == "recipe"]
         print(f"corpus: scope folder {scope_name!r} not found under {folder_id}; "

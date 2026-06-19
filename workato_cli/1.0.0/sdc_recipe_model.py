@@ -186,6 +186,8 @@ class WfaAttrs:
 class ExposedAttrs:
     trigger_type: TriggerType
     auth: Auth
+    direction: str = "in"          # "in" = trigger/input contract, "out" = return/output contract
+    fields: tuple = ()             # field names captured for this side of the interface
 
 
 # touches_external: a union of per-surface payloads. The attributes follow the

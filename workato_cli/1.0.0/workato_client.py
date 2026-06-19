@@ -208,6 +208,14 @@ class WorkatoClient:
         data = self.get(f"/api/v1/tables/{table_id}", f"Table {table_id} schema", host="records")
         return (data or {}).get("data") or data or {}
 
+    # -- folders (resolve a folder by name; scope the corpus) ---------------
+    def list_folders(self, parent_id=None) -> list:
+        path = "/api/folders" + (f"?parent_id={parent_id}" if parent_id is not None else "")
+        data = self.get(path, "List folders")
+        if isinstance(data, dict):
+            return data.get("result") or data.get("items") or []
+        return data or []
+
     # -- handle authority (folder_assets) -----------------------------------
     def folder_assets(self, folder_id) -> list:
         data = self.get(

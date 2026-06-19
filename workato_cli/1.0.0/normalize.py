@@ -94,3 +94,4 @@ def normalize(code: dict) -> list[NormStep]:
 
     walk(code, "", "none")
     return out
+    

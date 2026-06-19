@@ -89,3 +89,4 @@ def fetch_needed_schemas(client, table_ids) -> dict:
     (the /api/data_tables list already carries schemas); kept only for callers
     that specifically need the records API, which keys on numeric_id."""
     return {tid: client.get_table_schema(tid) for tid in table_ids}
+    

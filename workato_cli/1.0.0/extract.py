@@ -26,6 +26,7 @@ from normalize import NormStep, CONTROL_KEYWORDS
 FLOW_ID_KEYS = ("flow_id", "recipe_id")                    # flow_id confirmed; recipe_id kept as fallback
 TABLE_KEYS = ("data_table_id", "table_id", "data_table")   # table_id matches; value = numeric_id
 RECORD_KEYS = ("parameters",)                              # the column->value map on writes
+RETURN_NAMES = ("return_result",)                          # recipe-function output (the return side of exposed_via)
 
 # data-table provider, confirmed: workato_db_table.
 DB_PROVIDERS = {"workato_db_table", "data_tables"}
@@ -75,6 +76,15 @@ def _as_flow_id(value) -> object:
     return int(s) if s.isdigit() else value
 
 
+def _output_fields(s) -> list:
+    """Field names a return_result step exposes. Prefer the step's own schema
+    labels (distilled by normalize); else the keys of the output value map."""
+    if s.field_labels:
+        return sorted(set(s.field_labels.values()))
+    payload = s.input.get("result") or s.input.get("parameters") or s.input
+    return sorted(payload.keys()) if isinstance(payload, dict) else []
+
+
 def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
     edges: list[M.Edge] = []
 
@@ -109,6 +119,17 @@ def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
                 source_flow_id, anchor, M.Relation.calls,
                 _keyed(M.TargetKind.recipe, callee),
                 M.CallAttrs(mode=mode, params=params),
+            ))
+            continue
+
+        # return_result — the recipe-function's OUTPUT contract; the return side of
+        # exposed_via, paired with the trigger's input side.
+        if s.provider == "workato_recipe_function" and s.name in RETURN_NAMES:
+            edges.append(M.Edge(
+                source_flow_id, anchor, M.Relation.exposed_via,
+                M.Target(M.TargetKind.trigger, s.name, s.name, M.Resolution.not_applicable),
+                M.ExposedAttrs(trigger_type=M.TriggerType.recipe_function, auth=M.Auth.none,
+                               direction="out", fields=tuple(_output_fields(s))),
             ))
             continue
 
