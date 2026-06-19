@@ -48,6 +48,7 @@ STATE_PROVIDERS = {"workato_variable"}
 # compute, no boundary crossed. Edge-less.
 TRANSFORM_PROVIDERS = {"csv_parser", "json_parser"}
 FILES_PROVIDER = "workato_files"
+WFA_PROVIDER = "workato_workflow_task"
 FILE_LOC_KEYS = ("file_path", "directory_path", "path")    # the location (parent dir / full path)
 FILE_NAME_KEYS = ("file_name", "directory_name")           # the leaf, when given separately
 
@@ -259,5 +260,33 @@ def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
             ))
             continue
 
-        # wfa request ops / custom connectors -> later relations (performs_wfa, invokes_connector)
+        # performs_wfa — Workflow App request/task ops against the single WFA app (app_id).
+        # Triggers (app_function_*_request) are caught above by the trigger branch;
+        # app_function_return is caught above as exposed_via(out). What remains here are
+        # the request/task operations. The parameters keys are the backing table's column
+        # field_ids — bridging WFA writes to columns is left to a projection over sets_fields.
+        if s.provider == WFA_PROVIDER:
+            params = s.input.get("parameters")
+            sets_fields = tuple(_norm_field_id(k) for k in params) if isinstance(params, dict) else ()
+            app_id = s.input.get("app_id")
+            group = s.input.get("user_group_ids")
+            if app_id and s.input.get("record_id") is not None:
+                addressing = "app_id+record_id"
+            elif app_id:
+                addressing = "app_id"
+            elif group:
+                addressing = "user_group"
+            else:
+                addressing = ""
+            key = app_id or group
+            edges.append(M.Edge(
+                source_flow_id, anchor, M.Relation.performs_wfa,
+                M.Target(M.TargetKind.wfa_task, key, key, M.Resolution.not_applicable),
+                M.WfaAttrs(operation=s.name or "", addressing=addressing,
+                           sets_fields=sets_fields,
+                           workflow_stage_id=s.input.get("workflow_stage_id")),
+            ))
+            continue
+
+        # custom connectors -> invokes_connector (next)
     return edges
