@@ -26,7 +26,13 @@ from normalize import NormStep, CONTROL_KEYWORDS
 FLOW_ID_KEYS = ("flow_id", "recipe_id")                    # flow_id confirmed; recipe_id kept as fallback
 TABLE_KEYS = ("data_table_id", "table_id", "data_table")   # table_id matches; value = numeric_id
 RECORD_KEYS = ("parameters",)                              # the column->value map on writes
-RETURN_NAMES = ("return_result",)                          # recipe-function output (the return side of exposed_via)
+# The three return surfaces — each is the OUTPUT side of exposed_via for one way a
+# recipe is invoked. Keyed (provider, action) -> the exposure surface it returns to.
+RETURN_SURFACE = {
+    ("workato_recipe_function", "return_result"): "recipe_function",
+    ("workato_workflow_task", "app_function_return"): "workflow_app_function",
+    ("workato_api_platform", "return_response"): "api_platform_http",
+}
 
 # data-table provider, confirmed: workato_db_table.
 DB_PROVIDERS = {"workato_db_table", "data_tables"}
@@ -82,13 +88,31 @@ def _as_flow_id(value) -> object:
     return int(s) if s.isdigit() else value
 
 
+def _leaf_paths(obj, prefix: str = "") -> set:
+    """Dotted leaf paths of a nested dict (the actual shape of a returned value)."""
+    out: set = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{prefix}{k}"
+            if isinstance(v, dict):
+                out |= _leaf_paths(v, p + ".")
+            else:
+                out.add(p)
+    return out
+
+
 def _output_fields(s) -> list:
-    """Field names a return_result step exposes. Prefer the step's own schema
-    labels (distilled by normalize); else the keys of the output value map."""
-    if s.field_labels:
-        return sorted(set(s.field_labels.values()))
-    payload = s.input.get("result") or s.input.get("parameters") or s.input
-    return sorted(payload.keys()) if isinstance(payload, dict) else []
+    """Field name-paths a return-style step exposes. The schema gives declared
+    names (field_labels KEYS are the names; values are display labels, which can
+    differ — e.g. http_status_code vs 'Response'). Union in the body actually
+    mapped under result/response, so a body not re-declared in the schema (the
+    api_platform case) is still captured."""
+    out = set(s.field_labels.keys())
+    for key in ("result", "response"):
+        body = s.input.get(key)
+        if isinstance(body, dict):
+            out |= _leaf_paths(body)
+    return sorted(out)
 
 
 def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
@@ -131,13 +155,14 @@ def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
             ))
             continue
 
-        # return_result — the recipe-function's OUTPUT contract; the return side of
-        # exposed_via, paired with the trigger's input side.
-        if s.provider == "workato_recipe_function" and s.name in RETURN_NAMES:
+        # return_result / app_function_return / return_response — the OUTPUT side of
+        # exposed_via, one branch per exposure surface. Paired with the trigger's input side.
+        surface = RETURN_SURFACE.get((s.provider, s.name))
+        if surface is not None:
             edges.append(M.Edge(
                 source_flow_id, anchor, M.Relation.exposed_via,
                 M.Target(M.TargetKind.trigger, s.name, s.name, M.Resolution.not_applicable),
-                M.ExposedAttrs(trigger_type=M.TriggerType.recipe_function, auth=M.Auth.none,
+                M.ExposedAttrs(trigger_type=M.TriggerType(surface), auth=M.Auth.none,
                                direction="out", fields=tuple(_output_fields(s))),
             ))
             continue
