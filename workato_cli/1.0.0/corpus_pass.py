@@ -1,191 +1,361 @@
-"""corpus_pass — run the spine over every recipe in a project folder and report
-coverage + gaps. Read-only.
+"""sdc_recipe_model — canonical contract (Python realization).
 
-Enumerates via folder_assets (spans subfolders — the same source real_oracle uses
-to reach a nested recipe), fetches each recipe, runs normalize -> extract ->
-resolve with one shared pair of registries, and aggregates:
+Typed mirror of ``sdc_recipe_model.contract.yaml``. The extractor emits these
+objects; every projection imports them. One definition, read everywhere.
 
-  * edges by relation
-  * per-step coverage: covered / control / py_eval / UNHANDLED
-  * UNHANDLED (provider :: action) ranked  -> the worklist for extending extract
-  * unresolved targets (cross-project calls; unresolved tables/columns)
-  * column-name drift (recipe label vs live data-table name)
-  * zero-edge recipes (the tell for a fully-unhandled provider)
+Identity is two-tier:
+  * durable keys (flow_id, table_id+field_id, step uuid) are authoritative —
+    the things projections join on;
+  * resolved labels (handle, column name, path) are denormalized conveniences,
+    re-derived from registries, never authoritative.
 
-  PYTHONPATH=/path/to/sdc-recipe-model python3 corpus_pass.py
-
-Reads SDC_FOLDER_ID (the project / top-level folder). One folder_assets call,
-one data_tables call, and one detail fetch per recipe (~N+2); 429s self-heal.
+Two orthogonal axes ride on edges/steps:
+  * provenance  — how an edge is known to exist (derived | asserted);
+  * resolution  — whether a keyed target was found in a registry.
 """
 from __future__ import annotations
 
-import os
-import sys
-from collections import Counter
-
-import sdc_recipe_model as M
-from workato_client import WorkatoClient, WorkatoConfig, safe_parse_json, load_dotenv
-from registries import build_recipe_registry, build_table_schema_registry
-from normalize import normalize, CONTROL_KEYWORDS
-from extract import extract, PY_PROVIDERS, STATE_PROVIDERS, TRANSFORM_PROVIDERS
-from slice_run import resolve
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional, Union
 
 
-def classify_steps(steps, edges):
-    """Per-step coverage. A step is covered if any edge carries its uuid; control
-    frames, py_eval bodies, recipe-internal state (workato_variable), and pure
-    transforms (csv/json parsers) are intentionally edge-less (known); anything else
-    an action step leaves behind is UNHANDLED — a relation extract doesn't model yet."""
-    edge_uuids = {e.anchor.uuid for e in edges if e.anchor and e.anchor.uuid}
-    covered = control = py = state = transform = 0
-    unhandled = []                                    # (provider, action)
-    for s in steps:
-        if s.keyword in CONTROL_KEYWORDS:
-            control += 1
-        elif s.provider in PY_PROVIDERS:
-            py += 1
-        elif s.provider in STATE_PROVIDERS:
-            state += 1
-        elif s.provider in TRANSFORM_PROVIDERS:
-            transform += 1
-        elif s.uuid in edge_uuids or s.keyword == "trigger":
-            covered += 1
-        else:
-            unhandled.append((s.provider or "(none)", s.name or "(none)"))
-    return covered, control, py, state, transform, unhandled
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+class RecipeKind(str, Enum):
+    api_endpoint = "api_endpoint"
+    event_webhook = "event_webhook"
+    data_table_trigger = "data_table_trigger"
+    callable_recipe = "callable_recipe"
+    workflow_app_function = "workflow_app_function"
 
 
-def _resolve_scope_folder(client, project_folder_id, name) -> object:
-    """Find the folder named `name` directly under the project folder. Returns
-    its id, or None if absent (caller falls back to the whole subtree)."""
-    for f in client.list_folders(parent_id=project_folder_id):
-        if (f.get("name") or "").strip().lower() == name.strip().lower():
-            return f.get("id")
-    return None
+class TriggerType(str, Enum):
+    api_platform_http = "api_platform_http"
+    workato_webhook = "workato_webhook"
+    data_table_realtime = "data_table_realtime"
+    recipe_function = "recipe_function"
+    workflow_app_function = "workflow_app_function"
 
 
-def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
-    # Registry spans the FULL subtree, so call targets in subfolders still resolve.
-    assets = client.folder_assets(folder_id)
-    rreg = build_recipe_registry(assets)
-    treg = build_table_schema_registry(client.list_data_tables())
-    n_subtree = sum(1 for a in assets if a.get("type") == "recipe")
-
-    # Processing set is scoped: recipes whose PARENT folder is "Recipes", excluding
-    # its subfolders. Filtering on folder_id makes this exact whether the list
-    # endpoint returns the folder flat or its subtree.
-    if scope_id is None:
-        scope_id = _resolve_scope_folder(client, folder_id, scope_name)
-    if scope_id is not None:
-        recipes = [r for r in client.list_recipes(folder_id=scope_id)
-                   if str(r.get("folder_id")) == str(scope_id)]
-        print(f"corpus: {len(recipes)} recipes directly in folder {scope_name!r} (id {scope_id}); "
-              f"excluded {n_subtree - len(recipes)} of {n_subtree} subtree recipes "
-              f"(subfolders + dev/test).\n")
-    else:
-        recipes = [a for a in assets if a.get("type") == "recipe"]
-        print(f"corpus: scope folder {scope_name!r} not found under {folder_id}; "
-              f"falling back to all {len(recipes)} recipes in the subtree.\n")
-
-    rel_counts: Counter = Counter()
-    unhandled: Counter = Counter()
-    unresolved_calls = []
-    unresolved_other: Counter = Counter()
-    drift = []
-    zero_edge = []
-    per_recipe = []
-    errors = []
-    cov_tot = ctrl_tot = py_tot = state_tot = xform_tot = unh_tot = 0
-
-    for a in recipes:
-        fid = a.get("id")
-        handle = (rreg.by_flow_id.get(fid) or {}).get("handle", str(fid))
-        try:
-            code = safe_parse_json(client.get_recipe(fid).get("code"))
-            steps = normalize(code)
-            edges = extract(steps, fid)
-            resolve(edges, rreg, treg)
-        except Exception as ex:                       # keep going; one bad recipe shouldn't abort the pass
-            errors.append((handle, repr(ex)))
-            continue
-
-        for e in edges:
-            rel_counts[e.relation.value] += 1
-            t = e.target
-            if t.resolution == M.Resolution.unresolved and t.durable_key is not None:
-                if e.relation == M.Relation.calls:
-                    unresolved_calls.append((handle, t.durable_key))
-                else:
-                    unresolved_other[e.relation.value] += 1
-            if e.relation == M.Relation.writes_column:
-                tid, fcol = t.durable_key
-                live = treg.resolve_column(tid, fcol).resolved_label
-                rec = getattr(e.attrs, "recipe_label", None)
-                if live and rec and live != rec:
-                    drift.append((handle, rec, live, fcol))
-
-        cov, ctrl, py, state, xform, unh = classify_steps(steps, edges)
-        cov_tot += cov; ctrl_tot += ctrl; py_tot += py; state_tot += state; xform_tot += xform; unh_tot += len(unh)
-        for prov_name in unh:
-            unhandled[prov_name] += 1
-        if not edges:
-            zero_edge.append(handle)
-        per_recipe.append((handle, len(steps), len(edges), len(unh)))
-
-    # ---------------- report ----------------
-    total = cov_tot + ctrl_tot + py_tot + state_tot + xform_tot + unh_tot
-    print(f"coverage (steps): {total} total = {cov_tot} covered, {ctrl_tot} control, "
-          f"{py_tot} py, {state_tot} state, {xform_tot} transform, {unh_tot} unhandled\n")
-
-    print("edges by relation:")
-    for rel, n in rel_counts.most_common():
-        print(f"  {n:5}  {rel}")
-
-    print("\nUNHANDLED step types (provider :: action) — the worklist:")
-    if unhandled:
-        for (prov, name), n in unhandled.most_common():
-            print(f"  {n:5}  {prov} :: {name}")
-    else:
-        print("  (none — every action step produced an edge)")
-
-    if unresolved_calls:
-        print(f"\nunresolved calls (likely cross-project): {len(unresolved_calls)}")
-        for caller, callee in unresolved_calls[:12]:
-            print(f"  {caller} -> flow_id {callee}")
-
-    if unresolved_other:
-        print("\nunresolved non-call targets:", dict(unresolved_other))
-
-    if drift:
-        print(f"\ncolumn-name drift (recipe label ~= live name): {len(drift)}")
-        for handle, rec, live, fcol in drift:
-            print(f"  {handle}: {rec} ~= {live!r} ({fcol})")
-
-    if zero_edge:
-        print(f"\nzero-edge recipes ({len(zero_edge)}): {', '.join(zero_edge)}")
-
-    if errors:
-        print(f"\nerrors ({len(errors)}):")
-        for handle, ex in errors:
-            print(f"  {handle}: {ex}")
-
-    print("\nper-recipe  (handle | steps | edges | unhandled):")
-    for handle, nsteps, nedges, nunh in sorted(per_recipe):
-        print(f"  {handle:16} {nsteps:4} {nedges:4} {nunh:4}" + ("   <-- has unhandled" if nunh else ""))
-
-    return True
+class WfaFunctionType(str, Enum):
+    generic = "generic"
+    load_table = "load_table"
+    load_dropdown = "load_dropdown"
 
 
-def main():
-    load_dotenv()
-    folder_id = os.environ.get("SDC_FOLDER_ID")
-    if not folder_id:
-        sys.exit("STOP: set SDC_FOLDER_ID (the project / top-level folder).")
-    scope_name = os.environ.get("SDC_RECIPES_FOLDER_NAME", "Recipes")
-    scope_id = os.environ.get("SDC_RECIPES_FOLDER_ID")          # optional fast-path override
-    client = WorkatoClient(config=WorkatoConfig.from_env())
-    run(client, folder_id, scope_name=scope_name, scope_id=scope_id)
+class Auth(str, Enum):
+    api_token = "api_token"
+    webhook_suffix = "webhook_suffix"
+    none = "none"
 
 
-if __name__ == "__main__":
-    main()
+class VarType(str, Enum):
+    string = "string"
+    integer = "integer"
+    boolean = "boolean"
+    date_time = "date_time"
+    object = "object"
+    array = "array"
+
+
+class Relation(str, Enum):
+    calls = "calls"
+    accesses_table = "accesses_table"
+    writes_column = "writes_column"
+    invokes_connector = "invokes_connector"
+    performs_wfa = "performs_wfa"
+    touches_external = "touches_external"
+    exposed_via = "exposed_via"
+
+
+class Provenance(str, Enum):
+    derived = "derived"      # statically read from recipe JSON
+    asserted = "asserted"    # filled from analysis of an opaque interior
+
+
+class Resolution(str, Enum):
+    resolved = "resolved"
+    unresolved = "unresolved"          # key not in registry scope; raw key retained
+    not_applicable = "not_applicable"  # bare-label target; no registry
+
+
+class AnalysisStatus(str, Enum):
+    derived = "derived"      # full effect set statically visible
+    opaque = "opaque"        # interior (py_eval) not yet analyzed
+
+
+class TargetKind(str, Enum):
+    recipe = "recipe"
+    table = "table"
+    column = "column"
+    connector_action = "connector_action"
+    wfa_task = "wfa_task"
+    trigger = "trigger"
+    external = "external"
+
+
+class Access(str, Enum):
+    read = "read"
+    write = "write"
+
+
+class WriteKind(str, Enum):
+    update = "update"
+    create = "create"
+    create_batch = "create_batch"
+    update_batch = "update_batch"
+    truncate = "truncate"
+
+
+class CallMode(str, Enum):
+    sync = "sync"
+    async_ = "async"
+
+
+class WfaOp(str, Enum):
+    read = "read"
+    update = "update"
+    create = "create"
+    share = "share"
+    return_ = "return"
+
+
+class Surface(str, Enum):
+    storage = "storage"
+    drive = "drive"
+    pubsub = "pubsub"
+    template = "template"
+    email = "email"
+
+
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class StepAnchor:
+    uuid: str                 # PRIMARY  — same-workspace, edit-stable, unambiguous
+    path: str                 # SECONDARY — cross-workspace-portable, human-legible
+
+
+@dataclass
+class Target:
+    kind: TargetKind
+    durable_key: object       # flow_id:int | table_id:str | (table_id, field_id) | label:str
+    resolved_label: Optional[str] = None
+    resolution: Resolution = Resolution.not_applicable
+
+
+# ---------------------------------------------------------------------------
+# Per-relation attribute payloads (discriminated by relation / surface)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CallAttrs:
+    mode: CallMode
+    params: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TableAttrs:
+    access: Access
+    action: str
+    write_kind: Optional[WriteKind] = None      # None when access == read
+
+
+@dataclass(frozen=True)
+class ColumnAttrs:
+    write_kind: WriteKind
+    recipe_label: Optional[str] = None     # the recipe author's logical name for this field
+
+
+@dataclass(frozen=True)
+class ConnectorAttrs:
+    action: str
+
+
+@dataclass(frozen=True)
+class WfaAttrs:
+    op: WfaOp
+    addressing: str = "app_id+record_id"
+    sets_fields: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ExposedAttrs:
+    trigger_type: TriggerType
+    auth: Auth
+    direction: str = "in"          # "in" = trigger/input contract, "out" = return/output contract
+    fields: tuple = ()             # field names captured for this side of the interface
+
+
+# touches_external: a union of per-surface payloads. The attributes follow the
+# tag (the class identity IS the discriminator) — deliberately not flattened.
+@dataclass(frozen=True)
+class StorageAttrs:
+    surface: Surface = field(default=Surface.storage, init=False)
+    operation: str = ""       # store_file | get_file_contents | ensure_dir_exists | create_shareable_link | ...
+    path: Optional[str] = None       # location: file_path / directory_path, raw (often a datapill formula)
+    name: Optional[str] = None       # leaf: file_name / directory_name, when supplied separately
+    expires_in: Optional[str] = None  # create_shareable_link TTL in seconds (e.g. "604800" = 7d)
+
+
+@dataclass(frozen=True)
+class DriveAttrs:
+    surface: Surface = field(default=Surface.drive, init=False)
+    operation: str = "download_file_contents"
+    drive_file_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PubsubAttrs:
+    surface: Surface = field(default=Surface.pubsub, init=False)
+    topic: Optional[str] = None
+    in_catch: bool = False    # pubsub here is usually the failure-signalling channel inside <catch>
+
+
+@dataclass(frozen=True)
+class TemplateAttrs:
+    surface: Surface = field(default=Surface.template, init=False)
+    operation: str = "create_document"
+    template_id: Optional[str] = None      # the stored template asset rendered (e.g. "18420")
+
+
+@dataclass(frozen=True)
+class EmailAttrs:
+    surface: Surface = field(default=Surface.email, init=False)
+    to: Optional[str] = None               # recipient — usually a datapill (param to_email) or a table field
+    subject: Optional[str] = None          # literal or datapill
+
+
+ExternalAttrs = Union[
+    StorageAttrs, DriveAttrs, PubsubAttrs, TemplateAttrs, EmailAttrs
+]
+EdgeAttrs = Union[
+    CallAttrs, TableAttrs, ColumnAttrs, ConnectorAttrs, WfaAttrs, ExposedAttrs, ExternalAttrs
+]
+
+
+# ---------------------------------------------------------------------------
+# Edge — the atom every projection reads
+# ---------------------------------------------------------------------------
+@dataclass
+class Edge:
+    source_recipe: int        # flow_id of the emitting recipe
+    anchor: StepAnchor
+    relation: Relation
+    target: Target
+    attrs: EdgeAttrs
+    provenance: Provenance = Provenance.derived
+
+
+# ---------------------------------------------------------------------------
+# Nodes
+# ---------------------------------------------------------------------------
+@dataclass
+class Variable:
+    name: str
+    type: VarType
+
+
+@dataclass
+class Trigger:
+    type: TriggerType
+    auth: Auth
+    wfa_function_type: Optional[WfaFunctionType] = None
+    trigger_table: Optional[str] = None
+
+
+@dataclass
+class PyEvalBody:
+    """Reserved slot. I/O boundary is DERIVED now; semantics ASSERTED later."""
+    code: str
+    inputs: list[str] = field(default_factory=list)
+    outputs: list[Variable] = field(default_factory=list)
+    analysis_status: AnalysisStatus = AnalysisStatus.opaque
+    asserted_effects: list[Edge] = field(default_factory=list)
+
+
+@dataclass
+class Step:
+    anchor: StepAnchor
+    action_type: str
+    frame: str = "none"       # none | if | else | elsif | try | catch | foreach
+    python: Optional[PyEvalBody] = None
+
+
+@dataclass
+class Recipe:
+    flow_id: int              # durable key
+    handle: str               # resolved label
+    kind: RecipeKind
+    trigger: Trigger
+    version: int
+    source_file: str
+    request_schema: Optional[str] = None
+    response_schema: Optional[str] = None
+    declares: list[Variable] = field(default_factory=list)
+    collision: bool = False
+    steps: list[Step] = field(default_factory=list)
+    edges: list[Edge] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Registries — fetched once per workspace snapshot; resolve opaque keys.
+# Both share one shape: fetch a table, then join keys against it.
+# ---------------------------------------------------------------------------
+@dataclass
+class RecipeRegistry:
+    """flow_id -> {handle, name, type, source_file}.
+
+    Source: GET /api/export_manifests/folder_assets?folder_id=<id>
+    Powers BOTH node naming and call-edge resolution — one fetch, one table.
+    """
+    by_flow_id: dict[int, dict] = field(default_factory=dict)
+
+    def resolve(self, flow_id: int) -> Target:
+        hit = self.by_flow_id.get(flow_id)
+        if hit is None:                                   # cross-project / out of scope
+            return Target(TargetKind.recipe, flow_id, None, Resolution.unresolved)
+        return Target(TargetKind.recipe, flow_id, hit["handle"], Resolution.resolved)
+
+
+@dataclass
+class TableSchemaRegistry:
+    """table_id -> name; (table_id, field_id) -> {name, type}.
+
+    Source: GET /api/data_tables  (the list carries each table's schema inline).
+    """
+    tables: dict[str, str] = field(default_factory=dict)            # table_id -> table_name
+    columns: dict[tuple, dict] = field(default_factory=dict)        # (table_id, field_id) -> {name, type}
+
+    def resolve_table(self, table_id: str) -> Target:
+        name = self.tables.get(table_id)
+        res = Resolution.resolved if name else Resolution.unresolved
+        return Target(TargetKind.table, table_id, name, res)
+
+    def resolve_column(self, table_id: str, field_id: str) -> Target:
+        hit = self.columns.get((table_id, field_id))
+        if hit is None:
+            return Target(TargetKind.column, (table_id, field_id), None, Resolution.unresolved)
+        return Target(TargetKind.column, (table_id, field_id), hit["name"], Resolution.resolved)
+
+
+# ---------------------------------------------------------------------------
+# A model is the recipe set plus the registries used to resolve it.
+# ---------------------------------------------------------------------------
+@dataclass
+class RecipeModel:
+    recipes: list[Recipe] = field(default_factory=list)
+    recipe_registry: RecipeRegistry = field(default_factory=RecipeRegistry)
+    table_registry: TableSchemaRegistry = field(default_factory=TableSchemaRegistry)
+
+    def all_edges(self) -> list[Edge]:
+        """Every edge, including asserted edges promoted from py_eval interiors."""
+        out: list[Edge] = []
+        for r in self.recipes:
+            out.extend(r.edges)
+            for s in r.steps:
+                if s.python:
+                    out.extend(s.python.asserted_effects)
+        return out
