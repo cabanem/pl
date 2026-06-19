@@ -114,14 +114,6 @@ class CallMode(str, Enum):
     async_ = "async"
 
 
-class WfaOp(str, Enum):
-    read = "read"
-    update = "update"
-    create = "create"
-    share = "share"
-    return_ = "return"
-
-
 class Surface(str, Enum):
     storage = "storage"
     drive = "drive"
@@ -176,9 +168,13 @@ class ConnectorAttrs:
 
 @dataclass(frozen=True)
 class WfaAttrs:
-    op: WfaOp
-    addressing: str = "app_id+record_id"
-    sets_fields: list[str] = field(default_factory=list)
+    operation: str = ""                       # raw action: add_request / update_request / get_requests /
+                                              # complete_task / human_review_on_existing_record / share_request /
+                                              # unshare_request / invite_user
+    addressing: str = ""                      # app_id+record_id | app_id | user_group
+    sets_fields: tuple = ()                   # field_ids written (add/update parameters) — SAME identity as
+                                              # table columns; bridge WFA writes -> columns via a projection
+    workflow_stage_id: Optional[str] = None   # WFA stage assigned/moved (human_review / update_request)
 
 
 @dataclass(frozen=True)
