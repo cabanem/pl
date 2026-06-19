@@ -163,7 +163,9 @@ class ColumnAttrs:
 
 @dataclass(frozen=True)
 class ConnectorAttrs:
-    action: str
+    connector: str = ""        # custom connector, instance suffix stripped (env-independent identity)
+    action: str = ""           # the action invoked
+    args: tuple = ()           # argument keys supplied — the invocation contract
 
 
 @dataclass(frozen=True)
