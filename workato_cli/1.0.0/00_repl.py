@@ -9,19 +9,18 @@ client = WorkatoClient(config=WorkatoConfig.from_env())
 folder = os.environ["SDC_FOLDER_ID"]
 rf = os.environ.get("SDC_RECIPES_FOLDER_ID") or _resolve_scope_folder(client, folder, "Recipes")
 
-WANT = {"google_drive", "workato_pub_sub", "workato_template", "email", "csv_parser"}
-samples = defaultdict(list)                      # keyed (provider, name)
+samples = defaultdict(list)                       # keyed (provider, name)
 for r in client.list_recipes(folder_id=rf):
     if str(r.get("folder_id")) != str(rf):
         continue
     code = safe_parse_json(client.get_recipe(r["id"])["code"])
     for n in walk_steps(code):
-        if n.get("provider") in WANT:
-            key = (n.get("provider"), n.get("name"))
+        if n.get("provider") == "workato_workflow_task" and n.get("name") != "app_function_return":
+            key = (n.get("name"), )
             if len(samples[key]) < 2:
-                samples[key].append({"provider": key[0], "name": key[1], "input": n.get("input")})
+                samples[key].append({"name": n.get("name"), "input": n.get("input")})
 for key, exs in sorted(samples.items()):
-    print("="*60, f"{key[0]} :: {key[1]}")
+    print("="*60, key[0])
     for ex in exs:
-        print(json.dumps(ex, indent=2)[:1400])
+        print(json.dumps(ex, indent=2)[:2000])
 PY
