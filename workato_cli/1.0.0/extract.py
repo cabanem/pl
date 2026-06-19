@@ -44,6 +44,9 @@ PY_PROVIDERS = {"py_eval", "workato_python", "python"}
 # effect is already edged at its own boundary. Edging the variable too would be
 # dataflow/taint tracking, which is a different model than effects-and-interfaces.
 STATE_PROVIDERS = {"workato_variable"}
+# Pure data-shaping transforms (rows<->CSV, JSON parse). Like py_eval: recipe-internal
+# compute, no boundary crossed. Edge-less.
+TRANSFORM_PROVIDERS = {"csv_parser", "json_parser"}
 FILES_PROVIDER = "workato_files"
 FILE_LOC_KEYS = ("file_path", "directory_path", "path")    # the location (parent dir / full path)
 FILE_NAME_KEYS = ("file_name", "directory_name")           # the leaf, when given separately
@@ -118,6 +121,45 @@ def _output_fields(s) -> list:
     return sorted(out)
 
 
+# touches_external surface builders: each returns (target_key, attrs) for a step.
+# The target_key is the surface's identity (path / file id / topic / template id /
+# recipient) — frequently a raw datapill formula, kept verbatim.
+def _ext_files(s):
+    loc = _first(s.input, FILE_LOC_KEYS)
+    return loc, M.StorageAttrs(operation=s.name or "", path=loc,
+                               name=_first(s.input, FILE_NAME_KEYS),
+                               expires_in=s.input.get("expires_in"))
+
+
+def _ext_drive(s):
+    fid = s.input.get("fileId") or s.input.get("file_id")
+    return fid, M.DriveAttrs(operation=s.name or "download_file_contents", drive_file_id=fid)
+
+
+def _ext_pubsub(s):
+    topic = s.input.get("topic_id") or s.input.get("topic")
+    return topic, M.PubsubAttrs(topic=topic, in_catch=(s.frame == "catch"))
+
+
+def _ext_template(s):
+    tid = s.input.get("template_id")
+    return tid, M.TemplateAttrs(operation=s.name or "create_document", template_id=tid)
+
+
+def _ext_email(s):
+    to = s.input.get("to")
+    return to, M.EmailAttrs(to=to, subject=s.input.get("subject"))
+
+
+EXTERNAL_SURFACES = {
+    FILES_PROVIDER: _ext_files,
+    "google_drive": _ext_drive,
+    "workato_pub_sub": _ext_pubsub,
+    "workato_template": _ext_template,
+    "email": _ext_email,
+}
+
+
 def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
     edges: list[M.Edge] = []
 
@@ -140,6 +182,9 @@ def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
 
         if s.provider in STATE_PROVIDERS:
             continue                                        # recipe-internal state; effects edged at their boundaries
+
+        if s.provider in TRANSFORM_PROVIDERS:
+            continue                                        # pure data-shaping (csv/json); no boundary crossed
 
         # Call detection accepts BOTH representations until inspectRecipeKeywords
         # settles it: keyword 'call' (toolkit's labelStep_) or the
@@ -200,19 +245,19 @@ def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
                         ))
             continue
 
-        # FileStorage -> touches_external (surface: storage). One edge per file step,
-        # targeting the path. Paths are frequently datapill formulas, captured raw;
-        # read/write is derivable from the operation, so it isn't stored separately.
-        if s.provider == FILES_PROVIDER:
-            loc = _first(s.input, FILE_LOC_KEYS)
+        # touches_external — boundary effects to non-table surfaces (FileStorage, Drive,
+        # pub/sub, template render, email). One edge per step, target keyed on the
+        # surface's identity, surface-specific attrs via dispatch. Read/write is
+        # derivable from the operation, so it isn't stored separately.
+        ext = EXTERNAL_SURFACES.get(s.provider)
+        if ext is not None:
+            key, attrs = ext(s)
             edges.append(M.Edge(
                 source_flow_id, anchor, M.Relation.touches_external,
-                M.Target(M.TargetKind.external, loc, loc, M.Resolution.not_applicable),
-                M.StorageAttrs(operation=s.name or "", path=loc,
-                               name=_first(s.input, FILE_NAME_KEYS),
-                               expires_in=s.input.get("expires_in")),
+                M.Target(M.TargetKind.external, key, key, M.Resolution.not_applicable),
+                attrs,
             ))
             continue
 
-        # connector / wfa / pubsub / email / csv providers -> later relations; out of slice scope
+        # wfa request ops / custom connectors -> later relations (performs_wfa, invokes_connector)
     return edges
