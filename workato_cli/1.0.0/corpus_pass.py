@@ -1,176 +1,189 @@
-"""extract — stage 3: normalized step list -> Edge objects (targets keyed,
-resolution pending).
+"""corpus_pass — run the spine over every recipe in a project folder and report
+coverage + gaps. Read-only.
 
-Pure, per-recipe, parallelizable. Control-frame steps emit nothing. py_eval
-steps emit no semantic edge yet (their body is captured for later assertion).
-Targets are emitted with their DURABLE KEY and resolution=unresolved; the
-resolve stage attaches labels.
+Enumerates via folder_assets (spans subfolders — the same source real_oracle uses
+to reach a nested recipe), fetches each recipe, runs normalize -> extract ->
+resolve with one shared pair of registries, and aggregates:
 
-Where a target id lives inside `input` is read via candidate-key lists,
-mirroring the FLOW_ID_KEYS approach in the GAS analyzer. These key sets are the
-thing to finalize from the GAS at stage 1 — they are isolated here on purpose.
+  * edges by relation
+  * per-step coverage: covered / control / py_eval / UNHANDLED
+  * UNHANDLED (provider :: action) ranked  -> the worklist for extending extract
+  * unresolved targets (cross-project calls; unresolved tables/columns)
+  * column-name drift (recipe label vs live data-table name)
+  * zero-edge recipes (the tell for a fully-unhandled provider)
+
+  PYTHONPATH=/path/to/sdc-recipe-model python3 corpus_pass.py
+
+Reads SDC_FOLDER_ID (the project / top-level folder). One folder_assets call,
+one data_tables call, and one detail fetch per recipe (~N+2); 429s self-heal.
 """
 from __future__ import annotations
 
-import re
+import os
+import sys
+from collections import Counter
 
 import sdc_recipe_model as M
-from normalize import NormStep, CONTROL_KEYWORDS
-
-# --- candidate input keys ---------------------------------------------------
-# CONFIRMED against the live STS-01 recipe code:
-#   input.flow_id    -> call target (string; coerced to int for registry lookup)
-#   input.table_id   -> data-table reference (value is the table's numeric_id)
-#   input.parameters -> column->value map; keys are field UUIDs in datapill-safe
-#                       (underscored) form, normalized to hyphens before resolving
-FLOW_ID_KEYS = ("flow_id", "recipe_id")                    # flow_id confirmed; recipe_id kept as fallback
-TABLE_KEYS = ("data_table_id", "table_id", "data_table")   # table_id matches; value = numeric_id
-RECORD_KEYS = ("parameters",)                              # the column->value map on writes
-RETURN_NAMES = ("return_result",)                          # recipe-function output (the return side of exposed_via)
-
-# data-table provider, confirmed: workato_db_table.
-DB_PROVIDERS = {"workato_db_table", "data_tables"}
-# Python provider, confirmed from datapill provenance: py_eval.
-PY_PROVIDERS = {"py_eval", "workato_python", "python"}
-# Recipe-internal state: declare/mutate variables and lists. Intentionally
-# edge-less — these cross no boundary. The values they hold are sourced from
-# other steps' datapills and, where they later reach a table/call/return, that
-# effect is already edged at its own boundary. Edging the variable too would be
-# dataflow/taint tracking, which is a different model than effects-and-interfaces.
-STATE_PROVIDERS = {"workato_variable"}
-
-# Read/write action vocab ported from DATA_TABLES_PROFILE.
-READ_NAMES = {"search_records", "lookup_record", "list_records", "get_record", "get_records"}
-WRITE_KIND_BY_NAME = {
-    "add_record": M.WriteKind.create,
-    "create_record": M.WriteKind.create,
-    "upsert_record": M.WriteKind.create,
-    "batch_create_records": M.WriteKind.create_batch,
-    "create_records_batch": M.WriteKind.create_batch,
-    "update_record": M.WriteKind.update,
-    "update_records_batch": M.WriteKind.update_batch,
-    "batch_update_records": M.WriteKind.update_batch,
-    "delete_record": M.WriteKind.update,
-    "batch_delete_records": M.WriteKind.update_batch,
-    "truncate_table": M.WriteKind.truncate,
-}
+from workato_client import WorkatoClient, WorkatoConfig, safe_parse_json, load_dotenv
+from registries import build_recipe_registry, build_table_schema_registry
+from normalize import normalize, CONTROL_KEYWORDS
+from extract import extract, PY_PROVIDERS, STATE_PROVIDERS
+from slice_run import resolve
 
 
-def _first(input_: dict, keys) -> object:
-    for k in keys:
-        if k in input_ and input_[k] not in (None, ""):
-            return input_[k]
+def classify_steps(steps, edges):
+    """Per-step coverage. A step is covered if any edge carries its uuid; control
+    frames, py_eval bodies, and recipe-internal state (workato_variable) are
+    intentionally edge-less (known); anything else an action step leaves behind is
+    UNHANDLED — a relation extract doesn't model yet."""
+    edge_uuids = {e.anchor.uuid for e in edges if e.anchor and e.anchor.uuid}
+    covered = control = py = state = 0
+    unhandled = []                                    # (provider, action)
+    for s in steps:
+        if s.keyword in CONTROL_KEYWORDS:
+            control += 1
+        elif s.provider in PY_PROVIDERS:
+            py += 1
+        elif s.provider in STATE_PROVIDERS:
+            state += 1
+        elif s.uuid in edge_uuids or s.keyword == "trigger":
+            covered += 1
+        else:
+            unhandled.append((s.provider or "(none)", s.name or "(none)"))
+    return covered, control, py, state, unhandled
+
+
+def _resolve_scope_folder(client, project_folder_id, name) -> object:
+    """Find the folder named `name` directly under the project folder. Returns
+    its id, or None if absent (caller falls back to the whole subtree)."""
+    for f in client.list_folders(parent_id=project_folder_id):
+        if (f.get("name") or "").strip().lower() == name.strip().lower():
+            return f.get("id")
     return None
 
 
-def _keyed(kind: M.TargetKind, key) -> M.Target:
-    return M.Target(kind, key, None, M.Resolution.unresolved)
+def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
+    # Registry spans the FULL subtree, so call targets in subfolders still resolve.
+    assets = client.folder_assets(folder_id)
+    rreg = build_recipe_registry(assets)
+    treg = build_table_schema_registry(client.list_data_tables())
+    n_subtree = sum(1 for a in assets if a.get("type") == "recipe")
 
+    # Processing set is scoped: recipes whose PARENT folder is "Recipes", excluding
+    # its subfolders. Filtering on folder_id makes this exact whether the list
+    # endpoint returns the folder flat or its subtree.
+    if scope_id is None:
+        scope_id = _resolve_scope_folder(client, folder_id, scope_name)
+    if scope_id is not None:
+        recipes = [r for r in client.list_recipes(folder_id=scope_id)
+                   if str(r.get("folder_id")) == str(scope_id)]
+        print(f"corpus: {len(recipes)} recipes directly in folder {scope_name!r} (id {scope_id}); "
+              f"excluded {n_subtree - len(recipes)} of {n_subtree} subtree recipes "
+              f"(subfolders + dev/test).\n")
+    else:
+        recipes = [a for a in assets if a.get("type") == "recipe"]
+        print(f"corpus: scope folder {scope_name!r} not found under {folder_id}; "
+              f"falling back to all {len(recipes)} recipes in the subtree.\n")
 
-# Recipe `code` renders UUIDs in datapill-safe form (underscores); the data-tables
-# API returns them hyphenated. Normalize an underscored-UUID-shaped key to hyphens;
-# leave anything else (e.g. a column referenced by name) untouched.
-_UUID_USCORE = re.compile(r"^[0-9a-f]{8}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{12}$", re.I)
+    rel_counts: Counter = Counter()
+    unhandled: Counter = Counter()
+    unresolved_calls = []
+    unresolved_other: Counter = Counter()
+    drift = []
+    zero_edge = []
+    per_recipe = []
+    errors = []
+    cov_tot = ctrl_tot = py_tot = state_tot = unh_tot = 0
 
-
-def _norm_field_id(key: str) -> str:
-    return key.replace("_", "-") if _UUID_USCORE.match(str(key)) else key
-
-
-def _as_flow_id(value) -> object:
-    s = str(value)
-    return int(s) if s.isdigit() else value
-
-
-def _output_fields(s) -> list:
-    """Field names a return_result step exposes. Prefer the step's own schema
-    labels (distilled by normalize); else the keys of the output value map."""
-    if s.field_labels:
-        return sorted(set(s.field_labels.values()))
-    payload = s.input.get("result") or s.input.get("parameters") or s.input
-    return sorted(payload.keys()) if isinstance(payload, dict) else []
-
-
-def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
-    edges: list[M.Edge] = []
-
-    for s in steps:
-        anchor = M.StepAnchor(uuid=s.uuid, path=s.path)
-
-        if s.keyword == "trigger":
-            edges.append(M.Edge(
-                source_flow_id, anchor, M.Relation.exposed_via,
-                M.Target(M.TargetKind.trigger, s.name, s.name, M.Resolution.not_applicable),
-                M.ExposedAttrs(trigger_type=M.TriggerType.recipe_function, auth=M.Auth.none),
-            ))
+    for a in recipes:
+        fid = a.get("id")
+        handle = (rreg.by_flow_id.get(fid) or {}).get("handle", str(fid))
+        try:
+            code = safe_parse_json(client.get_recipe(fid).get("code"))
+            steps = normalize(code)
+            edges = extract(steps, fid)
+            resolve(edges, rreg, treg)
+        except Exception as ex:                       # keep going; one bad recipe shouldn't abort the pass
+            errors.append((handle, repr(ex)))
             continue
 
-        if s.keyword in CONTROL_KEYWORDS:
-            continue                                        # frame, not an effect
+        for e in edges:
+            rel_counts[e.relation.value] += 1
+            t = e.target
+            if t.resolution == M.Resolution.unresolved and t.durable_key is not None:
+                if e.relation == M.Relation.calls:
+                    unresolved_calls.append((handle, t.durable_key))
+                else:
+                    unresolved_other[e.relation.value] += 1
+            if e.relation == M.Relation.writes_column:
+                tid, fcol = t.durable_key
+                live = treg.resolve_column(tid, fcol).resolved_label
+                rec = getattr(e.attrs, "recipe_label", None)
+                if live and rec and live != rec:
+                    drift.append((handle, rec, live, fcol))
 
-        if s.provider in PY_PROVIDERS:
-            continue                                        # body captured at the step layer; no semantic edge yet
+        cov, ctrl, py, state, unh = classify_steps(steps, edges)
+        cov_tot += cov; ctrl_tot += ctrl; py_tot += py; state_tot += state; unh_tot += len(unh)
+        for prov_name in unh:
+            unhandled[prov_name] += 1
+        if not edges:
+            zero_edge.append(handle)
+        per_recipe.append((handle, len(steps), len(edges), len(unh)))
 
-        if s.provider in STATE_PROVIDERS:
-            continue                                        # recipe-internal state; effects edged at their boundaries
+    # ---------------- report ----------------
+    total = cov_tot + ctrl_tot + py_tot + state_tot + unh_tot
+    print(f"coverage (steps): {total} total = {cov_tot} covered, {ctrl_tot} control, "
+          f"{py_tot} py, {state_tot} state, {unh_tot} unhandled\n")
 
-        # Call detection accepts BOTH representations until inspectRecipeKeywords
-        # settles it: keyword 'call' (toolkit's labelStep_) or the
-        # workato_recipe_function action names (the OpenAPI spec's shape).
-        is_call = s.keyword == "call" or (
-            s.provider == "workato_recipe_function" and s.name in ("call_recipe", "call_recipe_async")
-        )
-        if is_call:
-            callee = _as_flow_id(_first(s.input, FLOW_ID_KEYS))
-            mode = M.CallMode.async_ if (s.name or "").endswith("_async") else M.CallMode.sync
-            params = list((s.input.get("parameters") or s.input.get("input") or {}).keys())
-            edges.append(M.Edge(
-                source_flow_id, anchor, M.Relation.calls,
-                _keyed(M.TargetKind.recipe, callee),
-                M.CallAttrs(mode=mode, params=params),
-            ))
-            continue
+    print("edges by relation:")
+    for rel, n in rel_counts.most_common():
+        print(f"  {n:5}  {rel}")
 
-        # return_result — the recipe-function's OUTPUT contract; the return side of
-        # exposed_via, paired with the trigger's input side.
-        if s.provider == "workato_recipe_function" and s.name in RETURN_NAMES:
-            edges.append(M.Edge(
-                source_flow_id, anchor, M.Relation.exposed_via,
-                M.Target(M.TargetKind.trigger, s.name, s.name, M.Resolution.not_applicable),
-                M.ExposedAttrs(trigger_type=M.TriggerType.recipe_function, auth=M.Auth.none,
-                               direction="out", fields=tuple(_output_fields(s))),
-            ))
-            continue
+    print("\nUNHANDLED step types (provider :: action) — the worklist:")
+    if unhandled:
+        for (prov, name), n in unhandled.most_common():
+            print(f"  {n:5}  {prov} :: {name}")
+    else:
+        print("  (none — every action step produced an edge)")
 
-        if s.provider in DB_PROVIDERS:
-            table = _first(s.input, TABLE_KEYS)
-            if s.name in READ_NAMES:
-                edges.append(M.Edge(
-                    source_flow_id, anchor, M.Relation.accesses_table,
-                    _keyed(M.TargetKind.table, table),
-                    M.TableAttrs(access=M.Access.read, action=s.name),
-                ))
-            elif s.name in WRITE_KIND_BY_NAME:
-                wk = WRITE_KIND_BY_NAME[s.name]
-                edges.append(M.Edge(
-                    source_flow_id, anchor, M.Relation.accesses_table,
-                    _keyed(M.TargetKind.table, table),
-                    M.TableAttrs(access=M.Access.write, action=s.name, write_kind=wk),
-                ))
-                # column writes — only when the per-column mapping is statically visible.
-                # A batch payload that is a single list pill (no column map) stays an
-                # opaque step rather than a false edge.
-                record = _first(s.input, RECORD_KEYS)
-                if isinstance(record, dict):
-                    col_kind = M.WriteKind.create if wk in (M.WriteKind.create, M.WriteKind.create_batch) else M.WriteKind.update
-                    for col_key in record:
-                        field_id = _norm_field_id(col_key)
-                        edges.append(M.Edge(
-                            source_flow_id, anchor, M.Relation.writes_column,
-                            M.Target(M.TargetKind.column, (table, field_id), None, M.Resolution.unresolved),
-                            M.ColumnAttrs(write_kind=col_kind, recipe_label=s.field_labels.get(field_id)),
-                        ))
-            continue
+    if unresolved_calls:
+        print(f"\nunresolved calls (likely cross-project): {len(unresolved_calls)}")
+        for caller, callee in unresolved_calls[:12]:
+            print(f"  {caller} -> flow_id {callee}")
 
-        # connector / wfa / files / pubsub / email / csv providers -> later relations; out of slice scope
-    return edges
+    if unresolved_other:
+        print("\nunresolved non-call targets:", dict(unresolved_other))
+
+    if drift:
+        print(f"\ncolumn-name drift (recipe label ~= live name): {len(drift)}")
+        for handle, rec, live, fcol in drift:
+            print(f"  {handle}: {rec} ~= {live!r} ({fcol})")
+
+    if zero_edge:
+        print(f"\nzero-edge recipes ({len(zero_edge)}): {', '.join(zero_edge)}")
+
+    if errors:
+        print(f"\nerrors ({len(errors)}):")
+        for handle, ex in errors:
+            print(f"  {handle}: {ex}")
+
+    print("\nper-recipe  (handle | steps | edges | unhandled):")
+    for handle, nsteps, nedges, nunh in sorted(per_recipe):
+        print(f"  {handle:16} {nsteps:4} {nedges:4} {nunh:4}" + ("   <-- has unhandled" if nunh else ""))
+
+    return True
+
+
+def main():
+    load_dotenv()
+    folder_id = os.environ.get("SDC_FOLDER_ID")
+    if not folder_id:
+        sys.exit("STOP: set SDC_FOLDER_ID (the project / top-level folder).")
+    scope_name = os.environ.get("SDC_RECIPES_FOLDER_NAME", "Recipes")
+    scope_id = os.environ.get("SDC_RECIPES_FOLDER_ID")          # optional fast-path override
+    client = WorkatoClient(config=WorkatoConfig.from_env())
+    run(client, folder_id, scope_name=scope_name, scope_id=scope_id)
+
+
+if __name__ == "__main__":
+    main()
