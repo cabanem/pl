@@ -66,7 +66,10 @@ def _field_labels(node: dict) -> dict:
 
     for src in ("extended_output_schema", "extended_input_schema"):
         for entry in node.get(src) or []:
-            walk(entry.get("properties"), "", "")   # the `result`/`record` envelope is implicit
+            if entry.get("properties"):
+                walk(entry.get("properties"), "", "")   # envelope/container (`result`/`record`/a list): take its leaves
+            else:
+                walk([entry], "", "")                   # a top-level field with no wrapper (e.g. http_status_code)
     return out
 
 
@@ -94,4 +97,3 @@ def normalize(code: dict) -> list[NormStep]:
 
     walk(code, "", "none")
     return out
-    
