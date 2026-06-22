@@ -18,25 +18,20 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import sdc_recipe_model as M
 from workato_client import WorkatoClient, WorkatoConfig, safe_parse_json
-from registries import build_recipe_registry, build_table_schema_registry, fetch_needed_schemas
+from registries import build_recipe_registry, build_table_schema_registry
 from inspect_corpus import (
     inspect_connector_usage, inspect_recipe_keywords, inspect_provider_input_keys,
 )
 from normalize import normalize
 from extract import extract
-from slice_run import resolve, call_graph, table_access_matrix, status_writers
+from slice_run import resolve, call_graph, table_access_matrix, status_writers, ORACLE
 
 FOLDER_ID = 111
 STS01_FLOW_ID = 84
-
-ORACLE = {
-    "reads": {"SUP_SupplierRequest", "RUN_ValidationResult", "Project", "RUN_ReviewNote"},
-    "writes": {"SUP_SupplierRequest"},
-    "status_columns": {"current_state_entered_at", "status", "supplier_display_status", "supplier_message"},
-}
 
 
 # --- canned workspace ------------------------------------------------------
@@ -46,7 +41,8 @@ def _trivial_code(uuid):
 
 
 def _load_sts01_code():
-    with open("fixtures/sts_01.recipe.fixture.json") as f:
+    fixture = Path(__file__).resolve().parent / "fixtures" / "sts_01.recipe.fixture.json"
+    with open(fixture) as f:
         code = json.load(f)
     code.pop("_fixture_note", None)
     return code
@@ -56,11 +52,11 @@ def make_fake_transport():
     sts01_code = _load_sts01_code()
 
     recipes_list = [
-        {"id": 84, "name": "STS-01 Status-change handler", "folder_id": FOLDER_ID,
+        {"id": 84, "name": "STS-01 Status-change handler", "folder_id": 222,
          "running": True, "updated_at": "2026-06-01T00:00:00Z", "action_applications": ["workato_db_table"]},
-        {"id": 4, "name": "UTL-01 Generate shareable link", "folder_id": FOLDER_ID,
+        {"id": 4, "name": "UTL-01 Generate shareable link", "folder_id": 222,
          "running": True, "updated_at": "2026-05-01T00:00:00Z", "action_applications": []},
-        {"id": 16, "name": "OBS-01 Event emitter", "folder_id": FOLDER_ID,
+        {"id": 16, "name": "OBS-01 Event emitter", "folder_id": 222,
          "running": True, "updated_at": "2026-05-15T00:00:00Z", "action_applications": []},
     ]
     details = {
@@ -75,10 +71,15 @@ def make_fake_transport():
         {"id": 900, "name": "SDC Connection", "type": "connection", "zip_name": "sdc_connection.json"},  # must be filtered out
     ]}}
     data_tables = {"data": [
-        {"id": "tbl-supreq", "name": "SUP_SupplierRequest"},
-        {"id": "tbl-valres", "name": "RUN_ValidationResult"},
-        {"id": "tbl-project", "name": "Project"},
-        {"id": "tbl-revnote", "name": "RUN_ReviewNote"},
+        {"id": "tbl-supreq", "numeric_id": 1001, "name": "SUP_SupplierRequest", "schema": [
+            {"field_id": "84d52734-cdab-48c5-af42-76a3f72575e4", "name": "status", "type": "string"},
+            {"field_id": "c060f6fc-6256-4285-a88d-e2b323f3152b", "name": "Result status", "type": "string"},
+            {"field_id": "e1257e22-026e-406d-8bf0-bd432b14d78d", "name": "Message", "type": "string"},
+            {"field_id": "d4b0feff-ea32-45a9-aa62-cf4927b5d093", "name": "current_state_entered_at", "type": "date_time"},
+        ]},
+        {"id": "tbl-valres", "numeric_id": 1002, "name": "RUN_ValidationResult", "schema": []},
+        {"id": "tbl-project", "numeric_id": 1003, "name": "Project", "schema": []},
+        {"id": "tbl-revnote", "numeric_id": 1004, "name": "RUN_ReviewNote", "schema": []},
     ]}
     schemas = {
         "tbl-supreq": {"data": {"id": "tbl-supreq", "name": "SUP_SupplierRequest", "schema": [
@@ -94,6 +95,11 @@ def make_fake_transport():
         assert headers.get("Authorization", "").startswith("Bearer "), "missing bearer auth"
         if "/api/export_manifests/folder_assets" in url:
             return 200, json.dumps(folder_assets)
+        if "/api/folders" in url:
+            return 200, json.dumps([
+                {"id": 222, "name": "Recipes", "parent_id": FOLDER_ID, "is_project": False},
+                {"id": 333, "name": "Data tables", "parent_id": FOLDER_ID, "is_project": False},
+            ])
         m = re.search(r"/api/recipes/(\d+)(?:\?|$)", url)
         if m:
             return 200, json.dumps(details[int(m.group(1))])
@@ -160,19 +166,18 @@ def main():
     steps = normalize(sts01["code"])
     edges = extract(steps, STS01_FLOW_ID)
 
-    # table_schema_registry: names from the list, columns only for write targets
+    # table_schema_registry: built from the /api/data_tables list alone — it
+    # carries each table's schema inline, so no per-table records GET.
+    treg = build_table_schema_registry(client.list_data_tables())
+
+    # sanity: the extractor identified the sole write target
     write_tables = {
         e.target.durable_key[0] if e.relation == M.Relation.writes_column else e.target.durable_key
         for e in edges
         if e.relation in (M.Relation.writes_column, M.Relation.accesses_table)
         and getattr(e.attrs, "access", None) == M.Access.write
     }
-    write_tables = {t for t in write_tables if t}
-    treg = build_table_schema_registry(
-        client.list_data_tables(),
-        fetch_needed_schemas(client, write_tables),
-    )
-    assert write_tables == {"tbl-supreq"}, write_tables
+    assert {t for t in write_tables if t} == {"tbl-supreq"}
     resolve(edges, rreg, treg)
 
     # -- inspectors over the fetched corpus (the flag-settlers) ------------
