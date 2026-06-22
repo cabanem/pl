@@ -16,6 +16,8 @@ testable with the network off.
 ```
 sdc-recipe-model/
 │
+├── run.py                           # ► the one command: preflight → live corpus pass → frozen IR (out/edges.json)
+│
 ├── sdc_recipe_model.contract.yaml   # authoritative one-page contract: relations,
 │                                    #   identity model, provenance, projection catalog
 ├── sdc_recipe_model.py              # typed realization of the contract — the spine
@@ -91,6 +93,20 @@ schema). There is no write path, so the live steps cannot mutate anything.
 ---
 
 ## Run it
+
+### 0. Everything at once
+
+One command — offline preflight, the live corpus pass, and a frozen edge set
+written to `out/edges.json`:
+
+```bash
+PYTHONPATH=/path/to/sdc-recipe-model python3 run.py
+```
+
+It fails fast on a broken spine before touching the network, prints the full
+corpus report, and leaves the resolved IR on disk for the projections (and the
+eventual spec regen) to re-run against offline. The sections below are the
+individual stages it composes, useful when you want to run just one.
 
 ### 1. Offline checks — no credentials
 
