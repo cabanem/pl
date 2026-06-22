@@ -191,7 +191,7 @@ def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
     for handle, nsteps, nedges, nunh in sorted(per_recipe):
         print(f"  {handle:16} {nsteps:4} {nedges:4} {nunh:4}" + ("   <-- has unhandled" if nunh else ""))
 
-    return True
+    return all_edges
 
 
 def main():
