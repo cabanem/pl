@@ -28,7 +28,9 @@ from workato_client import WorkatoClient, WorkatoConfig, safe_parse_json, load_d
 from registries import build_recipe_registry, build_table_schema_registry
 from normalize import normalize, CONTROL_KEYWORDS
 from extract import extract, PY_PROVIDERS, STATE_PROVIDERS, TRANSFORM_PROVIDERS
-from slice_run import resolve
+from resolve import resolve
+from projections import single_owner_audit
+from slice_run import ORACLE
 
 
 def classify_steps(steps, edges):
@@ -96,6 +98,7 @@ def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
     per_recipe = []
     errors = []
     cov_tot = ctrl_tot = py_tot = state_tot = xform_tot = unh_tot = 0
+    all_edges = []                                    # accumulate resolved edges for the cross-recipe audit
 
     for a in recipes:
         fid = a.get("id")
@@ -131,6 +134,7 @@ def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
         if not edges:
             zero_edge.append(handle)
         per_recipe.append((handle, len(steps), len(edges), len(unh)))
+        all_edges.extend(edges)
 
     # ---------------- report ----------------
     total = cov_tot + ctrl_tot + py_tot + state_tot + xform_tot + unh_tot
@@ -160,6 +164,20 @@ def run(client, folder_id, scope_name="Recipes", scope_id=None) -> bool:
         print(f"\ncolumn-name drift (recipe label ~= live name): {len(drift)}")
         for handle, rec, live, fcol in drift:
             print(f"  {handle}: {rec} ~= {live!r} ({fcol})")
+
+    # --- single-owner audit: who writes the guarded status columns, by path ---
+    audit = single_owner_audit(all_edges, rreg, treg, "STS-01", ORACLE["status_columns"])
+    print(f"\nsingle-owner audit — guarded columns {audit['guarded_columns']}, owner {audit['owner']}")
+    if audit["other_writers"]:
+        print(f"  writers other than {audit['owner']} (review — creation-time write vs leak past the single writer):")
+        for table, col, handle, path, op in audit["other_writers"]:
+            print(f"    {col:24} <- {handle:10} via {path:9} ({op})")
+    else:
+        print(f"  none — {audit['owner']} is the sole writer of the guarded columns")
+    if audit["stage_movers"]:
+        print("  stage movers (review against intended ownership — STS-01 status-projection / INV-01A assignment):")
+        for handle, stage_id, op in audit["stage_movers"]:
+            print(f"    {handle:10} {op:24} stage {stage_id}")
 
     if zero_edge:
         print(f"\nzero-edge recipes ({len(zero_edge)}): {', '.join(zero_edge)}")
