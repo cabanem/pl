@@ -49,6 +49,16 @@ STATE_PROVIDERS = {"workato_variable"}
 TRANSFORM_PROVIDERS = {"csv_parser", "json_parser"}
 FILES_PROVIDER = "workato_files"
 WFA_PROVIDER = "workato_workflow_task"
+# Trigger surface keyed on the trigger step's provider (verified across the corpus).
+# Note: workato_db_table is a table-action provider in action position, but in
+# TRIGGER position (name updated_records_realtime) it's the data-table trigger.
+TRIGGER_SURFACE = {
+    "workato_recipe_function": M.TriggerType.recipe_function,
+    "workato_workflow_task": M.TriggerType.workflow_app_function,
+    "workato_api_platform": M.TriggerType.api_platform_http,
+    "workato_webhooks": M.TriggerType.workato_webhook,
+    "workato_db_table": M.TriggerType.data_table_realtime,
+}
 # A custom-connector provider carries a "_connector_<id>..." instance suffix
 # (e.g. functional_core_for_sdc..._connector_500787859_1778246042). Built-in
 # providers never do. Strip the suffix for an environment-independent identity.
@@ -172,10 +182,11 @@ def extract(steps: list[NormStep], source_flow_id: int) -> list[M.Edge]:
         anchor = M.StepAnchor(uuid=s.uuid, path=s.path)
 
         if s.keyword == "trigger":
+            surface = TRIGGER_SURFACE.get(s.provider, M.TriggerType.recipe_function)
             edges.append(M.Edge(
                 source_flow_id, anchor, M.Relation.exposed_via,
                 M.Target(M.TargetKind.trigger, s.name, s.name, M.Resolution.not_applicable),
-                M.ExposedAttrs(trigger_type=M.TriggerType.recipe_function, auth=M.Auth.none),
+                M.ExposedAttrs(trigger_type=surface, auth=M.Auth.none),   # auth left unspecified pending trigger-input read
             ))
             continue
 
