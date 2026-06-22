@@ -1,0 +1,252 @@
+# =============================================================================
+# SDC Recipe Model — Canonical Contract   (v0.1)
+# -----------------------------------------------------------------------------
+# The single source of truth for the recipe-layer intermediate representation.
+# Every artifact (OpenAPI spec, call graph, lint report, runbook, trimmed LLM
+# context) is a PROJECTION over the edge set defined here — not an authored
+# document. Two invariants hold for all projections:
+#   1. deterministic derivation — identical recipe JSON -> identical model,
+#      every run, every workspace.
+#   2. honest provenance — every edge declares how it is known, and whether
+#      its target resolved against a registry.
+# =============================================================================
+
+meta:
+  name: sdc_recipe_model
+  version: "0.2"      # all seven relations wired against real recipe shapes; resolve + projections modularized
+  grain: step          # edges anchor to a step; recipe-level views are GROUP BYs that drop step position
+
+# -----------------------------------------------------------------------------
+# Identity model — two tiers. Durable keys are truth; resolved labels are
+# conveniences, re-derived from registries, never authoritative.
+# -----------------------------------------------------------------------------
+identity:
+  durable_keys:                       # authoritative; what projections join on
+    recipe: flow_id                   # workspace-local numeric id
+    table: table_id
+    column: [table_id, field_id]      # composite
+    step: uuid                        # PRIMARY anchor (same-workspace; stable across edits; unambiguous)
+  resolved_labels:                    # denormalized; re-derived; never authoritative
+    recipe: handle                    # e.g. "STS-01"  (recipe_registry)
+    table: table_name                 # (table_schema_registry)
+    column: column_name               # (table_schema_registry)
+    step: path                        # SECONDARY anchor (cross-workspace-portable; human-legible)
+  notes:
+    step_anchor: >-
+      uuid is primary because the principal comparison is same-workspace, where
+      uuid is stable across edits and unambiguous. path is retained as a
+      cross-workspace-portable, human-legible secondary locator.
+    handle_authority: >-
+      handle is assigned by recipe_registry keyed on flow_id, never derived from
+      the source filename — filename-prefix derivation is what produces the
+      WFA-13 collision.
+
+# -----------------------------------------------------------------------------
+# Orthogonal axes carried by edges/steps. Both matter; neither implies the other.
+# -----------------------------------------------------------------------------
+provenance:                           # how an edge is known to EXIST
+  - derived                           # statically read from recipe JSON; regenerable; trustworthy
+  - asserted                          # filled from analysis of an opaque interior (human or model)
+
+resolution:                           # whether a KEYED target was found in a registry
+  - resolved                          # key located; label attached
+  - unresolved                        # key not in scope (cross-project flow_id, raw table_id); raw key retained
+  - not_applicable                    # target is a bare label (connector action, wfa task); no registry
+
+step_analysis:                        # step-level: is the full effect set statically visible?
+  - derived                           # yes
+  - opaque                            # no — interior not yet analyzed (py_eval); yields asserted edges once analyzed
+
+# -----------------------------------------------------------------------------
+# Node: Recipe (+ its single distinguished entry, the trigger)
+# -----------------------------------------------------------------------------
+recipe:
+  flow_id: int                        # durable key
+  handle: string                      # resolved label (registry)
+  kind:
+    enum: [api_endpoint, event_webhook, data_table_trigger, callable_recipe, workflow_app_function]
+  trigger: Trigger                    # the one entry point
+  version: int
+  source_file: string
+  request_schema: "ref?"              # node attribute, not an edge
+  response_schema: "ref?"
+  declares: "[Variable]"              # declared_variables; node attribute
+  collision: bool                     # true when filename-prefix derivation collides (renumber at source)
+
+Trigger:
+  type:
+    enum: [api_platform_http, workato_webhook, data_table_realtime, recipe_function, workflow_app_function]
+  wfa_function_type: "generic | load_table | load_dropdown   (only when type=workflow_app_function)"
+  auth: "api_token | webhook_suffix | none"
+  trigger_table: "string?   (only when type=data_table_realtime)"
+
+Variable:
+  name: string
+  type: "string | integer | boolean | date_time | object | array"
+
+# -----------------------------------------------------------------------------
+# Step — the atom edges anchor to. Control frames are the frame, not edges.
+# -----------------------------------------------------------------------------
+Step:
+  anchor:
+    uuid: "string   (PRIMARY)"
+    path: "string   (SECONDARY; positional block[i].-chained path through the NORMALIZED
+            control-flow tree, ported from the GAS walkSteps_, e.g. 'block[0].block[2].'.
+            Semantic branch labels are a possible future enrichment, not v1.)"
+  action_type: "string   (workato action, e.g. workato_db_table.get_records)"
+  frame: "none | if | else | elsif | try | catch | foreach | stop   (enclosing control context)"
+  python: "PyEvalBody?   (present iff action_type == py_eval.invoke_custom_py_code)"
+  edgeless_classes: >-
+    A step legitimately produces no edge when it is: a control frame (the frame,
+    not an effect); py_eval (interior opaque — reserved for asserted edges);
+    state (workato_variable — recipe-internal locals/lists); or transform
+    (csv_parser / json_parser — pure data-shaping, no boundary). These are KNOWN
+    and accounted for in the coverage partition, distinct from UNHANDLED.
+
+PyEvalBody:                           # the reserved slot: I/O is derivable now, semantics asserted later
+  code: "string   (DERIVED, verbatim from JSON)"
+  inputs: "[string]   (DERIVED — input pills consumed)"
+  outputs: "[Variable]   (DERIVED — declared output schema)"
+  analysis_status: "derived | opaque   (opaque until interior analyzed)"
+  asserted_effects: "[Edge]   (initially []; filled with provenance=asserted edges)"
+
+# -----------------------------------------------------------------------------
+# Edge — the typed effect. THE atom every projection reads.
+# -----------------------------------------------------------------------------
+Edge:
+  source_recipe: "flow_id   (durable key of the emitting recipe)"
+  anchor: "StepAnchor   (which step emitted it)"
+  relation: Relation
+  target: Target
+  attrs: "<per-relation; see relations>"
+  provenance: "derived | asserted"
+
+Target:
+  kind: "recipe | table | column | connector_action | wfa_task | trigger | external"
+  durable_key: "flow_id | table_id | [table_id, field_id] | label"
+  resolved_label: "string?   (null until resolved, or n/a)"
+  resolution: "resolved | unresolved | not_applicable"
+
+# -----------------------------------------------------------------------------
+# Relations — the closed vocabulary. Each declares target kind, the projection
+# it feeds, and its attribute set.
+# -----------------------------------------------------------------------------
+relations:
+
+  calls:
+    target: recipe
+    produces: call_graph
+    attrs:
+      mode: "sync | async"
+      params: "[string]"
+
+  accesses_table:
+    target: table
+    produces: table_access_matrix
+    attrs:
+      access: "read | write"
+      write_kind: "update | create | create_batch | update_batch | truncate   (null when read)"
+      action: "string   (get_records, add_record, update_record, ...)"
+
+  writes_column:
+    target: column
+    produces: status_writers
+    attrs:
+      write_kind: "create | update"
+    note: >-
+      Derivable only when per-column writes are statically visible. Batch creates
+      (e.g. SUP-01) are indeterminate — emit the STEP as opaque, never a false edge.
+
+  invokes_connector:
+    target: connector_action          # durable_key [connector, action]; connector = instance suffix stripped
+    produces: connector_coupling
+    attrs:
+      connector: "string   (env-independent identity, e.g. functional_core_for_sdc_multi_workspace)"
+      action: "string   (parse_config_file, validate_upload, finalize_verdict, ...)"
+      args: "[string]   (argument keys supplied — the invocation contract)"
+    note: >-
+      A custom connector (provider carries a _connector_<id> instance suffix) is a
+      tracked dependency. Platform built-in transforms (csv/json parser) are NOT
+      connectors — they are edge-less.
+
+  performs_wfa:
+    target: wfa_task                  # durable_key = app_id (the single WFA app), or user_group_ids (invite_user)
+    produces: [wfa_surface, single_owner_audit]
+    attrs:
+      operation: "string   (add_request | update_request | get_requests | complete_task |
+                  human_review_on_existing_record | share_request | unshare_request | invite_user)"
+      addressing: "app_id+record_id | app_id | user_group"
+      sets_fields: "[field_id]   (add/update parameters — SAME identity as table columns; bridges to writes_column)"
+      workflow_stage_id: "string?   (stage assigned/moved — human_review / update_request)"
+    note: >-
+      The WFA app is a UI layer over SUP_SupplierRequest: add/update_request write
+      the same column field_ids STS-01 writes directly. The two write paths are
+      joined by field_id in the single_owner_audit projection, not conflated here.
+
+  touches_external:
+    target: external
+    produces: external_surface
+    discriminator: surface          # attributes FOLLOW the tag — never flattened into one schema
+    by_surface:
+      storage:  { operation: "store_file | get_file_contents | ensure_dir_exists | create_shareable_link | ...", path: "string?   (location; often a datapill formula)", name: "string?   (file/dir leaf)", expires_in: "string?   (link TTL, seconds)" }
+      drive:    { operation: "download_file_contents", drive_file_id: "string?" }
+      pubsub:   { topic: "string?", in_catch: "bool   (true when published from a <catch> — the failure signal)" }
+      template: { operation: "create_document", template_id: "string?   (the rendered template asset)" }
+      email:    { to: "string?   (recipient — usually a datapill)", subject: "string?" }
+    note: >-
+      csv/json parsing is NOT here — it is pure data-shaping (transform), edge-less.
+      A surface is an external system or asset the recipe depends on.
+
+  exposed_via:
+    target: trigger
+    produces: entry_points
+    attrs:
+      trigger_type: "string"
+      auth: "string"
+
+# -----------------------------------------------------------------------------
+# Registries — fetched once per workspace snapshot; power resolution.
+# Both share one shape: fetch a table, resolve opaque keys against it in a join.
+# -----------------------------------------------------------------------------
+registries:
+  recipe_registry:
+    source: "GET /api/export_manifests/folder_assets?folder_id=<id>"
+    builds: "flow_id -> { handle, name, type, source_file }"
+    powers: [recipe.handle, "calls.target"]   # ONE fetch names nodes AND resolves call edges
+    boundary: >-
+      Manifests do not span projects. A cross-project call target is therefore
+      legitimately unresolved (your flow_id:2066426) — the edge of the map, not a bug.
+
+  table_schema_registry:
+    source: "GET /api/data_tables   (the list carries each table's schema inline)"
+    builds: "[table_id, field_id] -> { name, type }   (dual-indexed under UUID id AND numeric_id)"
+    powers: ["accesses_table.target", "writes_column.target", "single_owner_audit (field_id reverse index)"]
+    note: >-
+      Resolution routes entirely through the list; the per-table records GET
+      (/api/v1/tables/<id>) 404s on the list's UUID and is off the resolution path.
+
+# -----------------------------------------------------------------------------
+# Projections — artifacts are GROUP BYs over the edge set, not authored docs.
+# -----------------------------------------------------------------------------
+projections:
+  # built (projections.py)
+  call_graph: "edges where relation=calls"
+  table_access_matrix: "edges where relation=accesses_table  group by target   (read / write)"
+  status_writers: "edges where relation=writes_column  group by target"
+  field_index: "table_schema_registry -> {field_id: (table, column)}   (reverse index; the bridge's join key)"
+  column_writers: >-
+    the bridge — field_id -> {table, column, writers:[(handle, path, op)]}, unioning the two write
+    paths: direct writes_column (table-api) and performs_wfa.sets_fields (wfa). Joined by field_id.
+  stage_movers: "performs_wfa carrying workflow_stage_id -> (handle, stage_id, op)"
+  single_owner_audit: >-
+    column_writers filtered to guarded columns (the oracle's status_columns), surfacing writers other
+    than the stated owner (STS-01) by path — the single-writer invariant as a report (creation-time
+    write vs leak is left for human judgement), plus stage_movers for ownership review.
+  # planned (named here; not yet built as functions)
+  connector_coupling: "edges where relation=invokes_connector  group by target"
+  wfa_surface: "edges where relation=performs_wfa"
+  external_surface: "edges where relation=touches_external  group by surface"
+  entry_points: "edges where relation=exposed_via   (in + out per recipe — the I/O contract; feeds spec regen)"
+  fan_in: "count(calls)  group by target   (e.g. OBS-01 ~= 2/3 of all call edges)"
+  unresolved_report: "edges where target.resolution=unresolved   (the edge of the map)"
+  opaque_report: "steps where analysis_status=opaque   (py_eval interiors awaiting context)"
