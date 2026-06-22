@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-CONTROL_KEYWORDS = {"if", "else", "elsif", "try", "catch", "foreach"}
+CONTROL_KEYWORDS = {"if", "else", "elsif", "try", "catch", "foreach", "stop"}
 
 # UUID rendered in datapill-safe (underscored) form, as it appears in recipe code.
 _UUID_USCORE = re.compile(r"^[0-9a-f]{8}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{12}$", re.I)
