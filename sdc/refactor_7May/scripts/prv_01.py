@@ -4,36 +4,27 @@ import uuid
 # -----------------------------------------------------------------------------
 # RESOLVE BUILD IDENTITY (recover-or-mint, change-detect) + COMPOSE ROWS
 #
-# Keyed on config_fingerprint (the GAS SHA-256 of the canonical serialized
-# config), NOT correlation_id -- correlation_id churns per invocation, the
-# fingerprint is stable for the same workbook content, so it survives GAS
-# re-invocations. Three-way decision:
+# Keyed on config_fingerprint (GAS SHA-256 of canonical config), NOT
+# correlation_id. Three-way:
+#   "resume"    -> a DRAFT row has this fingerprint: incomplete prior attempt.
+#   "unchanged" -> the CURRENT PUBLISHED row has this fingerprint: config is
+#                  already live; no-op, no new version.
+#   "new"       -> no match: mint (E1 or E2 per is_initial + data).
+# Only DRAFT and PUBLISHED are matched; a DEPRECATED match is ignored, so
+# reverting to a deprecated version's content produces a NEW version.
 #
-#   "resume"    -> a DRAFT row has this fingerprint: an incomplete prior attempt;
-#                  rejoin it, reuse its ids. Write step UPDATEs/no-ops the version
-#                  row and skips the Project insert + analyst invite.
-#   "unchanged" -> the CURRENT PUBLISHED row has this fingerprint: the config is
-#                  already live and identical. No-op; do NOT cut a new version.
-#                  (Caller short-circuits and returns success.)
-#   "new"       -> no fingerprint match: genuinely new/changed config; mint as
-#                  before (E1 or E2 per is_initial + prior_version_number).
+# Inputs (must match the recipe's input schema):
+#   is_initial          : boolean
+#   correlation_id      : string   (per-call trace id; required; NOT the recovery key)
+#   config_fingerprint  : string   (the recovery / change key)
+#   existing_project_id : string   (first Project record's project_id; "" if none)
+#   version_records     : array    (CFG_TemplateVersion rows for THIS workspace)
+#       each row must expose: config_fingerprint, status, template_version_id,
+#       version_number   (project_id is NOT required -- see resume note below)
 #
-# Match scope: only DRAFT (for resume) and PUBLISHED (for unchanged). A match on
-# a DEPRECATED row is ignored, so reverting a workbook to a deprecated version's
-# content still produces a NEW version, not a no-op.
-#
-# Inputs (map in the recipe):
-#   is_initial, correlation_id, existing_project_id, prior_version_number  (as before)
-#   config_fingerprint : string  -- GAS-computed; the recovery / change key
-#   version_records    : list    -- CFG_TemplateVersion rows for THIS project
-#                                    (the feeding lookup scopes; Python matches).
-#                                    Each item must expose the column labels:
-#                                    config_fingerprint, status,
-#                                    template_version_id, version_number, project_id
-#
-# correlation_id stays on the row + Project.external_request_id as the per-call
-# trace id -- it is no longer the recovery key. Empty config_fingerprint degrades
-# safely to "new" (provisioning still works; recovery just won't fire).
+# version_number is derived from the PUBLISHED rows in version_records (no
+# separate prior_version_number input). project_id on resume/unchanged comes
+# from existing_project_id, not the version row.
 # -----------------------------------------------------------------------------
 
 
@@ -48,39 +39,38 @@ def main(input):
     versions = input.get("version_records") or []
     fp_matches = [v for v in versions if fp and _s(v.get("config_fingerprint")) == fp]
 
-    # 1) DRAFT match -> rejoin the in-progress build.
+    # 1) DRAFT match -> resume. project_id comes from the Project lookup
+    #    (existing_project_id): the Project insert precedes the version write, so a
+    #    recoverable draft implies the Project already exists. CFG_TemplateVersion
+    #    carries no project_id column.
     draft = next((v for v in fp_matches
                   if _s(v.get("status")).lower() == "draft"), None)
     if draft:
         tvid = _s(draft.get("template_version_id"))
         vnum = _i(draft.get("version_number"))
-        return _ok("resume", _s(draft.get("project_id")), tvid, vnum, fp,
+        return _ok("resume", _s(input.get("existing_project_id")), tvid, vnum, fp,
                    {}, _tv_row(tvid, vnum, corr, fp))
 
-    # 2) CURRENT PUBLISHED match -> config already live and unchanged; no-op.
+    # 2) CURRENT PUBLISHED match -> config already live, unchanged; no-op.
     live = next((v for v in fp_matches
                  if _s(v.get("status")).lower() == "published"), None)
     if live:
-        return _ok("unchanged", _s(live.get("project_id")),
+        return _ok("unchanged", _s(input.get("existing_project_id")),
                    _s(live.get("template_version_id")),
-                   _i(live.get("version_number")), fp,
-                   {}, {})  # nothing to write; the row is already live
+                   _i(live.get("version_number")), fp, {}, {})
 
-    # ===== NEW build: no fingerprint match. Mint as before. =====
-    prior_version_number_raw = input.get("prior_version_number")
-    if prior_version_number_raw is None or str(prior_version_number_raw).strip() == "":
-        next_version_number = 1
-    else:
-        try:
-            next_version_number = int(prior_version_number_raw) + 1
-        except (TypeError, ValueError):
-            next_version_number = 1
+    # ===== NEW build: no fingerprint match. =====
+    # Next version number from PUBLISHED predecessors in version_records
+    # (drafts don't claim numbers). Replaces the prior_version_number input.
+    published_nums = [_i(v.get("version_number")) for v in versions
+                      if _s(v.get("status")).lower() == "published"]
+    next_version_number = (max(published_nums) if published_nums else 0) + 1
 
     # is_initial cross-check (authoritative -- step 5 redundant).
     if is_initial and next_version_number != 1:
         return _fail("is_initial=true but next_version_number={}".format(next_version_number))
     if (not is_initial) and next_version_number == 1:
-        return _fail("is_initial=false but no prior version found")
+        return _fail("is_initial=false but no prior published version found")
 
     # Mint or reuse IDs.  E1: mint project_id.  E2: reuse existing.
     if is_initial:
@@ -92,6 +82,10 @@ def main(input):
 
     template_version_id = str(uuid.uuid4())
 
+    # project_row -- composed from 7 trigger fields that are NOT in the current
+    # input schema. If the Project add_record consumes this project_row, MAP THEM
+    # (else the Project row is written blank). If add_record maps the trigger
+    # datapills directly, this output is unused -- drop the composition.
     project_row = {
         "project_id": project_id,
         "analyst_email": _s(input.get("analyst_email")),
