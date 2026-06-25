@@ -19,6 +19,7 @@
 // ---- Settings you rarely change -------------------------------------------
 
 const CONFIG_SHEET_NAME = 'Config';        // tab holding key/value settings
+const RECO_SHEET_NAME   = 'Recommendations'; // second config: follow-up suggestions
 const TIME_BUDGET_MS    = 5 * 60 * 1000;   // stop before the ~6 min hard limit
 const SOURCES_MARKER    = '\n\n=== SOURCES ===\n'; // distinctive, so peeling is exact
 
@@ -28,14 +29,19 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Gemini Runner')
     .addItem('Run', 'runGeminiJob')
+    .addItem('Run recommendations', 'runRecommendations')
     .addSeparator()
     .addItem('Reset output column', 'resetOutput')
+    .addItem('Reset recommendations', 'resetRecommendations')
     .addToUi();
 }
 
-// ---- Entry point ----------------------------------------------------------
+// ---- Entry points ---------------------------------------------------------
 
-function runGeminiJob() {
+function runGeminiJob()      { runJob_(CONFIG_SHEET_NAME); }   // first pass
+function runRecommendations(){ runJob_(RECO_SHEET_NAME);   }   // follow-up pass
+
+function runJob_(configSheetName) {
   // Prevent two overlapping runs from clobbering the same cells / burning quota.
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) {
@@ -45,7 +51,7 @@ function runGeminiJob() {
 
   try {
     const ss  = SpreadsheetApp.getActive();
-    const cfg = readConfig_(ss);
+    const cfg = readConfig_(ss, configSheetName);
 
     const dataSheet = ss.getSheetByName(cfg.data_sheet);
     if (!dataSheet) throw new Error('Data sheet not found: "' + cfg.data_sheet + '"');
@@ -297,9 +303,10 @@ function escapeRegex_(s) {
 
 // ---- Config ---------------------------------------------------------------
 
-function readConfig_(ss) {
-  const sheet = ss.getSheetByName(CONFIG_SHEET_NAME);
-  if (!sheet) throw new Error('Missing "' + CONFIG_SHEET_NAME + '" sheet.');
+function readConfig_(ss, sheetName) {
+  sheetName = sheetName || CONFIG_SHEET_NAME;
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) throw new Error('Missing "' + sheetName + '" sheet.');
 
   const raw = {};
   sheet.getDataRange().getValues().forEach(function (r) {
@@ -387,10 +394,13 @@ function outputNames_(cfg) {
   return [cfg.output_column];
 }
 
-/** Clear all output column(s) so the next Run reprocesses every row. */
-function resetOutput() {
+/** Clear a pass's output column(s) so its next Run reprocesses every row. */
+function resetOutput()          { resetJob_(CONFIG_SHEET_NAME); }
+function resetRecommendations() { resetJob_(RECO_SHEET_NAME);   }
+
+function resetJob_(configSheetName) {
   const ss    = SpreadsheetApp.getActive();
-  const cfg   = readConfig_(ss);
+  const cfg   = readConfig_(ss, configSheetName);
   const sheet = ss.getSheetByName(cfg.data_sheet);
   if (!sheet) return;
 
