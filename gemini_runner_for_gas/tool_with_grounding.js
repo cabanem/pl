@@ -183,20 +183,37 @@ function callGemini_(cfg, prompt) {
     .map(function (p) { return p.text || ''; }).join('').trim();
 
   const sources = extractSources_(cand.groundingMetadata);
-  return sources ? (text + SOURCES_MARKER + sources) : text;
+  let tail = sources;
+  if (cfg.grounding_debug) {
+    const meta = cand.groundingMetadata;
+    const dump = meta
+      ? 'keys=' + JSON.stringify(Object.keys(meta)) + ' raw=' + JSON.stringify(meta).slice(0, 1500)
+      : '(no groundingMetadata — model did not search this row)';
+    tail += (tail ? '\n\n' : '') + '[grounding debug] ' + dump;
+  }
+  return tail ? (text + SOURCES_MARKER + tail) : text;
 }
 
 /** Flatten groundingMetadata into a readable, de-duplicated source list. */
 function extractSources_(meta) {
-  if (!meta || !meta.groundingChunks) return '';
+  if (!meta) return '';
+
   const seen = {}, lines = [];
-  meta.groundingChunks.forEach(function (c) {
-    const w = c.web || c.retrievedContext;   // web = Search; retrievedContext = data store
-    if (!w || !w.uri || seen[w.uri]) return;
-    seen[w.uri] = true;
-    lines.push('- ' + (w.title || w.uri) + ' (' + w.uri + ')');
+  (meta.groundingChunks || []).forEach(function (c) {
+    const w = c.web || c.retrievedContext || c.maps;   // web=Search, retrievedContext=data store
+    const uri = w && w.uri;
+    if (!uri || seen[uri]) return;
+    seen[uri] = true;
+    lines.push('- ' + ((w && w.title) || uri) + ' (' + uri + ')');
   });
-  return lines.join('\n');
+  if (lines.length) return lines.join('\n');
+
+  // No chunk URIs, but the model may still have searched — surface the queries so
+  // an empty cell means "didn't ground" rather than "grounded but parsed wrong".
+  if (meta.webSearchQueries && meta.webSearchQueries.length) {
+    return 'Searched (no source links returned): ' + meta.webSearchQueries.join('; ');
+  }
+  return '';
 }
 
 // ---- Templating -----------------------------------------------------------
@@ -306,7 +323,8 @@ function readConfig_(ss) {
     skip_if_filled:     isFilled_(raw.skip_if_filled) ? asBool_(raw.skip_if_filled) : true,
     project_id:         raw.project_id ? String(raw.project_id).trim() : '',
     location:           raw.location ? String(raw.location).trim() : 'global',
-    grounding:          isFilled_(raw.grounding) ? asBool_(raw.grounding) : false
+    grounding:          isFilled_(raw.grounding) ? asBool_(raw.grounding) : false,
+    grounding_debug:    isFilled_(raw.grounding_debug) ? asBool_(raw.grounding_debug) : false
   };
 }
 
