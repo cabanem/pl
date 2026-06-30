@@ -1,58 +1,102 @@
 /**
- * ContractIntake.gs
- * -----------------------------------------------------------------------------
- * Config-driven contract intake: Drive ingestion -> Gemini extraction ->
- * per-contract review Sheet (the stand-alone artifact) -> human correction ->
- * Workato webhook push -> Salesforce.
+ * @fileoverview ContractIntake.gs — config-driven contract intake pipeline.
  *
- * ARCHITECTURE (two time-driven loops, one project, nothing embedded in artifacts)
- *   processIngestion()   polls the ingestion folder, extracts, writes a review
- *                        Sheet into the pending folder, pings Chat.
- *   processApprovals()   polls the pending folder, and for any sheet whose
- *                        "Approved?" box is ticked, builds a payload from the
- *                        APPROVED column and POSTs it to Workato.
+ * Flow: Drive ingestion → Gemini extraction → per-contract review Sheet (the
+ * stand-alone artifact) → human correction → Workato webhook → Salesforce.
  *
- * The review Sheet is a plain spreadsheet with no bound code and no auth of its
- * own. The reviewer reads it, corrects the Approved column, ticks the box. The
- * central poller does the rest. This is what keeps approval a *value* the human
- * sets rather than code that runs inside each artifact.
+ * Two time-driven loops, one project, nothing embedded in the artifacts:
+ *   - {@link processIngestion} polls ingestion, extracts, writes a review Sheet
+ *     into the pending folder, pings Chat.
+ *   - {@link processApprovals} polls pending; for any sheet whose "Approved?"
+ *     box is ticked, builds a payload from the APPROVED column and POSTs it.
  *
- * SOURCE OF TRUTH
- *   The Approved column is the truth that gets pushed. The Extracted column is
- *   frozen at extraction time and never edited, so the delta between the two is
- *   a free audit trail and travels in the payload as provenance.
+ * Source of truth: the Approved column is what gets pushed; the Extracted column
+ * is frozen at extraction time, so the delta between them is a free audit trail
+ * carried in the payload as provenance.
  *
- * DELIVERY GUARANTEE (stated honestly)
- *   Extraction is at-least-once. The only duplicate window is a crash between
- *   "review sheet created" and "original moved out of ingestion" -- rare, and it
- *   produces a visible duplicate review sheet a human can delete. The push is
- *   effectively exactly-once: a correlation_id minted at sheet creation rides
- *   every attempt, so Workato/Salesforce can upsert on it. If you ever need
- *   exactly-once extraction, tag each review sheet with the source fileId via
- *   the Advanced Drive Service appProperties and check before create. Not built.
+ * Delivery: extraction is at-least-once (a crash between "sheet created" and
+ * "original moved" yields a visible duplicate review sheet). The push is
+ * effectively exactly-once via a correlation_id that rides every attempt, so
+ * Workato/Salesforce can upsert on it.
  *
- * BINDING / SCOPES
- *   Bind this project to the Config spreadsheet (Extensions > Apps Script from
- *   that sheet), or set Script Property CONFIG_SHEET_ID and switch
- *   getConfigSpreadsheet_() to openById. appsscript.json must include:
- *     https://www.googleapis.com/auth/cloud-platform        (Vertex)
- *     https://www.googleapis.com/auth/spreadsheets
- *     https://www.googleapis.com/auth/drive
- *     https://www.googleapis.com/auth/documents             (Word -> text)
- *     https://www.googleapis.com/auth/script.external_request
- *   The Advanced Drive Service is required ONLY if you ingest .docx/.doc.
- *
- * SETUP
- *   Run setupTriggers() once to install both time-driven loops.
- * -----------------------------------------------------------------------------
+ * Binding & scopes: bind to the Config spreadsheet, or set Script Property
+ * CONFIG_SHEET_ID and let {@link getConfigSpreadsheet_} open it. appsscript.json
+ * needs cloud-platform, spreadsheets, drive, documents, and
+ * script.external_request. The Advanced Drive Service is required only for
+ * .docx/.doc ingestion. Run {@link setupTriggers} once to install both loops.
+ */
+
+// ===== SHARED SHAPES (defined once, referenced throughout) ====================
+
+/**
+ * Typed view of the Config tab.
+ * @typedef {Object} Config
+ * @property {string}  folder_id_ingestion   Drop folder for incoming contracts.
+ * @property {string}  folder_id_processed   Originals land here after extraction.
+ * @property {string}  folder_id_failed      Originals land here on failure.
+ * @property {string}  folder_id_pending     Review sheets awaiting approval.
+ * @property {string}  folder_id_pushed      Review sheets after a successful push.
+ * @property {string}  prompt_template       Extraction prompt prefix.
+ * @property {string[]} output_fields        Fields to extract, in display order.
+ * @property {string}  system_instruction    Optional system instruction.
+ * @property {string}  project_id            GCP project for Vertex.
+ * @property {string}  location              Vertex location ('global' default).
+ * @property {string}  model                 Model id (gemini-2.5-pro default).
+ * @property {number|undefined} temperature  Sampling temperature, if set.
+ * @property {number|undefined} max_tokens   Max output tokens, if set.
+ * @property {boolean} grounding             Attach Google Search grounding.
+ * @property {boolean} grounding_debug       Dump grounding metadata keys.
+ * @property {string}  workato_webhook_url   Push target.
+ * @property {string}  workato_shared_secret Optional webhook auth secret.
+ * @property {string}  chat_webhook_url      Optional Google Chat webhook.
+ */
+
+/**
+ * A Gemini `contents[].parts[]` entry: either {text} or {inlineData:{...}}.
+ * @typedef {Object} ContentPart
+ */
+
+/**
+ * Structured result of one Gemini call.
+ * @typedef {Object} GeminiResult
+ * @property {string} text    Concatenated text from the first candidate.
+ * @property {string} sources Grounding sources, "title — uri" per line; '' if none.
+ * @property {string} debug   Grounding metadata key dump when debug is on; '' otherwise.
+ */
+
+/**
+ * Reference to a freshly created review Sheet.
+ * @typedef {Object} ReviewSheetRef
+ * @property {string} id            Spreadsheet id.
+ * @property {string} url           Spreadsheet url.
+ * @property {string} correlationId Idempotency key minted for this contract.
+ */
+
+/**
+ * Read-back of a review Sheet's approval state and values.
+ * @typedef {Object} Approval
+ * @property {boolean} approved      Whether the "Approved?" box is ticked.
+ * @property {string}  correlationId Idempotency key for the push.
+ * @property {string}  fileId        Source Drive file id.
+ * @property {string}  fileName      Source Drive file name.
+ * @property {string}  model         Model used at extraction.
+ * @property {string}  extractedAt   ISO timestamp of extraction.
+ * @property {Object.<string,string>} fields    Human-approved values (pushed).
+ * @property {Object.<string,string>} extracted Original extracted values (audit).
  */
 
 // ===== CONSTANTS (defined here so the project is fully self-contained) ========
-const CONFIG_SHEET_NAME = 'Config';
-const REVIEW_SHEET_TAB   = 'Review';
 
-// Review-sheet metadata labels (column A). Reads are label-scanned, not by row
-// index, so light hand-edits to the sheet don't break the approval reader.
+/** @const {string} Name of the configuration tab. */
+const CONFIG_SHEET_NAME = 'Config';
+/** @const {string} Name of the review tab inside each review spreadsheet. */
+const REVIEW_SHEET_TAB = 'Review';
+
+/**
+ * Review-sheet metadata labels (column A). Reads are label-scanned, not by row
+ * index, so light hand-edits to the sheet don't break the approval reader.
+ * @const {Object.<string,string>}
+ */
 const META = {
   ORIGINAL:    'Original File',
   SOURCE_ID:   'Source File ID',
@@ -66,17 +110,19 @@ const META = {
   ERROR:       'Last Error',
   SOURCES:     'Grounding Sources'
 };
+/** @const {string[]} Header row of the field grid. */
 const GRID_HEADER = ['Field', 'Extracted', 'Approved'];
-
-// PDFs go to Gemini inline as base64. Inline requests are capped (~20MB total,
-// and base64 inflates ~33%), so guard the raw bytes and route big files to GCS
-// (not built in v1).
+/** @const {number} Largest PDF (raw bytes) we send to Gemini inline. */
 const INLINE_PDF_MAX_BYTES = 15 * 1024 * 1024;
 
 
-// ===== ENTRY POINTS (no underscore -> selectable in the Triggers UI) ==========
+// ===== ENTRY POINTS (no underscore → selectable in the Triggers UI) ===========
 
-/** Time-driven. Ingest -> extract -> write review sheet -> notify. */
+/**
+ * Time-driven entry point: ingest → extract → write review sheet → notify.
+ * Serialized with the script lock so runs never overlap.
+ * @return {void}
+ */
 function processIngestion() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(0)) return;            // a run is already in flight; skip
@@ -97,8 +143,9 @@ function processIngestion() {
         const sheet = extractOneFile_(file, cfg, pending);   // create review sheet first
         moveFile_(file, processed);                          // then claim the original
         notifyReview_(chat, sheet.url, name);
+        logInfo_('processIngestion', 'Staged ' + name, sheet.correlationId, sheet.url);
       } catch (err) {
-        console.error('Ingest failed for ' + name + ': ' + err.message);
+        logError_('processIngestion', 'Extract failed: ' + name, '', err.message);
         try { moveFile_(file, failed); } catch (e) { /* leave in ingestion to retry */ }
         chat.text('Contract extraction FAILED for *' + name + '*: ' + err.message);
       }
@@ -108,7 +155,11 @@ function processIngestion() {
   }
 }
 
-/** Time-driven. Push any approved review sheet to Workato. */
+/**
+ * Time-driven entry point: push any approved review sheet to Workato.
+ * Serialized with the script lock.
+ * @return {void}
+ */
 function processApprovals() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(0)) return;
@@ -130,8 +181,9 @@ function processApprovals() {
         pushToWorkato_(approval, cfg);                       // throws on non-2xx
         markPushed_(ss);
         moveFile_(driveFile, pushed);                        // remove from the queue
+        logInfo_('processApprovals', 'Pushed ' + driveFile.getName(), approval.correlationId);
       } catch (err) {
-        console.error('Push failed for ' + driveFile.getName() + ': ' + err.message);
+        logError_('processApprovals', 'Push failed: ' + driveFile.getName(), '', err.message);
         try { markError_(SpreadsheetApp.openById(driveFile.getId()), err.message); } catch (e) {}
         chat.text('Push FAILED for *' + driveFile.getName() + '*: ' + err.message);
       }
@@ -144,12 +196,19 @@ function processApprovals() {
 
 // ===== EXTRACTION =============================================================
 
-/** Extract one file, parse fields, and write the review sheet into `pending`. */
+/**
+ * Extract one file, parse its fields, and write the review sheet into `pending`.
+ * @param {GoogleAppsScript.Drive.File} file Source contract.
+ * @param {Config} cfg Pipeline configuration.
+ * @param {GoogleAppsScript.Drive.Folder} pendingFolder Destination for the review sheet.
+ * @return {ReviewSheetRef}
+ * @private
+ */
 function extractOneFile_(file, cfg, pendingFolder) {
   const parts  = buildExtractionParts_(file);              // [{text}] or [{inlineData}]
   const prompt = cfg.prompt_template + fieldInstruction_(cfg.output_fields);
 
-  const result     = callGemini_(cfg, prompt, parts);      // {text, sources, debug}
+  const result     = callGemini_(cfg, prompt, parts);      // GeminiResult
   const parsedData = parseResult_(result.text, cfg.output_fields);
 
   return createReviewSheet_(parsedData, file, result.sources, cfg, pendingFolder);
@@ -157,11 +216,14 @@ function extractOneFile_(file, cfg, pendingFolder) {
 
 /**
  * Turn a Drive file into Gemini content parts.
- *   PDF        -> inline base64 (native document understanding; keeps tables)
- *   Google Doc -> plain text (cheap, lossless)
- *   Word        -> converted to a temp Google Doc, text extracted, temp trashed
- * No OCR step: PDFs go to the model whole; Word conversion is a format change,
- * not OCR.
+ *   - PDF        → inline base64 (native document understanding; keeps tables).
+ *   - Google Doc → plain text (cheap, lossless).
+ *   - Word       → converted to a temp Google Doc, text extracted, temp trashed.
+ * No OCR step: PDFs go to the model whole; Word conversion is a format change.
+ * @param {GoogleAppsScript.Drive.File} file
+ * @return {ContentPart[]}
+ * @throws {Error} If the file is too large to inline or an unsupported type.
+ * @private
  */
 function buildExtractionParts_(file) {
   const mime = file.getMimeType();
@@ -186,7 +248,13 @@ function buildExtractionParts_(file) {
   throw new Error('Unsupported file type (' + mime + ') for ' + file.getName());
 }
 
-/** Convert .docx/.doc to text via a throwaway Google Doc. Requires Advanced Drive. */
+/**
+ * Convert .docx/.doc to text via a throwaway Google Doc. Requires the Advanced
+ * Drive Service. The temp doc is always trashed, even on failure.
+ * @param {GoogleAppsScript.Drive.File} file
+ * @return {string}
+ * @private
+ */
 function wordToText_(file) {
   let tempId = null;
   try {
@@ -205,10 +273,15 @@ function wordToText_(file) {
 }
 
 /**
- * The one Vertex seam. Self-contained so we can attach Google Search grounding
- * and capture its sources. Returns structured {text, sources, debug} rather than
- * a marker-concatenated string -- the row-processor's marker hack isn't needed
- * here because we control the single call site.
+ * The one Vertex seam. Builds the request, fires it, and delegates response
+ * interpretation to {@link interpretGeminiResponse_} (kept pure so the branch
+ * logic is unit-testable). Auth uses the running user's OAuth token.
+ * @param {Config} cfg
+ * @param {string} promptText Prompt that precedes the file content parts.
+ * @param {ContentPart[]} contentParts File content (text or inline document).
+ * @return {GeminiResult}
+ * @throws {Error} On transport or non-text outcomes (safety/recitation/empty).
+ * @private
  */
 function callGemini_(cfg, promptText, contentParts) {
   if (!cfg.project_id) throw new Error('Config missing "project_id".');
@@ -240,15 +313,26 @@ function callGemini_(cfg, promptText, contentParts) {
   });
 
   const json = JSON.parse(resp.getContentText());
-  if (resp.getResponseCode() !== 200) {
-    throw new Error('Vertex ' + resp.getResponseCode() + ': ' +
-      ((json.error && json.error.message) || resp.getContentText()));
-  }
+  return interpretGeminiResponse_(resp.getResponseCode(), json, cfg.grounding_debug);
+}
 
+/**
+ * Pure interpretation of a Vertex generateContent response. Throws on non-text
+ * outcomes so a blocked/empty extraction is NOT silently staged as a clean one
+ * (the "no poison success" guarantee).
+ * @param {number} code HTTP status code.
+ * @param {Object} json Parsed response body.
+ * @param {boolean} groundingDebug Whether to surface a grounding key dump.
+ * @return {GeminiResult}
+ * @throws {Error} On non-200, no candidates, SAFETY, RECITATION, or empty text.
+ * @private
+ */
+function interpretGeminiResponse_(code, json, groundingDebug) {
+  if (code !== 200) {
+    throw new Error('Vertex ' + code + ': ' +
+      ((json.error && json.error.message) || JSON.stringify(json)));
+  }
   const cand = json.candidates && json.candidates[0];
-  // Throw on non-text outcomes so the file is NOT silently staged as a clean
-  // extraction. (The row processor could return these as cell text; here a
-  // poison success would move the file and ping a human as if it were good.)
   if (!cand) throw new Error('Gemini returned no candidates.');
   if (cand.finishReason === 'SAFETY')     throw new Error('Gemini blocked: safety.');
   if (cand.finishReason === 'RECITATION') throw new Error('Gemini blocked: recitation.');
@@ -257,7 +341,7 @@ function callGemini_(cfg, promptText, contentParts) {
     .map(function (p) { return p.text || ''; }).join('').trim();
   if (!text) throw new Error('Gemini returned an empty response.');
 
-  const debug = cfg.grounding_debug
+  const debug = groundingDebug
     ? (cand.groundingMetadata
         ? 'keys=' + JSON.stringify(Object.keys(cand.groundingMetadata))
         : '(no groundingMetadata)')
@@ -265,7 +349,12 @@ function callGemini_(cfg, promptText, contentParts) {
   return { text: text, sources: extractSources_(cand.groundingMetadata), debug: debug };
 }
 
-/** Flatten grounding chunks to "title — uri" lines. Empty string if ungrounded. */
+/**
+ * Flatten grounding chunks to "title — uri" lines, deduped by uri.
+ * @param {Object} meta The candidate's groundingMetadata (may be undefined).
+ * @return {string} One source per line, or '' if ungrounded.
+ * @private
+ */
 function extractSources_(meta) {
   const chunks = meta && meta.groundingChunks;
   if (!chunks || !chunks.length) return '';
@@ -281,7 +370,13 @@ function extractSources_(meta) {
   return lines.join('\n');
 }
 
-/** Instruction appended to the prompt that makes the response field-parseable. */
+/**
+ * Instruction appended to the prompt that makes the response field-parseable
+ * via [[Label]] delimiters.
+ * @param {string[]} fields Field labels, in order.
+ * @return {string}
+ * @private
+ */
 function fieldInstruction_(fields) {
   const labels = fields.map(function (f) { return '[[' + f + ']]'; }).join('\n');
   return '\n\n---\nFormat your entire response as labeled sections. Begin each ' +
@@ -292,7 +387,15 @@ function fieldInstruction_(fields) {
          'If a field is not present in the contract, leave its section empty.';
 }
 
-/** Split a [[Label]]-delimited response into { field => content }. */
+/**
+ * Split a [[Label]]-delimited response into a field→content map. Tolerant of
+ * markdown around labels and label order. If nothing matches, the whole body is
+ * placed in the first field so no text is ever lost.
+ * @param {string} text Raw model text.
+ * @param {string[]} fields Expected field labels.
+ * @return {Object.<string,string>} Every field present; unmatched ones blank.
+ * @private
+ */
 function parseResult_(text, fields) {
   const body = String(text);
   const hits = [];
@@ -308,11 +411,17 @@ function parseResult_(text, fields) {
     const end = (i + 1 < hits.length) ? hits[i + 1].start : body.length;
     out[h.field] = body.slice(h.contentStart, end).trim();
   });
-  fields.forEach(function (f) { if (!(f in out)) out[f] = ''; });   // missing -> blank
+  fields.forEach(function (f) { if (!(f in out)) out[f] = ''; });   // missing → blank
   if (hits.length === 0 && fields.length) out[fields[0]] = body.trim();  // never lose text
   return out;
 }
 
+/**
+ * Escape a string for literal use inside a RegExp.
+ * @param {string} s
+ * @return {string}
+ * @private
+ */
 function escapeRegex_(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 
@@ -320,7 +429,15 @@ function escapeRegex_(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&
 
 /**
  * Build the per-contract review Sheet in `pending`. Fields are written in CONFIG
- * order (not parse order) so the reviewer always sees the same layout.
+ * order (not parse order) so the reviewer always sees a stable layout. A
+ * correlation_id is minted here and travels with the contract through the push.
+ * @param {Object.<string,string>} parsedData Extracted field values.
+ * @param {GoogleAppsScript.Drive.File} file Source contract.
+ * @param {string} sources Grounding sources (may be '').
+ * @param {Config} cfg
+ * @param {GoogleAppsScript.Drive.Folder} pendingFolder
+ * @return {ReviewSheetRef}
+ * @private
  */
 function createReviewSheet_(parsedData, file, sources, cfg, pendingFolder) {
   const ss    = SpreadsheetApp.create('Contract Review: ' + file.getName());
@@ -368,7 +485,12 @@ function createReviewSheet_(parsedData, file, sources, cfg, pendingFolder) {
   return { id: ss.getId(), url: ss.getUrl(), correlationId: corr };
 }
 
-/** Read approval state and the human-approved values from a review sheet. */
+/**
+ * Read approval state and the human-approved values from a review sheet.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss The review spreadsheet.
+ * @return {Approval}
+ * @private
+ */
 function readApproval_(ss) {
   const sheet = ss.getSheetByName(REVIEW_SHEET_TAB) || ss.getSheets()[0];
 
@@ -402,7 +524,13 @@ function readApproval_(ss) {
   };
 }
 
-/** Find a metadata value by its label in column A. */
+/**
+ * Find a metadata value by its label in column A (first 30 rows).
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @param {string} label
+ * @return {*} The adjacent column-B value, or '' if not found.
+ * @private
+ */
 function readMeta_(sheet, label) {
   const col = sheet.getRange(1, 1, Math.min(sheet.getLastRow(), 30), 2).getValues();
   for (let i = 0; i < col.length; i++) {
@@ -411,19 +539,36 @@ function readMeta_(sheet, label) {
   return '';
 }
 
+/**
+ * Mark a review sheet as pushed (status + timestamp).
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+ * @private
+ */
 function markPushed_(ss) {
   const sheet = ss.getSheetByName(REVIEW_SHEET_TAB) || ss.getSheets()[0];
   setMeta_(sheet, META.STATUS, 'Pushed');
   setMeta_(sheet, META.PUSHED_AT, new Date().toISOString());
 }
 
+/**
+ * Mark a review sheet as errored (status + truncated message).
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+ * @param {string} msg
+ * @private
+ */
 function markError_(ss, msg) {
   const sheet = ss.getSheetByName(REVIEW_SHEET_TAB) || ss.getSheets()[0];
   setMeta_(sheet, META.STATUS, 'Error');
   setMeta_(sheet, META.ERROR, String(msg).slice(0, 500));
 }
 
-/** Set (or append) a metadata key/value pair in the A/B columns. */
+/**
+ * Set (or append) a metadata key/value pair in the A/B columns.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @param {string} label
+ * @param {*} value
+ * @private
+ */
 function setMeta_(sheet, label, value) {
   const last = Math.min(sheet.getLastRow(), 30);
   const col  = sheet.getRange(1, 1, last, 1).getValues();
@@ -438,7 +583,14 @@ function setMeta_(sheet, label, value) {
 
 // ===== PUSH ===================================================================
 
-/** POST the approved payload to Workato. Throws on any non-2xx. */
+/**
+ * POST the approved payload to Workato. The correlation_id rides the header so
+ * downstream can upsert; the shared secret is sent when configured.
+ * @param {Approval} approval
+ * @param {Config} cfg
+ * @throws {Error} On any non-2xx response.
+ * @private
+ */
 function pushToWorkato_(approval, cfg) {
   const payload = buildPayload_(approval, cfg);
   const headers = { 'X-Correlation-Id': approval.correlationId };
@@ -458,8 +610,12 @@ function pushToWorkato_(approval, cfg) {
 }
 
 /**
- * Payload contract. `fields` carries the approved truth; `provenance.extracted`
- * carries the pre-review values so the correction delta is auditable downstream.
+ * Build the Workato payload. `fields` is the approved truth; `provenance.extracted`
+ * is the pre-review snapshot, so the correction delta stays auditable downstream.
+ * @param {Approval} approval
+ * @param {Config} cfg Unused today; kept for forward-compatible payload shaping.
+ * @return {Object}
+ * @private
  */
 function buildPayload_(approval, cfg) {
   return {
@@ -471,23 +627,33 @@ function buildPayload_(approval, cfg) {
     },
     extracted_at: approval.extractedAt,
     model:        approval.model,
-    fields:       approval.fields,                 // <- pushed to Salesforce
-    provenance:   { extracted: approval.extracted } // <- original, for audit
+    fields:       approval.fields,                 // → pushed to Salesforce
+    provenance:   { extracted: approval.extracted } // → original, for audit
   };
 }
 
 
 // ===== CONFIG =================================================================
 
-/** Active config spreadsheet. Swap to openById(...) for a standalone deploy. */
+/**
+ * The active config spreadsheet. Uses Script Property CONFIG_SHEET_ID when set,
+ * otherwise the bound spreadsheet. Independent of {@link readConfig_} so it works
+ * even while diagnosing a config failure.
+ * @return {GoogleAppsScript.Spreadsheet.Spreadsheet}
+ * @private
+ */
 function getConfigSpreadsheet_() {
   const id = PropertiesService.getScriptProperties().getProperty('CONFIG_SHEET_ID');
   return id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActiveSpreadsheet();
 }
 
 /**
- * Read the Config tab into a typed object. Returns EVERY key this flow uses --
- * no fixed whitelist that silently drops folder/webhook keys.
+ * Read the Config tab into a typed object. Returns EVERY key this flow uses — no
+ * fixed whitelist that silently drops folder/webhook keys — and validates the
+ * genuinely required ones.
+ * @return {Config}
+ * @throws {Error} If the Config sheet or a required key is missing.
+ * @private
  */
 function readConfig_() {
   const ss    = getConfigSpreadsheet_();
@@ -532,12 +698,39 @@ function readConfig_() {
   return cfg;
 }
 
-function str_(v)      { return v == null ? '' : String(v).trim(); }
+/**
+ * Trim and stringify a cell value; null/undefined → ''.
+ * @param {*} v
+ * @return {string}
+ * @private
+ */
+function str_(v) { return v == null ? '' : String(v).trim(); }
+
+/**
+ * Whether a cell value is present (note: 0 counts as filled).
+ * @param {*} v
+ * @return {boolean}
+ * @private
+ */
 function isFilled_(v) { return v !== '' && v != null; }
-function asBool_(v)   {
+
+/**
+ * Coerce a cell value to boolean ('true'/'yes'/'1' → true).
+ * @param {*} v
+ * @return {boolean}
+ * @private
+ */
+function asBool_(v) {
   if (typeof v === 'boolean') return v;
   return ['true', 'yes', '1'].indexOf(String(v).trim().toLowerCase()) !== -1;
 }
+
+/**
+ * Split a single config cell into a trimmed list on commas/newlines.
+ * @param {*} v
+ * @return {string[]}
+ * @private
+ */
 function parseList_(v) {
   if (!isFilled_(v)) return [];
   return String(v).split(/[\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean);
@@ -546,9 +739,19 @@ function parseList_(v) {
 
 // ===== CHAT ===================================================================
 
-/** Google Chat webhook notifier. Always sends a JSON object, never a bare string. */
+/**
+ * Google Chat webhook notifier. Always sends a JSON object, never a bare string.
+ * @class
+ */
 class ChatNotifier {
+  /** @param {string} webhookUrl Incoming-webhook url; falsy disables sending. */
   constructor(webhookUrl) { this.url = webhookUrl; }
+
+  /**
+   * POST a Chat message object (e.g. {text} or {cardsV2}).
+   * @param {Object} message
+   * @return {void}
+   */
   send(message) {
     if (!this.url) { Logger.log('chat_webhook_url not set'); return; }
     const res = UrlFetchApp.fetch(this.url, {
@@ -557,10 +760,22 @@ class ChatNotifier {
     });
     if (res.getResponseCode() >= 400) Logger.log('Chat error: ' + res.getContentText());
   }
+
+  /**
+   * Convenience for a plain-text Chat message.
+   * @param {string} s
+   * @return {void}
+   */
   text(s) { this.send({ text: s }); }
 }
 
-/** cardsV2 notification with a button that opens the review sheet. */
+/**
+ * Send a cardsV2 notification with a button that opens the review sheet.
+ * @param {ChatNotifier} notifier
+ * @param {string} sheetUrl
+ * @param {string} fileName
+ * @private
+ */
 function notifyReview_(notifier, sheetUrl, fileName) {
   notifier.send({
     cardsV2: [{
@@ -581,12 +796,21 @@ function notifyReview_(notifier, sheetUrl, fileName) {
 
 // ===== DRIVE HELPER ===========================================================
 
+/**
+ * Move a file to a folder.
+ * @param {GoogleAppsScript.Drive.File} file
+ * @param {GoogleAppsScript.Drive.Folder} folder
+ * @private
+ */
 function moveFile_(file, folder) { file.moveTo(folder); }
 
 
 // ===== SETUP ==================================================================
 
-/** Run once to install both polling triggers (clears any prior copies first). */
+/**
+ * Install both polling triggers (clearing any prior copies first). Run once.
+ * @return {void}
+ */
 function setupTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
     const fn = t.getHandlerFunction();
@@ -596,7 +820,10 @@ function setupTriggers() {
   ScriptApp.newTrigger('processApprovals').timeBased().everyMinutes(5).create();
 }
 
-/** Optional: validate config without processing anything. */
+/**
+ * Validate config without processing anything; logs the parsed field list.
+ * @return {Config}
+ */
 function validateConfig() {
   const cfg = readConfig_();
   Logger.log('Config OK. Fields: ' + cfg.output_fields.join(', '));
