@@ -3,7 +3,7 @@
 ## Status
 
 - Accepted 2026-06-01
-- Ammended for the pilot 2026-06-01
+- Ammended for the pilot 2026-06-10
 
 ## Foundational decisions
 
