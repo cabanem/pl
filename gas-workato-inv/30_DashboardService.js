@@ -210,53 +210,60 @@ class DashboardService {
 
     const headers = cfg.HEADERS.VIEW_RECIPES || [
       "Recipe ID", "Name", "Status", "Project", "Folder", "Last run at",
-      "# Dependencies", "# Calls out", "Has AI?", "Has maps?", "Jobs Failed"
+      "Times called", "Calls out", "Role", "# Dependencies", "Jobs Failed", "Has AI?", "Has maps?"
     ];
 
     sh.getRange(1, 1, 1, headers.length).setValues([headers]);
     sh.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#d9d9d9");
     sh.setFrozenRows(1);
+    // Undo any hidden columns left by earlier layouts (we no longer hide plumbing).
+    try { sh.showColumns(1, 20); } catch (e) {}
 
-    // Main recipe table (A2:F) as a single QUERY so rows always align.
+    // A2:F -- the recipe table, one QUERY so rows always align.
     sh.getRange("A2").setFormula(
       `=QUERY(${cfg.SHEETS.RECIPES}!A2:F, "select Col1,Col2,Col3,Col4,Col5,Col6 where Col1 is not null", 0)`
     );
 
-    // Helper tables (hidden) for counts
-    sh.getRange("L1").setValue("dep_recipe_id");
-    sh.getRange("M1").setValue("dep_count");
-    sh.getRange("L2").setFormula(
-      `=QUERY(${cfg.SHEETS.DEPENDENCIES}!A2:F, "select Col1, count(Col1) where Col1 is not null group by Col1 label count(Col1) ''", 0)`
+    // G -- Times called (in-degree): call-edges where this recipe is the CHILD.
+    sh.getRange("G2").setFormula(
+      `=ARRAYFORMULA(IF(A2:A="",,IFERROR(COUNTIF(${cfg.SHEETS.CALL_EDGES}!$I$2:$I, A2:A),0)))`
     );
-
-    sh.getRange("N1").setValue("call_recipe_id");
-    sh.getRange("O1").setValue("call_count");
-    sh.getRange("N2").setFormula(
-      `=QUERY(${cfg.SHEETS.CALL_EDGES}!A2:K, "select Col1, count(Col1) where Col1 is not null group by Col1 label count(Col1) ''", 0)`
+    // H -- Calls out (out-degree): call-edges where this recipe is the PARENT.
+    sh.getRange("H2").setFormula(
+      `=ARRAYFORMULA(IF(A2:A="",,IFERROR(COUNTIF(${cfg.SHEETS.CALL_EDGES}!$A$2:$A, A2:A),0)))`
     );
-
-    // Dependencies (G) / Calls Out (H)
-    sh.getRange("G2").setFormula(`=ARRAYFORMULA(IF(A2:A="",,IFERROR(VLOOKUP(A2:A, L2:M, 2, FALSE), 0)))`);
-    sh.getRange("H2").setFormula(`=ARRAYFORMULA(IF(A2:A="",,IFERROR(VLOOKUP(A2:A, N2:O, 2, FALSE), 0)))`);
-
-    // Has AI? (I) / Has Maps? (J)
+    // I -- Role, derived entirely from the two degrees.
     sh.getRange("I2").setFormula(
-      `=ARRAYFORMULA(IF(A2:A="",,IF(IFERROR(COUNTIF(${cfg.SHEETS.AI_ANALYSIS}!A2:A, A2:A),0)>0, "YES", "")))`
+      `=ARRAYFORMULA(IF(A2:A="",,IF((G2:G=0)*(H2:H=0),"Standalone",IF((G2:G=0)*(H2:H>0),"Entry point",IF((G2:G>0)*(H2:H=0),"Leaf","Intermediate")))))`
     );
+    // J -- Dependencies count (direct COUNTIF; replaces the old helper tables).
     sh.getRange("J2").setFormula(
-      `=ARRAYFORMULA(IF(A2:A="",,IF(IFERROR(COUNTIF(${cfg.SHEETS.PROCESS_MAPS}!A2:A, A2:A),0)>0, "YES", "")))`
+      `=ARRAYFORMULA(IF(A2:A="",,IFERROR(COUNTIF(${cfg.SHEETS.DEPENDENCIES}!$A$2:$A, A2:A),0)))`
     );
-
-    // Jobs Failed (K) — pulled from Inventory_Recipes column J (10th column).
-    // Populates after a sync that includes the newer recipe-metadata columns.
+    // K -- Jobs Failed, pulled from Inventory_Recipes column J.
     sh.getRange("K2").setFormula(
       `=ARRAYFORMULA(IF(A2:A="",,IFERROR(VLOOKUP(A2:A, ${cfg.SHEETS.RECIPES}!$A:$J, 10, FALSE), 0)))`
     );
+    // L -- Has AI? / M -- Has maps?
+    sh.getRange("L2").setFormula(
+      `=ARRAYFORMULA(IF(A2:A="",,IF(IFERROR(COUNTIF(${cfg.SHEETS.AI_ANALYSIS}!A2:A, A2:A),0)>0, "YES", "")))`
+    );
+    sh.getRange("M2").setFormula(
+      `=ARRAYFORMULA(IF(A2:A="",,IF(IFERROR(COUNTIF(${cfg.SHEETS.PROCESS_MAPS}!A2:A, A2:A),0)>0, "YES", "")))`
+    );
 
-    // Health formatting: STOPPED red, never-run greyed, any failed jobs amber.
-    // setConditionalFormatRules replaces the full rule set, so this stays idempotent.
+    // Criticality + health formatting (setConditionalFormatRules replaces the whole set).
     try {
       sh.setConditionalFormatRules([
+        // Criticality heatmap: the more a recipe is called, the warmer G gets.
+        SpreadsheetApp.newConditionalFormatRule()
+          .setGradientMinpoint("#ffffff").setGradientMaxpoint("#f6b26b")
+          .setRanges([sh.getRange("G2:G")]).build(),
+        // Orphans faded so the connected recipes stand out.
+        SpreadsheetApp.newConditionalFormatRule()
+          .whenTextEqualTo("Standalone").setFontColor("#999999")
+          .setRanges([sh.getRange("I2:I")]).build(),
+        // Health.
         SpreadsheetApp.newConditionalFormatRule()
           .whenTextEqualTo("STOPPED").setBackground("#f4cccc")
           .setRanges([sh.getRange("C2:C")]).build(),
@@ -269,12 +276,9 @@ class DashboardService {
       ]);
     } catch (e) {}
 
-    // Hide helper columns (L:O) so humans don't see plumbing
-    sh.hideColumns(12, 4); // L=12, hide L,M,N,O
-
-    // Add a filter for humans (now spans the extra health column)
+    // Filter across the visible columns.
     try {
-      const lastCol = headers.length; // 11 with Jobs Failed
+      const lastCol = headers.length;
       const lastRow = Math.max(2, sh.getLastRow());
       const range = sh.getRange(1, 1, lastRow, lastCol);
       if (!range.getFilter()) range.createFilter();
@@ -326,6 +330,11 @@ class DashboardService {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
 
     const NOTES = {
+      VIEW_RECIPES: {
+        "Times called": "How many recipes call this one (in-degree). High = load-bearing, so changes ripple further.",
+        "Calls out": "How many recipes this one calls (out-degree).",
+        "Role": "Standalone (isolated) / Entry point (top of a chain) / Leaf (terminal) / Intermediate (mid-chain)."
+      },
       RECIPES: {
         "Lifetime Tasks": "Total tasks the recipe has consumed over its lifetime.",
         "Applications": "Trigger + action apps this recipe connects to."
