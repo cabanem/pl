@@ -60,7 +60,7 @@ class SchemaDef {
   static get HEADERS() {
     return {
       // ViewRecipes
-      VIEW_RECIPES: [ "Recipe ID", "Name", "Status", "Project", "Folder", "Last run at", "# Dependencies", "# Calls out", "Has AI?", "Has maps?" ],
+      VIEW_RECIPES: [ "Recipe ID", "Name", "Status", "Project", "Folder", "Last run at", "# Dependencies", "# Calls out", "Has AI?", "Has maps?", "Jobs Failed" ],
       // InventoryService -> DataMapper.mapProjectsToRows
       PROJECTS: [ "Project ID", "Name", "Description", "Created At" ],
 
@@ -220,7 +220,12 @@ class AppConfig {
         OVERWRITE_VIEWS: true,                
         HIDE_BACKEND_IN_BASIC: true,          
         PROTECT_BACKEND_WARNING_ONLY: true,   
-        SHOW_OUTPUT_SHEETS_IN_BASIC: false    
+        SHOW_OUTPUT_SHEETS_IN_BASIC: false,
+        // URL opened by "Help / usage guide". Defaults to the project README doc; override in props.
+        HELP_DOC_URL: ConfigStore.get('HELP_DOC_URL', {
+          preferUser: true,
+          defaultValue: 'https://docs.google.com/document/d/18mk8sphXwC7bTRrDj09rnL4FNVuiBNS1oVeM3zuyUcg/edit'
+        })
       },
       VERBOSE: true
     };
