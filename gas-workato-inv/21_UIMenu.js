@@ -42,6 +42,7 @@ class UserInterfaceService {
       root.addItem("Recipe step breakdown -> sheet", "fetchRecipeLogicSelected");
       root.addItem("AI analysis -> sheet", "fetchRecipeAnalysisSelected");
       root.addItem("Process maps -> sheet", "generateProcessMapsSelected");
+      root.addItem("View diagram (selected map row)", "viewProcessDiagramSelected");
       root.addItem("Recipe reference doc -> Drive", "generateCompanionDocSelected");
       root.addItem("System architecture doc -> Drive", "generateSystemDocSelected");
     } else {
@@ -66,6 +67,7 @@ class UserInterfaceService {
           .addItem("Requests: calls only", "generateProcessMapsCalls")
           .addItem("Requests: full only", "generateProcessMapsFull")
       );
+      root.addItem("View diagram (selected map row)", "viewProcessDiagramSelected");
       root.addSubMenu(
         this.ui.createMenu("Recipe reference doc -> Drive")
           .addItem("From selection", "generateCompanionDocSelected")
