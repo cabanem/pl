@@ -196,6 +196,51 @@ class DriveService{
       return null;
     }
   }
+  /**
+   * Saves markdown as a *formatted Google Doc* (not a plain .md text file).
+   *
+   * Uses the Advanced Drive Service (v3): uploading a text/markdown blob with a
+   * target mimeType of Google Docs makes Google render the markdown server-side
+   * into headings, bold/italic, lists, tables, and links. Requires the "Drive
+   * API" advanced service (v3) to be enabled in the project.
+   *
+   * Degrades gracefully: if the advanced service isn't enabled (Drive is
+   * undefined), it falls back to saving a plain .md file via saveText, so this
+   * is safe to deploy before enabling the service.
+   *
+   * @param {string|number} id - Root identifier (used in the file name).
+   * @param {string} name - Human readable name.
+   * @param {string} markdownText - The markdown content.
+   * @returns {string|null} The Google Doc URL, or null on failure.
+   */
+  saveMarkdownAsDoc(id, name, markdownText) {
+    if (!this.config.LOG_TO_DRIVE) return null;
+
+    // Fallback: advanced Drive service not enabled -> keep old .md behavior.
+    if (typeof Drive === "undefined") {
+      console.warn("DriveService: Advanced Drive service not enabled; saving .md text instead of a Google Doc.");
+      return this.saveText(id, name, "md", markdownText);
+    }
+
+    try {
+      const folder = this._getVerifiedFolder();
+      const safeName = (name || "Unknown").replace(/[^a-zA-Z0-9-_]/g, '_');
+      const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd_HH-mm-ss");
+      const docName = `${timestamp}_ID-${id}_${safeName}`;
+
+      const blob = Utilities.newBlob(String(markdownText || ""), "text/markdown", docName);
+      const created = Drive.Files.create(
+        { name: docName, mimeType: MimeType.GOOGLE_DOCS, parents: [folder.getId()] },
+        blob,
+        { supportsAllDrives: true }
+      );
+
+      return DriveApp.getFileById(created.id).getUrl();
+    } catch (e) {
+      console.error(`Drive saveMarkdownAsDoc error: ${e.message}`);
+      return null;
+    }
+  }
   // --- INTERNALS ---------------------------------------------------------------------------------------
   /** @private Retrieves folder by cached ID, or creates and updates cache */
   _getVerifiedFolder() {
