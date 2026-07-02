@@ -60,7 +60,7 @@ class SchemaDef {
   static get HEADERS() {
     return {
       // ViewRecipes
-      VIEW_RECIPES: [ "Recipe ID", "Name", "Status", "Project", "Folder", "Last run at", "# Dependencies", "# Calls out", "Has AI?", "Has maps?", "Jobs Failed" ],
+      VIEW_RECIPES: [ "Recipe ID", "Name", "Status", "Project", "Folder", "Last run at", "Times called", "Calls out", "Role", "# Dependencies", "Jobs Failed", "Has AI?", "Has maps?" ],
       // InventoryService -> DataMapper.mapProjectsToRows
       PROJECTS: [ "Project ID", "Name", "Description", "Created At" ],
 
