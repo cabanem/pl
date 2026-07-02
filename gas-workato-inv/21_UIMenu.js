@@ -19,66 +19,77 @@ class UserInterfaceService {
 
   /**
    * Builds and displays the custom menu.
+   *
+   * Structure:
+   *   - Grouped by TASK (one entry per capability), not by input source.
+   *   - Every label names its output destination (-> sheet / -> Drive).
+   *   - Basic mode: one verb per capability, acting on the current selection.
+   *   - Advanced mode: the same capabilities, each a submenu exposing input
+   *     source (selection vs Input_Requests) and, for process maps, the mode.
+   *   - Max two menu levels; every leaf maps to an existing global entry point.
    */
   createMenu() {
     const isAdv = (typeof UiMode !== "undefined") ? UiMode.isAdvanced() : false;
 
     const root = this.ui.createMenu("Workato Sync");
 
-    // --- Quick Actions (always visible) -------------------------------------
-    root.addSubMenu(
-      this.ui.createMenu("Quick Actions")
-        .addItem("Run workspace inventory sync", "syncInventory")
-        .addSeparator()
-        .addItem("Analyze selected rows using AI", "fetchRecipeAnalysisSelected")
-        .addItem("Generate process maps for selection (calls + full)", "generateProcessMapsSelected")
-    );
+    // --- Inventory (always visible) -----------------------------------------
+    root.addItem("Sync workspace inventory", "syncInventory");
+    root.addSeparator();
 
-    // --- Selection-driven tools (always visible) ----------------------------
-    root.addSubMenu(
-      this.ui.createMenu("Selection-driven")
-        .addItem("Debug logic for selected rows", "fetchRecipeLogicSelected")
-        .addItem("Analyze selected rows using AI", "fetchRecipeAnalysisSelected")
-        .addSeparator()
-        .addItem("Generate process maps for selection (calls only)", "generateProcessMapsSelectedCalls")
-        .addItem("Generate process maps for selection (full only)", "generateProcessMapsSelectedFull")
-        .addItem("Generate process maps for selection (calls + full)", "generateProcessMapsSelected")
-        .addSeparator()
-        .addItem("Generate aggregated companion doc (selection)", "generateCompanionDocSelected")
-        .addItem("Generate system architecture doc (selection)", "generateSystemDocSelected")
-    );
-
-    // --- Advanced tools ------------------------------------------------------
-    if (isAdv) {
+    if (!isAdv) {
+      // ===== BASIC: one clear verb per capability, acting on the selection =====
+      root.addItem("Recipe step breakdown -> sheet", "fetchRecipeLogicSelected");
+      root.addItem("AI analysis -> sheet", "fetchRecipeAnalysisSelected");
+      root.addItem("Process maps -> sheet", "generateProcessMapsSelected");
+      root.addItem("Recipe reference doc -> Drive", "generateCompanionDocSelected");
+      root.addItem("System architecture doc -> Drive", "generateSystemDocSelected");
+    } else {
+      // ===== ADVANCED: capability first, then input source (+ map mode) =====
       root.addSubMenu(
-        this.ui.createMenu("Advanced")
-          .addSubMenu(
-            this.ui.createMenu("Requests-sheet driven")
-              .addItem("Debug logic (from Input_Requests)", "fetchRecipeLogic")
-              .addItem("Analyze using AI (from Input_Requests)", "fetchRecipeAnalysis")
-              .addSeparator()
-              .addItem("Generate process maps (calls only)", "generateProcessMapsCalls")
-              .addItem("Generate process maps (full only)", "generateProcessMapsFull")
-              .addItem("Generate process maps (calls + full)", "generateProcessMaps")
-              .addSeparator()
-              .addItem("Generate aggregated companion doc (requests)", "generateCompanionDoc")
-              .addItem("Generate system architecture doc (requests)", "generateSystemDocRequest")
-          )
+        this.ui.createMenu("Recipe step breakdown -> sheet")
+          .addItem("From selection", "fetchRecipeLogicSelected")
+          .addItem("From Input_Requests", "fetchRecipeLogic")
+      );
+      root.addSubMenu(
+        this.ui.createMenu("AI analysis -> sheet")
+          .addItem("From selection", "fetchRecipeAnalysisSelected")
+          .addItem("From Input_Requests", "fetchRecipeAnalysis")
+      );
+      root.addSubMenu(
+        this.ui.createMenu("Process maps -> sheet")
+          .addItem("Selection: calls + full", "generateProcessMapsSelected")
+          .addItem("Selection: calls only", "generateProcessMapsSelectedCalls")
+          .addItem("Selection: full only", "generateProcessMapsSelectedFull")
           .addSeparator()
-          .addItem("Test connectivity", "testWorkatoConnectivity")
-          .addSeparator()
-          .addSubMenu(
-            this.ui.createMenu("Diagnostics")
-              .addItem("Debug property report (logs)", "debugPropertyReport")
-              .addItem("Migrate scriptProps â†’ userProps", "migrateMyScriptPropsToUserProps")
-          )
-          .addSeparator()
-          .addSubMenu(
-            this.ui.createMenu("Maintenance")
-              .addItem("Reset inventory sheets (keep headers)", "resetInventorySheets")
-              .addItem("Prune System_Logs (keep last 500)", "pruneSystemLogs")
-              .addItem("Clear Drive debug files older than 30 days", "purgeOldDriveLogs")
-          )
+          .addItem("Requests: calls + full", "generateProcessMaps")
+          .addItem("Requests: calls only", "generateProcessMapsCalls")
+          .addItem("Requests: full only", "generateProcessMapsFull")
+      );
+      root.addSubMenu(
+        this.ui.createMenu("Recipe reference doc -> Drive")
+          .addItem("From selection", "generateCompanionDocSelected")
+          .addItem("From Input_Requests", "generateCompanionDoc")
+      );
+      root.addSubMenu(
+        this.ui.createMenu("System architecture doc -> Drive")
+          .addItem("From selection", "generateSystemDocSelected")
+          .addItem("From Input_Requests", "generateSystemDocRequest")
+      );
+
+      // --- Tools ------------------------------------------------------------
+      root.addSeparator();
+      root.addItem("Test connectivity", "testWorkatoConnectivity");
+      root.addSubMenu(
+        this.ui.createMenu("Diagnostics")
+          .addItem("Debug property report (logs)", "debugPropertyReport")
+          .addItem("Migrate scriptProps -> userProps", "migrateMyScriptPropsToUserProps")
+      );
+      root.addSubMenu(
+        this.ui.createMenu("Maintenance")
+          .addItem("Reset inventory sheets (keep headers)", "resetInventorySheets")
+          .addItem("Prune System_Logs (keep last 500)", "pruneSystemLogs")
+          .addItem("Clear Drive debug files older than 30 days", "purgeOldDriveLogs")
       );
     }
 
@@ -95,7 +106,6 @@ class UserInterfaceService {
         .addSeparator()
         .addItem("Rebuild dashboard & views", "rebuildDashboard")
         .addItem("Apply sheet visibility", "applySheetVisibility")
-        
     );
 
     // --- Mode toggle (always visible) ---------------------------------------
