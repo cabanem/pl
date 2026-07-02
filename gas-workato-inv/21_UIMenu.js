@@ -108,6 +108,10 @@ class UserInterfaceService {
         .addItem("Apply sheet visibility", "applySheetVisibility")
     );
 
+    // --- Help (always visible) ----------------------------------------------
+    root.addSeparator();
+    root.addItem("Help / usage guide", "showUsageGuide");
+
     // --- Mode toggle (always visible) ---------------------------------------
     root.addSeparator();
     if (isAdv) root.addItem("Switch to Basic menu", "setUiModeBasic");
@@ -226,4 +230,20 @@ class UserInterfaceService {
 
     this.ui.showModalDialog(html, title);
   }
+}
+// ---------------------------------------------------------------------------------------
+// Help entrypoint (wired to the "Help / usage guide" menu item)
+// ---------------------------------------------------------------------------------------
+function showUsageGuide() {
+  const url = String(AppConfig.get().DASHBOARD.HELP_DOC_URL || "");
+  const ui = SpreadsheetApp.getUi();
+  if (!url) {
+    ui.alert("Usage guide", "No help document URL is configured (DASHBOARD.HELP_DOC_URL).", ui.ButtonSet.OK);
+    return;
+  }
+  new UserInterfaceService().showLinkModal(
+    "Workato Sync usage guide",
+    "How each action works and where its results land.",
+    url
+  );
 }
