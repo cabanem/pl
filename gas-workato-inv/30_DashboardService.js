@@ -18,6 +18,7 @@ class DashboardService {
 
     // 1) Build/refresh views
     this._ensureViewRecipes_(ss, ctx);
+    this._ensureSeamsView_(ss, ctx);
 
     // 2) Build/refresh dashboard
     this._ensureDashboardHome_(ss, ctx, stats);
@@ -64,6 +65,7 @@ class DashboardService {
     const visibleInBasic = new Set([
       cfg.SHEETS.DASHBOARD_HOME,
       cfg.SHEETS.VIEW_RECIPES,
+      cfg.SHEETS.SEAMS,
       ...(showOutputs ? [cfg.SHEETS.AI_ANALYSIS, cfg.SHEETS.PROCESS_MAPS] : [])
     ].filter(Boolean));
 
@@ -141,37 +143,63 @@ class DashboardService {
     sh.getRange("A6").setValue("2.  Open View_Recipes and select the rows you want.");
     sh.getRange("A7").setValue("3.  Use the menu to break down, analyze, or map them.");
 
-    // --- Status + freshness -------------------------------------------------
-    const last = (stats && stats.last_sync_at)
+    // --- Status + live freshness -------------------------------------------
+    // Write the raw sync time as a real date, then let the sheet compute "days
+    // ago" against TODAY(), so Freshness stays live between syncs instead of
+    // being frozen at build time.
+    const lastIso = (stats && stats.last_sync_at)
       ? String(stats.last_sync_at)
       : String(ConfigStore.get("LAST_INVENTORY_SYNC_AT", { preferUser: false, defaultValue: "" }) || "");
-
-    let freshness = 'Never synced. Run "Sync workspace inventory".';
-    let stale = true;
-    if (last) {
-      const d = new Date(last);
-      if (!isNaN(d.getTime())) {
-        const days = Math.floor((Date.now() - d.getTime()) / 86400000);
-        freshness = days <= 0 ? "Synced today" : `Last synced ${days} day(s) ago`;
-        stale = days > this.STALE_SYNC_DAYS;
-      }
-    }
+    const lastDate = lastIso ? new Date(lastIso) : null;
 
     sh.getRange("A9").setValue("Status").setFontWeight("bold");
-    sh.getRange("A10").setValue("Freshness").setFontWeight("bold");
-    sh.getRange("B10").setValue(freshness).setBackground(stale ? "#f4cccc" : "#d9ead3");
-    sh.getRange("A11").setValue("Base URL").setFontWeight("bold");
-    sh.getRange("B11").setValue(String(cfg.API.BASE_URL || ""));
-    sh.getRange("A12").setValue("User").setFontWeight("bold");
-    try {
-      const u = ctx.inventoryService.getCurrentUser();
-      sh.getRange("B12").setValue(u && u.name ? u.name : "(unknown)");
-    } catch (e) {
-      sh.getRange("B12").setValue("(unknown)");
+
+    sh.getRange("A10").setValue("Last synced").setFontWeight("bold");
+    if (lastDate && !isNaN(lastDate.getTime())) {
+      sh.getRange("B10").setValue(lastDate).setNumberFormat("yyyy-mm-dd hh:mm");
+    } else {
+      sh.getRange("B10").setValue("(never)");
     }
 
+    sh.getRange("A11").setValue("Freshness").setFontWeight("bold");
+    sh.getRange("B11")
+      .setFormula(
+        '=IF(NOT(ISNUMBER($B$10)),"Never synced - run the sync action.",' +
+        'IF((TODAY()-INT($B$10))<=0,"Synced today",' +
+        '"Last synced "&(TODAY()-INT($B$10))&" day(s) ago"))'
+      )
+      .setNote("Recomputed each time the sheet recalculates: TODAY() minus the last-synced date in B10.");
+
+    sh.getRange("A12").setValue("Base URL").setFontWeight("bold");
+    sh.getRange("B12").setValue(String(cfg.API.BASE_URL || ""));
+    sh.getRange("A13").setValue("User").setFontWeight("bold");
+    try {
+      const u = ctx.inventoryService.getCurrentUser();
+      sh.getRange("B13").setValue(u && u.name ? u.name : "(unknown)");
+    } catch (e) {
+      sh.getRange("B13").setValue("(unknown)");
+    }
+
+    // Live freshness colour: the sheet re-evaluates these against TODAY(), so
+    // the cell reddens on its own once the gap passes STALE_SYNC_DAYS -- no
+    // re-sync needed. (setConditionalFormatRules replaces the dashboard's set.)
+    try {
+      const stale = this.STALE_SYNC_DAYS;
+      sh.setConditionalFormatRules([
+        SpreadsheetApp.newConditionalFormatRule()
+          .whenFormulaSatisfied(`=AND(ISNUMBER($B$10),(TODAY()-INT($B$10))>${stale})`)
+          .setBackground("#f4cccc").setRanges([sh.getRange("B11")]).build(),
+        SpreadsheetApp.newConditionalFormatRule()
+          .whenFormulaSatisfied(`=AND(ISNUMBER($B$10),(TODAY()-INT($B$10))<=${stale})`)
+          .setBackground("#d9ead3").setRanges([sh.getRange("B11")]).build(),
+        SpreadsheetApp.newConditionalFormatRule()
+          .whenFormulaSatisfied(`=NOT(ISNUMBER($B$10))`)
+          .setBackground("#fce8b2").setRanges([sh.getRange("B11")]).build()
+      ]);
+    } catch (e) {}
+
     // --- Counts -------------------------------------------------------------
-    sh.getRange("A14").setValue("Counts").setFontWeight("bold");
+    sh.getRange("A15").setValue("Counts").setFontWeight("bold");
     const rows = [
       ["Projects", `=IFERROR(COUNTA(${cfg.SHEETS.PROJECTS}!A2:A),0)`],
       ["Folders", `=IFERROR(COUNTA(${cfg.SHEETS.FOLDERS}!A2:A),0)`],
@@ -182,16 +210,18 @@ class DashboardService {
       ["Dependencies (rows)", `=IFERROR(COUNTA(${cfg.SHEETS.DEPENDENCIES}!A2:A),0)`],
       ["Call edges (rows)", `=IFERROR(COUNTA(${cfg.SHEETS.CALL_EDGES}!A2:A),0)`],
       ["AI analyses (rows)", `=IFERROR(COUNTA(${cfg.SHEETS.AI_ANALYSIS}!A2:A),0)`],
-      ["Process maps (rows)", `=IFERROR(COUNTA(${cfg.SHEETS.PROCESS_MAPS}!A2:A),0)`]
+      ["Process maps (rows)", `=IFERROR(COUNTA(${cfg.SHEETS.PROCESS_MAPS}!A2:A),0)`],
+      ["Cross-project seams", `=IFERROR(SUMPRODUCT((${cfg.SHEETS.CALL_EDGES}!C2:C<>${cfg.SHEETS.CALL_EDGES}!L2:L)*(${cfg.SHEETS.CALL_EDGES}!C2:C<>"")*(${cfg.SHEETS.CALL_EDGES}!L2:L<>"")),0)`]
     ];
-    sh.getRange(15, 1, rows.length, 2).setValues(rows);
-    sh.getRange(15, 1, rows.length, 1).setFontWeight("bold");
+    sh.getRange(16, 1, rows.length, 2).setValues(rows);
+    sh.getRange(16, 1, rows.length, 1).setFontWeight("bold")
 
     // --- Quick links --------------------------------------------------------
     sh.getRange("D9").setValue("Quick links").setFontWeight("bold");
     DashboardService._setSheetLink_(sh, ss, "D10", cfg.SHEETS.VIEW_RECIPES, "Go to View_Recipes");
     DashboardService._setSheetLink_(sh, ss, "D11", cfg.SHEETS.AI_ANALYSIS, "Go to Output_AI_Analysis");
     DashboardService._setSheetLink_(sh, ss, "D12", cfg.SHEETS.PROCESS_MAPS, "Go to Output_Process_Maps");
+    DashboardService._setSheetLink_(sh, ss, "D13", cfg.SHEETS.SEAMS, "Go to View_Seams");
 
     try { sh.autoResizeColumns(1, 5); } catch (e) {}
   }
@@ -288,6 +318,49 @@ class DashboardService {
   }
 
   // ---------------------------------------------------------------------------------------
+  // View_Seams (cross-project call edges)
+  // ---------------------------------------------------------------------------------------
+  static _ensureSeamsView_(ss, ctx) {
+    const cfg = ctx.config;
+    const name = cfg.SHEETS.SEAMS || "View_Seams";
+    const sh = ctx.sheetService.getOrCreateByName(name);
+
+    if (cfg.DASHBOARD.OVERWRITE_VIEWS) {
+      sh.clear();
+    }
+
+    const ce = cfg.SHEETS.CALL_EDGES;
+
+    // Title + one-line summary count.
+    sh.getRange("A1").setValue("Cross-project seams").setFontWeight("bold").setFontSize(13);
+    sh.getRange("A2")
+      .setValue("Calls where one project reaches into another. An empty list is good news -- the projects are cleanly isolated.")
+      .setFontColor("#666666");
+    sh.getRange("A3").setValue("Cross-project calls:").setFontWeight("bold");
+    sh.getRange("B3").setFormula(
+      `=IFERROR(SUMPRODUCT((${ce}!C2:C<>${ce}!L2:L)*(${ce}!C2:C<>"")*(${ce}!L2:L<>"")),0)`
+    );
+
+    // Header row (row 5).
+    const headers = cfg.HEADERS.SEAMS || [
+      "From Recipe ID", "From Recipe", "From Project", "To Recipe ID", "To Recipe", "To Project", "Step", "Branch"
+    ];
+    sh.getRange(5, 1, 1, headers.length).setValues([headers]);
+    sh.getRange(5, 1, 1, headers.length).setFontWeight("bold").setBackground("#d9d9d9");
+    sh.setFrozenRows(5);
+
+    // The list. FILTER (unlike QUERY) can compare two columns to each other,
+    // which is exactly what "parent project <> child project" needs.
+    sh.getRange("A6").setFormula(
+      `=IFERROR(FILTER({${ce}!A2:A,${ce}!B2:B,${ce}!C2:C,${ce}!I2:I,${ce}!J2:J,${ce}!L2:L,${ce}!F2:F,${ce}!G2:G},` +
+      `(${ce}!C2:C<>${ce}!L2:L)*(${ce}!C2:C<>"")*(${ce}!L2:L<>"")),` +
+      `"No cross-project calls found - your projects look cleanly isolated.")`
+    );
+
+    try { sh.autoResizeColumns(1, headers.length); } catch (e) {}
+  }
+
+  // ---------------------------------------------------------------------------------------
   // Friendly-surface polish
   // ---------------------------------------------------------------------------------------
   /** Color tabs by group so the workbook reads as an app, not a schema. */
@@ -305,7 +378,7 @@ class DashboardService {
     };
 
     const byKey = {
-      DASHBOARD_HOME: C.primary, VIEW_RECIPES: C.primary,
+      DASHBOARD_HOME: C.primary, VIEW_RECIPES: C.primary, SEAMS: C.primary,
       PROJECTS: C.inventory, FOLDERS: C.inventory, RECIPES: C.inventory,
       PROPERTIES: C.inventory, TABLES: C.inventory, LOOKUP_TABLES: C.inventory,
       DEPENDENCIES: C.analysis, CALL_EDGES: C.analysis,
@@ -346,7 +419,8 @@ class DashboardService {
         "Step Path": "Position of the calling step within the recipe's step tree (e.g. 0/1).",
         "Branch Context": "The conditional path the call sits under (IF / ELSE / error), or blank if top-level.",
         "Provider": "The Workato provider that performs the call.",
-        "ID Key": "Which input field carried the child recipe id: flow_id, recipe_id, or callable_recipe_id."
+        "ID Key": "Which input field carried the child recipe id: flow_id, recipe_id, or callable_recipe_id.",
+        "Child Project": "The called recipe's project. When it differs from the parent's, the call is a cross-project seam."
       },
       AI_ANALYSIS: {
         "Structured Preview": "Truncated JSON of the full AI result; the complete version is in the linked Drive file.",
