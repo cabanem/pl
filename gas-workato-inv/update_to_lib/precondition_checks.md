@@ -1,165 +1,139 @@
-Proceeding. Two deliverables below: the pre-flight bugfix (commit 0), then Phase 1's probe pair, ready to paste. Before the probe code, one piece of mechanism worth having in your head, because it's the *why* behind the whole probe design and it'll serve you in every future library decision:
+Green across the board — the taxonomy holds, injection works, callbacks and the sentinel cross intact. Two small bookkeeping notes before the diff: whenever convenient, jot the Q2 observation (whatever `typeof Toolkit.ProbeBareClass` reported) into the toolkit's README with today's date — that's now an empirical fact about your runtime rather than folklore. And you can delete `00_Probe.js` from the toolkit; the scratch consumer sheet stays alive for Phase 3.
 
-**Apps Script services split into two families.** *Script-identity* services answer the question "which script project is this code?" — `PropertiesService`, `CacheService`, `LockService`, `ScriptApp.getScriptId()`. For library code, the answer is *the library*, no matter who called it. *Execution-context* services answer "who is running, on what document?" — `SpreadsheetApp.getActiveSpreadsheet()`, `DriveApp`, `Session` — and the answer is the same for library and consumer, because they share one execution. This single distinction is why `ConfigStore` needs injected handles while `SheetService` and `DriveService` can keep calling `SpreadsheetApp`/`DriveApp` directly after the lift. It's also a standing guardrail: if the toolkit ever grows caching or locking, those are script-identity services and get the same injection treatment. The probe exists to confirm this taxonomy empirically rather than trust my recollection of it.
+Here's Phase 2, complete. It's deliberately tiny — one new library file, one class body swapped in the app, one manifest edit — because `ConfigStore` is the leaf and the whole point of doing it first is that if anything goes wrong, the blast radius is one component with five methods.
 
-## Commit 0 — repoint the orphaned `Logger.notify` calls
+## Toolkit side — `01_ConfigStore.js`
 
-Seven identical one-word edits in `99_EntryPoints.js`. The pattern, shown once:
-
-```javascript
-// before
-Logger.notify("Select rows (or ID cells) in a sheet with recipe IDs first.", true);
-// after
-AppLog.notify("Select rows (or ID cells) in a sheet with recipe IDs first.", true);
-```
-
-The seven sites, all in the no-selection guard: `fetchRecipeLogicSelected`, `fetchRecipeAnalysisSelected`, `generateProcessMapsSelected`, `generateProcessMapsSelectedCalls`, `generateProcessMapsSelectedFull`, `generateCompanionDocSelected`, `generateSystemDocSelected`.
-
-Verification (thirty seconds): open the spreadsheet, click an empty cell below the data in `View_Recipes`, run "Recipe step breakdown → sheet" from the menu. You should see a red "Error" toast with the select-rows message — the *intended* behavior, restored — instead of a `TypeError: Logger.notify is not a function` dialog. Suggested commit message: `fix: repoint 7 orphaned Logger.notify calls to AppLog (99_EntryPoints)`.
-
-## Phase 1 — the boundary probe
-
-### Library side
-
-Create the toolkit project now — this is the *permanent* project; only the probe file is throwaway. `script.new`, name it (e.g., `GasToolkit`), paste this as its only file. If you want it in version control from day one, `clasp clone <scriptId>` into a fresh directory; you'll delete `00_Probe.js` at the end of this phase.
+The precedence and clean/trim logic transfers verbatim; the only change is *where the stores come from* — constructor injection instead of `PropertiesService` calls, per Q3/Q4:
 
 ```javascript
 /**
- * @file 00_Probe.js  — DELETE after Phase 1.
- * Boundary probe: each function answers exactly one question the toolkit
- * API design depends on. The consumer-side runner interprets the answers.
+ * @file 01_ConfigStore.js
+ * @description Layered property storage with user-overrides-script precedence.
+ *
+ *   Stores are INJECTED, never read from PropertiesService directly:
+ *   PropertiesService is script-identity scoped, so a direct read here would
+ *   hit the TOOLKIT's stores — shared across every consumer — not the
+ *   consumer's. (Verified by boundary probe Q3/Q4.)
  */
 
-// Q1: do factory-returned objects cross the boundary with callable methods?
-class ProbeThing_ {
-  constructor(tag) { this.tag = tag; }
-  hello() { return 'hello from ' + this.tag; }
-}
-function newProbeThing(tag) { return new ProbeThing_(tag); }
-
-// Q2 (observational): does a bare top-level class cross at all, and how far?
-class ProbeBareClass {
-  static ping() { return 'static ping'; }
-  pong() { return 'instance pong'; }
-}
-
-// Q3: whose property stores does library code see when it asks directly?
-function probeOwnProps() {
-  return {
-    script: PropertiesService.getScriptProperties().getProperty('PROBE_KEY'),
-    user:   PropertiesService.getUserProperties().getProperty('PROBE_KEY')
-  };
-}
-
-// Q4: do handles injected BY the consumer read the CONSUMER's stores?
-function probeInjectedProps(userStore, scriptStore) {
-  return {
-    user:   userStore.getProperty('PROBE_KEY'),
-    script: scriptStore.getProperty('PROBE_KEY')
-  };
-}
-
-// Q5: does library code see the consumer's active spreadsheet?
-function probeActiveSpreadsheet() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  return ss ? ss.getName() : null;
-}
-
-// Q6: do function values cross the boundary and execute intact?
-function probeCallback(fn) { return fn() === true; }
-
-// Q7: does a thrown sentinel object keep its shape across boundary frames?
-function probeSkipSentinel() { throw { __skip: true, message: 'skip probe' }; }
-```
-
-### Consumer side
-
-Make (or reuse) a throwaway Google Sheet — it must be a sheet-bound script, because Q5 needs an active spreadsheet to see. Don't discard it after the probe: a consumer that *isn't* the app is exactly what you want in Phase 3 for sanity-checking the API from a clean context.
-
-```javascript
-/**
- * Scratch consumer for the Phase 1 boundary probe.
- * Bind the toolkit as "Toolkit" (HEAD / development mode), run this,
- * read the execution log.
- */
-function runBoundaryProbe() {
-  const results = [];
-  const check = (name, ok) => results.push({ name, ok });
-
-  // Q1 — the factory idiom
-  check('Q1 factory object crosses; methods callable',
-        Toolkit.newProbeThing('lib').hello() === 'hello from lib');
-
-  // Q2 — bare class: OBSERVED, not pass/fail (see interpretation notes)
-  const bare = typeof Toolkit.ProbeBareClass;
-  let bareStatic = 'n/a', bareNew = 'n/a';
-  if (bare !== 'undefined') {
-    try { bareStatic = Toolkit.ProbeBareClass.ping(); }        catch (e) { bareStatic = 'threw: ' + e.message; }
-    try { bareNew = new Toolkit.ProbeBareClass().pong(); }     catch (e) { bareNew = 'threw: ' + e.message; }
+class ConfigStore_ {
+  /**
+   * @param {{user: GoogleAppsScript.Properties.Properties,
+   *          script: GoogleAppsScript.Properties.Properties}} stores
+   */
+  constructor(stores) {
+    if (!stores || !stores.user || !stores.script) {
+      throw new Error("newConfigStore requires { user, script } property store handles.");
+    }
+    this.user_ = stores.user;
+    this.script_ = stores.script;
   }
-  console.log(`Q2 OBSERVE bare class — typeof: ${bare}, static call: ${bareStatic}, new+method: ${bareNew}`);
 
-  // Q3/Q4 — property scoping: plant a marker in the CONSUMER's stores
-  PropertiesService.getScriptProperties().setProperty('PROBE_KEY', 'consumer');
-  PropertiesService.getUserProperties().setProperty('PROBE_KEY', 'consumer');
+  /**
+   * Layered read. Empty/whitespace values are treated as absent.
+   * @param {string} key
+   * @param {{preferUser?: boolean, defaultValue?: *}} [opts]
+   */
+  get(key, opts = {}) {
+    const preferUser = (opts.preferUser !== undefined) ? Boolean(opts.preferUser) : true;
+    const def = (opts.defaultValue !== undefined) ? opts.defaultValue : null;
 
-  const own = Toolkit.probeOwnProps();
-  check('Q3 lib direct read does NOT see consumer script props', own.script !== 'consumer');
-  check('Q3 lib direct read does NOT see consumer user props',   own.user   !== 'consumer');
+    const clean = (v) => {
+      const s = (v === null || v === undefined) ? "" : String(v).trim();
+      return s === "" ? null : s;
+    };
 
-  const inj = Toolkit.probeInjectedProps(
-    PropertiesService.getUserProperties(),
-    PropertiesService.getScriptProperties()
-  );
-  check('Q4 injected handles DO see consumer props',
-        inj.user === 'consumer' && inj.script === 'consumer');
+    const u = clean(this.user_.getProperty(key));
+    const s = clean(this.script_.getProperty(key));
 
-  // Q5 — execution-context services
-  check('Q5 lib sees consumer active spreadsheet',
-        Toolkit.probeActiveSpreadsheet() !== null);
+    return preferUser ? (u ?? s ?? def) : (s ?? u ?? def);
+  }
 
-  // Q6 — callbacks across the boundary
-  check('Q6 function args cross intact',
-        Toolkit.probeCallback(() => true) === true);
+  setUser(key, value)   { this.user_.setProperty(key, String(value ?? "")); }
+  setScript(key, value) { this.script_.setProperty(key, String(value ?? "")); }
+  deleteUser(key)       { this.user_.deleteProperty(key); }
+  deleteScript(key)     { this.script_.deleteProperty(key); }
+}
 
-  // Q7 — sentinel throw
-  let sentinelOk = false;
-  try { Toolkit.probeSkipSentinel(); }
-  catch (e) { sentinelOk = !!(e && e.__skip === true && e.message === 'skip probe'); }
-  check('Q7 thrown sentinel keeps shape', sentinelOk);
-
-  // Cleanup + report
-  PropertiesService.getScriptProperties().deleteProperty('PROBE_KEY');
-  PropertiesService.getUserProperties().deleteProperty('PROBE_KEY');
-
-  results.forEach(r => console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}`));
-  const fails = results.filter(r => !r.ok).length;
-  console.log(fails === 0 ? 'BOUNDARY PROBE GREEN' : `BOUNDARY PROBE: ${fails} unexpected result(s)`);
+/**
+ * Create a layered config store over the CALLER's property stores.
+ * @param {{user: Properties, script: Properties}} stores
+ *   Pass PropertiesService.getUserProperties() / getScriptProperties()
+ *   from YOUR project.
+ * @returns {ConfigStore_}
+ */
+function newConfigStore(stores) {
+  return new ConfigStore_(stores);
 }
 ```
 
-### Setup
+The trailing underscore on `ConfigStore_` does double duty: it's the library-private marker at the boundary, and it means the class name can't collide with the app's `ConfigStore` shim if anyone ever reads both files side by side.
 
-1. In the toolkit project: Project Settings (gear icon) → copy the **Script ID**.
-2. In the scratch sheet's script: Libraries **+** → paste the ID → Look up → Version: **HEAD (Development mode)** → Identifier: **Toolkit** → Add.
-3. Paste the runner, run `runBoundaryProbe`, authorize (properties + spreadsheet scopes, auto-detected), read the execution log.
+## App side — replace the `ConfigStore` class body in `01_Core_Config.js`
 
-Development mode is the important choice: HEAD binding means the consumer always executes the library's latest *saved* code, so throughout Phases 2–3 you edit the toolkit and re-run without publishing anything. Dev mode is only offered to editors of the library — you own it, so it's there. Version pinning happens once, at Phase 5, when the surface is proven.
+`SchemaDef` and `AppConfig` in that file are untouched. Only the `ConfigStore` class at the bottom changes:
 
-### Reading the results
+```javascript
+/**
+ * @class
+ * @classdesc Configuration store — thin seam over Toolkit.newConfigStore.
+ *   The app passes its OWN property stores in (library code can't see them
+ *   otherwise); the toolkit owns the precedence/clean logic. Lazily built so
+ *   no code executes at load time.
+ */
+class ConfigStore {
+  /** @private Lazy singleton, same idiom as Commands._registry_(). */
+  static _store_() {
+    if (!this.__store) {
+      this.__store = Toolkit.newConfigStore({
+        user: PropertiesService.getUserProperties(),
+        script: PropertiesService.getScriptProperties()
+      });
+    }
+    return this.__store;
+  }
 
-**Q1** should pass with near-certainty, and here's why it's in the probe anyway: your app is *already living proof* — `WorkatoLib.newClient`, `WorkatoGraphLib.newAnalyzer`, and `GeminiLib.newClient` cross this exact boundary every run. Q1 is a sanity anchor; if it fails, something is wrong with the binding, not the design.
+  static get(key, opts = {})    { return this._store_().get(key, opts); }
+  static setUser(key, value)    { return this._store_().setUser(key, value); }
+  static setScript(key, value)  { return this._store_().setScript(key, value); }
+  static deleteUser(key)        { return this._store_().deleteUser(key); }
+  static deleteScript(key)      { return this._store_().deleteScript(key); }
+}
+```
 
-**Q2** is deliberately observational rather than pass/fail, and this is a small epistemics point worth making explicit: we don't actually know which way it goes on the current V8 runtime, and folklore differs. Whatever it reports, the design doesn't change — the factory API stays, for consistency with your three existing libraries and because JSDoc-driven autocomplete follows functions cleanly. But now you'll *know* what your runtime does with bare classes, instead of believing something. Log it in the toolkit README as an observed fact with a date.
+Every existing call site — `AppConfig.get()`, `UiMode`, `DriveService._getVerifiedFolder`, `DashboardService.postInventorySync`, `MaintenanceService._debugFolder_` — keeps working unchanged, because the five-method static surface is identical.
 
-**Q3** failing — the library seeing consumer properties — would be *good news*, oddly: `newConfigStore` could drop injection and get simpler. I'd bet heavily against it. The expected result (both PASSes, meaning isolation) confirms Finding 1 and locks the injected-handles signature.
+Two deliberate details worth a beat each, since they're the kind of thing you like to see the reasoning for:
 
-**Q4** is the load-bearing check. If injection somehow *doesn't* work, `ConfigStore` can't be lifted at all and stays app-side — the toolkit would ship without it. That contingency shrinks the library rather than breaking anything, which is the right failure mode to have.
+**The old `userProps()` / `scriptProps()` statics are gone.** I grepped every file: they were called only from inside `ConfigStore.get/set/delete` themselves — `UserInterfaceService`, `dumpAllConfig`, `debugPropertyReport`, and the migration function all reach `PropertiesService` directly, not through `ConfigStore`. So dropping them removes zero external surface. If you want belt-and-suspenders, two one-line passthroughs restore them; I'd leave them out — dead surface is where the next tendril grows.
 
-**Q5** failing would mean `newSheets` needs a mandatory spreadsheet parameter and `notify`'s toast needs an injected spreadsheet too. Expected: pass, per the two-families taxonomy above.
+**No caching, on purpose.** `AppConfig.get()` calls `ConfigStore.get` on every invocation, which means every call is a live `PropertiesService` read — that was true before and stays true now. Caching the values would be faster but would change semantics (a token updated mid-run via the Configuration menu would go stale), and Phase 2 changes nothing but the seam. The library-boundary crossing itself adds effectively nothing; the milliseconds were always in the property reads.
 
-**Q6** protects something subtler than it looks — not the `verbose` option (we chose boolean-only, so that's moot) but the **test kit's core mechanic**: `runner.add(name, fn)` passes *app-defined test functions* into library code, which invokes them. If callbacks didn't cross, the whole `TestRunner` extraction dies. They will cross — same V8 heap — but this is the assumption the test kit stands on, so it gets a check.
+## Binding the toolkit into the app — and the clasp gotcha
 
-**Q7** validates the SKIP protocol end-to-end as it will actually run post-extraction: `Assert.skip` throws in a library frame, the throw propagates *through your app's test-function frames*, and `TestRunner.run` catches it back in a library frame, checking `e.__skip`. If the sentinel lost its shape, we'd switch to a marker created and checked by library functions on both ends — but a plain object in a shared heap won't lose properties.
+Bind exactly as you did for the scratch consumer: app project → Libraries **+** → toolkit's script ID → **HEAD (Development mode)** → identifier **Toolkit**.
 
-Run it and paste me the log. On green (my expectation: 7 PASS + the Q2 observation), the API from my first message is locked as proposed, and I'll produce the Phase 2 diff — the `ConfigStore_` implementation for the toolkit and the exact shim replacing the class body in `01_Core_Config.js` — for your review before anything moves.
+Now the gotcha, and it's the one real hazard in this phase: **binding a library is a manifest edit.** The dependency lands in the app's `appsscript.json`:
+
+```json
+"dependencies": {
+  "libraries": [{
+    "userSymbol": "Toolkit",
+    "libraryId": "YOUR_TOOLKIT_SCRIPT_ID",
+    "developmentMode": true
+  }]
+}
+```
+
+Since you manage this project with clasp, your *local* manifest doesn't know about the binding you just made in the editor — and `clasp push` pushes the whole local state, manifest included. Push with a stale local manifest and the binding is silently removed; the next run dies with `Toolkit is not defined`. So the sequence is: bind in the editor → `clasp pull` (or hand-add the block above to your local `appsscript.json`) → *then* make the code edit locally and push. Alternatively, do it all locally: add the manifest block by hand, edit the class, one push. Either works; just don't let the editor and your working copy disagree about the manifest.
+
+(Same applies to the merged `oauthScopes` if your manifest pins scopes explicitly — yours appears to use auto-detection, and ConfigStore introduces no scope the app doesn't already hold, so this should be a non-event.)
+
+## Verification
+
+The reads and writes to check, chosen because between them they exercise all five methods through the seam: open the spreadsheet and confirm the menu builds (`onOpen` → `UiMode.get_()` → `ConfigStore.get`); run **Show current config** and confirm token/URL/folder report exactly as before (layered reads with masking); run **Test connectivity** (proves `AppConfig.get()` still resolves the real token — the end-to-end read path); toggle **Switch to Advanced menu** and back (`setUser` through the seam, and the menu should visibly change); and run `runHermeticTests` for the cheap green baseline. If you want the delete path covered too, **Set base URL** → submit empty → confirm delete → **Show current config** should show the default EU URL again (`deleteUser` through the seam).
+
+If all of that behaves, commit — suggested message: `refactor: ConfigStore delegates to Toolkit.newConfigStore (injected stores, lazy seam)` — and Phase 2 is done.
+
+Then say the word and I'll produce the Phase 3 diff set: `newSheets`, `newDrive` (with `saveJson` and the app-side `saveLog` wrapper keeping the recipe-`code` massage), `newLog` (boolean verbose), `getSelectedIds`, and the test kit — plus the app-side seams for `02`, `04`, `22`, `50`, and `51`. That one's the big diff, so I'll structure it file by file for review.
