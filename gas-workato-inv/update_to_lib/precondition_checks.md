@@ -1,66 +1,100 @@
-Found it. The chain snapped in a very specific place, and it's exactly the "one file kept the update, another lost it" pattern. Let me confirm the failure mode by checking the runner and the write path.The extraction itself is clean — that's worth saying first. Your library shim (`Toolkit.newSheets({ log: AppLog })`, and `SheetService.write` resolving the sheet name + header style from config before delegating) is *exactly* the config-tendril cut we talked about. That part is right. The seam break is unrelated to the library boundary. Let me confirm the last link, then I'll give you the precise diagnosis.Found it, and it's a textbook "one file kept the change, the others lost it" split. The library extraction is not the culprit — the seam substrate got half-reverted along the way. Here's the chain, with what survived and what didn't:
+It is a sibling — same shape as `View_Seams`: a focused, formula-driven list plus a summary count. Let me anchor the edits to your *current* file rather than my older copies, since we've seen how fast these drift. Let me confirm the exact spots to hook into.All anchors confirmed and the structure matches. Let me apply the wiring to a working copy and validate it before handing you the snippets.Anchors and structure all confirmed. Let me wire it into a working copy and syntax-check.Wired and the whole app parses clean with it in. Because you're in separate clasp files, here are the edits located by class — same footprint as `View_Seams`.
 
-- **Link 1 — Config header (`CALL_EDGES`): kept the update.** 12 columns, with a Child-project column at position 12 (→ column L). ✓
-- **Link 2 — Mapper (`mapCallEdgesToRows`, ~line 1091): reverted.** Old 5-parameter signature, emits **11** columns — no `recipeProjectMap`, no Child Project field. ✗
-- **Link 3 — Runner (`InventorySyncRunner`, ~lines 1566/1608): reverted.** Never builds `recipeProjectMap` (it appears nowhere in the app), and calls the mapper with 5 args. ✗
-- **Link 4 — Seams view (`_ensureSeamsView_`, ~line 2841): kept the update.** Reads column **C** (parent project) and column **L** (child project) and filters `C <> L`. ✓
+## `SchemaDef` (config, `01`)
 
-So the header declares 12 columns but the mapper now produces 11. When the runner assembles `callEdgeRows = [12-col header, ...11-col data]` and hands it to `write`, the library computes `numCols = rows[0].length = 12` and calls `setValues` on a 12-wide range with 11-wide rows — which **throws** "The number of columns in the data does not match… values has 11 but the range has 12." The one case where it *doesn't* throw is a workspace with zero call edges in the first 100 recipes: then it's just the header, no error, but column L is empty forever, so the Seams view always reports "cleanly isolated." Either way, seams are dead because **column L never gets written.**
+Add to `SHEETS`, right after the `SEAMS` line:
+```js
+UNUSED:         "View_Unused",
+```
 
-## The fix — restore links 2 and 3
+Add to `HEADERS`, right after the `SEAMS` header line:
+```js
+UNUSED: [ "Recipe ID", "Name", "Status", "Last run at", "Project", "Why" ],
+```
 
-**Mapper** (replace the current `mapCallEdgesToRows`):
+## `DashboardService` (`30`)
+
+In `ensureAll`, after `this._ensureSeamsView_(ss, ctx);`:
+```js
+this._ensureUnusedView_(ss, ctx);
+```
+
+In `_applyTabColors_`, extend the primary line:
+```js
+DASHBOARD_HOME: C.primary, VIEW_RECIPES: C.primary, SEAMS: C.primary, UNUSED: C.primary,
+```
+
+In `applyVisibility`, after `cfg.SHEETS.SEAMS,` in the `visibleInBasic` set:
+```js
+cfg.SHEETS.UNUSED,
+```
+
+In `_ensureDashboardHome_`, the counts array — give the `Cross-project seams` row a trailing comma and add after it:
+```js
+["Likely-dead recipes", `=IFERROR(SUMPRODUCT((${cfg.SHEETS.VIEW_RECIPES}!A2:A<>"")*(${cfg.SHEETS.VIEW_RECIPES}!I2:I="Standalone")*(((${cfg.SHEETS.VIEW_RECIPES}!C2:C="STOPPED")+(${cfg.SHEETS.VIEW_RECIPES}!F2:F="NEVER"))>0)),0)`],
+```
+
+And the quick links, after the `D13` seams link:
+```js
+DashboardService._setSheetLink_(sh, ss, "D14", cfg.SHEETS.UNUSED, "Go to View_Unused");
+```
+
+Finally, the new method — paste it next to `_ensureSeamsView_`:
 
 ```js
-static mapCallEdgesToRows(recipe, edges, projectMap, folderMap, recipeNameMap, recipeProjectMap = null) {
-  const projectName = DataMapper._safeLookup(projectMap, recipe.project_id);
-  const folderName = DataMapper._safeLookup(folderMap, recipe.folder_id);
+// ---------------------------------------------------------------------------------------
+// View_Unused (likely-dead recipes: orphaned + idle)
+// ---------------------------------------------------------------------------------------
+static _ensureUnusedView_(ss, ctx) {
+  const cfg = ctx.config;
+  const name = cfg.SHEETS.UNUSED || "View_Unused";
+  const sh = ctx.sheetService.getOrCreateByName(name);
 
-  return (edges || []).map(e => {
-    const childProject = recipeProjectMap
-      ? (recipeProjectMap[String(e.child_recipe_id || "")] || "")
-      : "";
-    return [
-      String(e.parent_recipe_id || recipe.id || ""),
-      String(e.parent_recipe_name || recipe.name || ""),
-      projectName,
-      folderName,
-      String(e.step_path || ""),
-      String(e.step_name || ""),
-      String(e.branch_context || ""),
-      String(e.provider || ""),
-      String(e.child_recipe_id || ""),
-      DataMapper._safeLookup(recipeNameMap, e.child_recipe_id),
-      String(e.id_key || ""),
-      childProject
-    ];
-  });
+  if (cfg.DASHBOARD.OVERWRITE_VIEWS) {
+    sh.clear();
+  }
+
+  // Reuse the Role column already computed on View_Recipes: "Standalone" means
+  // zero in- and out-degree (an orphan), so we don't recompute the graph here.
+  const vr = cfg.SHEETS.VIEW_RECIPES;
+
+  // Title + one-line summary count.
+  sh.getRange("A1").setValue("Likely-dead recipes").setFontWeight("bold").setFontSize(13);
+  sh.getRange("A2")
+    .setValue("Orphaned (no call edges in or out) AND idle (stopped, or never run). An empty list is good. Note: a running, self-triggered orphan is healthy and will not appear here.")
+    .setFontColor("#666666");
+  sh.getRange("A3").setValue("Likely-dead recipes:").setFontWeight("bold");
+  sh.getRange("B3").setFormula(
+    `=IFERROR(SUMPRODUCT((${vr}!A2:A<>"")*(${vr}!I2:I="Standalone")*(((${vr}!C2:C="STOPPED")+(${vr}!F2:F="NEVER"))>0)),0)`
+  );
+
+  // Header row (row 5).
+  const headers = cfg.HEADERS.UNUSED || [
+    "Recipe ID", "Name", "Status", "Last run at", "Project", "Why"
+  ];
+  sh.getRange(5, 1, 1, headers.length).setValues([headers]);
+  sh.getRange(5, 1, 1, headers.length).setFontWeight("bold").setBackground("#d9d9d9");
+  sh.setFrozenRows(5);
+
+  // The list: Standalone recipes that are stopped or never-run.
+  sh.getRange("A6").setFormula(
+    `=IFERROR(FILTER(` +
+    `{${vr}!A2:A,${vr}!B2:B,${vr}!C2:C,${vr}!F2:F,${vr}!D2:D,ARRAYFORMULA(IF(${vr}!F2:F="NEVER","orphan + never run","orphan + stopped"))},` +
+    `${vr}!A2:A<>"",` +
+    `${vr}!I2:I="Standalone",` +
+    `((${vr}!C2:C="STOPPED")+(${vr}!F2:F="NEVER"))>0),` +
+    `"No orphaned + idle recipes - nothing looks dead.")`
+  );
+
+  try { sh.autoResizeColumns(1, headers.length); } catch (e) {}
 }
 ```
 
-**Runner** — build the map after `const recipeNameMap = ...` (~line 1568):
+The one design choice worth calling out, because it's the elegant-over-thorough fork: **it reads from `View_Recipes`, not from `Inventory_Recipes` + `Analysis_Call_Edges` directly.** The orphan test is already computed and named there — `Role = "Standalone"` *is* "zero in- and out-degree." So rather than re-deriving degree with a second pair of `COUNTIF`s, the view (and the dashboard count) just reuse the label. It's lighter, it can't drift from what `View_Recipes` shows, and the whole thing collapses to one `FILTER`. The **Why** column then only has to split the two idle reasons ("never run" vs "stopped"), since orphan-ness is already guaranteed by the filter.
 
-```js
-const recipeProjectMap = Object.fromEntries(
-  (recipes || []).map(r => [String(r.id), projectMap[String(r.project_id)] || ""])
-);
-```
+Two things to keep in mind, both familiar:
 
-…and pass it as the 6th arg (~line 1608):
+- **This is deliberately the intersection, not "no incoming calls."** A stopped-or-never-run orphan is the dead candidate; a *running* orphan is a healthy self-triggered entry point and is correctly excluded. That runtime axis is what keeps your scheduled recipes out of the list.
+- **Same 100-recipe caveat as criticality and seams.** Orphan-ness rides on the call-edge slice (`RECIPE_LIMIT_DEBUG`), so beyond the first 100 recipes treat an entry as a *candidate* to eyeball, not a verdict. At or under 100 recipes it's exact.
 
-```js
-DataMapper.mapCallEdgesToRows(recipe, callEdges, projectMap, folderMap, recipeNameMap, recipeProjectMap)
-```
-
-That realigns the data to 12 columns, so the write succeeds and column L fills in.
-
-## Two small nits while you're in there
-
-- **Config header, position 12** is `"Child project"` (lowercase *p*). Your `_applyHeaderNotes_` looks up `"Child Project"` (capital *P*), so `indexOf` returns −1 and that tooltip silently never applies. Capitalize it to `"Child Project"` to bring the tooltip back.
-- **Config header, position 3** is still `"Project"`; the seam design renamed it `"Parent Project"` for clarity now that there are two project columns. Purely cosmetic — the view keys off column letters, not the name — but worth doing for readability.
-
-## Confirming the fix
-
-Run the hermetic test suite (`runAllTests`). The header-vs-mapper width check will currently be red — "CALL_EDGES: mapper emits 11 cols, header declares 12" — which is precisely this bug. After the mapper edit it goes green, which is your one-command confirmation before you even sync. That test existing is why this was a five-minute find rather than a spelunking session.
-
-If you want, share how the other context handled the mapper during extraction and I can tell you whether it was dropped or overwritten from an older snapshot — but you don't need that to fix it; the four edits above are the whole repair.
+It'll show up as a green, Basic-visible tab with its count on the dashboard — and, like Seams, an empty list is the good outcome.
