@@ -12,6 +12,7 @@ every question we used to answer with raw pasted python is a method call.
     ws.vocabulary()                     # the flag-settling inspector readout
     ws.edges("UPL-01")                  # raw resolved Edge list, project it yourself
     ws.audit()                          # single-owner audit over the production set
+    ws.dump("recipes")                  # snapshot -> disk: one fixture-format file per recipe
 
 How this squares with the one design rule (fetch is the only impure stage;
 everything downstream is a pure function of a frozen snapshot): the Workspace
@@ -30,8 +31,12 @@ the whole facade runs offline — see workspace_selftest.py.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 
 import sdc_recipe_model as M
 from workato_client import WorkatoClient, WorkatoConfig, safe_parse_json, load_dotenv
@@ -133,6 +138,7 @@ class Workspace:
         self._treg = None        # TableSchemaRegistry
         self._codes: dict = {}   # flow_id -> parsed code tree
         self._corpus = None      # structured recipes with code (inspector input)
+        self._prod: dict = {}    # (scope_name, scope_id) -> [(flow_id, handle)]
 
     @classmethod
     def connect(cls, folder_id=None, client=None) -> "Workspace":
@@ -182,6 +188,7 @@ class Workspace:
         editing a recipe or table so the memoized code can't lie to the oracle."""
         self._assets = self._rreg = self._treg = self._corpus = None
         self._codes.clear()
+        self._prod.clear()
         return self
 
     # -- identity -------------------------------------------------------------
@@ -207,9 +214,16 @@ class Workspace:
 
     # -- the spine, per recipe --------------------------------------------------
     def code(self, target) -> dict:
-        """The recipe's parsed code tree (fetched once, memoized)."""
+        """The recipe's parsed code tree (fetched once, memoized). If the
+        inspector corpus is already materialized, its copy is used — the
+        snapshot never fetches the same recipe twice by two routes."""
         fid = self.flow_id(target)
         if fid not in self._codes:
+            if self._corpus is not None:
+                hit = next((r for r in self._corpus if r.get("id") == fid), None)
+                if hit is not None and hit.get("code") is not None:
+                    self._codes[fid] = hit["code"]
+                    return self._codes[fid]
             self._codes[fid] = safe_parse_json(self.client.get_recipe(fid)["code"])
         return self._codes[fid]
 
@@ -276,7 +290,11 @@ class Workspace:
     def production_recipes(self, scope_name=None, scope_id=None) -> list:
         """(flow_id, handle) for recipes directly in the production scope folder
         — same rule as corpus_pass: SDC_RECIPES_FOLDER_ID / _NAME (default
-        'Recipes'), falling back to every recipe in the subtree."""
+        'Recipes'), falling back to every recipe in the subtree. Memoized per
+        scope, like every other fetch; refresh() drops it."""
+        key = (scope_name, scope_id)
+        if key in self._prod:
+            return self._prod[key]
         scope_id = scope_id if scope_id is not None else os.environ.get("SDC_RECIPES_FOLDER_ID")
         scope_name = scope_name or os.environ.get("SDC_RECIPES_FOLDER_NAME", "Recipes")
         if scope_id is None:
@@ -289,7 +307,8 @@ class Workspace:
                    if str(r.get("folder_id")) == str(scope_id)]
         else:
             ids = [a["id"] for a in self._get_assets() if a.get("type") == "recipe"]
-        return [(fid, self.handle(fid)) for fid in ids]
+        self._prod[key] = [(fid, self.handle(fid)) for fid in ids]
+        return self._prod[key]
 
     def all_edges(self, targets=None) -> "list[M.Edge]":
         """The resolved edge set across many recipes (default: the production
@@ -308,3 +327,67 @@ class Workspace:
         guarded = set(guarded) if guarded is not None else set(ORACLE["status_columns"])
         edges = edges if edges is not None else self.all_edges()
         return single_owner_audit(edges, self.recipes, self.tables, owner, guarded)
+
+    # -- the snapshot, flowing to disk ------------------------------------------
+    def dump(self, dest="recipes", targets=None) -> dict:
+        """Write each recipe's parsed code tree to `dest/`, one file per recipe.
+
+        This is the snapshot flowing to disk: the API side stays GET-only and
+        memoized (a recipe already in the snapshot costs zero calls), and the
+        only new impurity is the local write into `dest`.
+
+        The files are BARE code trees — byte-for-byte the fixture format — so
+        every dumped recipe feeds straight back into normalize()/the spine, or
+        drops into fixtures/ as-is. Output is deterministic (stable names,
+        stable formatting): re-dumping an unchanged corpus produces identical
+        bytes, which makes a committed dump git-diffable over time. Provenance
+        (folder, timestamp, file -> recipe map, errors) lives in
+        `dest/_manifest.json`, NOT inside the artifacts, so the round-trip
+        json.load(file) == ws.code(flow_id) stays exact.
+
+        targets: None -> the production set (production_recipes());
+                 else any iterable of handles / flow_ids.
+        Files are named {handle}__{flow_id}.recipe.json (unique even when
+        handles collide). Existing files are overwritten — it's a snapshot.
+        One bad recipe doesn't abort the dump; it's recorded in errors.
+
+        Returns {"written": [paths], "errors": [(target, error)], "manifest": path}.
+        """
+        dest_path = Path(dest)
+        dest_path.mkdir(parents=True, exist_ok=True)
+        if targets is None:
+            targets = [fid for fid, _h in self.production_recipes()]
+
+        written, errors, entries = [], [], []
+        for t in targets:
+            try:
+                fid = self.flow_id(t)
+                handle = self.handle(fid)
+                code = self.code(fid)
+                if not isinstance(code, dict):
+                    raise ValueError(f"code did not parse to a dict (got {type(code).__name__})")
+                path = dest_path / self._dump_name(handle, fid)
+                path.write_text(json.dumps(code, indent=2, ensure_ascii=False) + "\n",
+                                encoding="utf-8")
+                written.append(str(path))
+                entries.append({"file": path.name, "flow_id": fid, "handle": handle,
+                                "name": (self.recipes.by_flow_id.get(fid) or {}).get("name")})
+            except Exception as ex:               # keep going; record, don't abort
+                errors.append((str(t), repr(ex)))
+
+        manifest = {
+            "folder_id": self.folder_id,
+            "dumped_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "recipes": sorted(entries, key=lambda e: e["file"]),
+            "errors": errors,
+        }
+        mpath = dest_path / "_manifest.json"
+        mpath.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+                         encoding="utf-8")
+        return {"written": written, "errors": errors, "manifest": str(mpath)}
+
+    _FILE_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+    def _dump_name(self, handle: str, fid: int) -> str:
+        safe = self._FILE_UNSAFE.sub("_", handle).strip("_") or "recipe"
+        return f"{safe}__{fid}.recipe.json"
