@@ -48,6 +48,12 @@ def main():
     )
     ws = Workspace.connect(folder_id=FOLDER_ID, client=client)
 
+    # -- repr must report, never fetch ----------------------------------------
+    assert not transport.calls
+    repr(ws)
+    assert not transport.calls, "repr(ws) must never hit the network"
+    print("[ok] repr: reports the snapshot without fetching")
+
     # -- identity -----------------------------------------------------------
     assert ws.flow_id("STS-01") == STS01_FLOW_ID
     assert ws.flow_id(STS01_FLOW_ID) == STS01_FLOW_ID
@@ -100,6 +106,21 @@ def main():
     print(vocab)
     print()
 
+    # -- corpus reuse: code() served from the materialized corpus --------------
+    n = len(transport.calls)
+    ws.code(4)                                        # UTL-01: never fetched individually
+    ws.code(16)                                       # OBS-01: neither
+    assert len(transport.calls) == n, "code() re-fetched recipes the corpus already holds"
+    print("[ok] corpus reuse: code() for unfetched recipes costs zero calls after vocabulary()")
+
+    # -- drift: recipe label vs live column name, riding on the oracle result --
+    d = ws.drift("STS-01")
+    pairs = {(rec, live) for rec, live, _fid in d}
+    assert ("supplier_display_status", "Result status") in pairs, pairs
+    assert ("supplier_message", "Message") in pairs, pairs
+    assert ws.oracle("STS-01").drift == d
+    print(f"[ok] drift: {len(d)} drifted columns surfaced, carried on the oracle result")
+
     # -- production scope + audit ----------------------------------------------
     prod = ws.production_recipes()
     assert ("STS-01" in {h for _f, h in prod}), prod
@@ -108,6 +129,37 @@ def main():
     assert set(audit["guarded_columns"]) == ORACLE["status_columns"]
     print(f"[ok] audit: production set {sorted(h for _f, h in prod)}; "
           f"other_writers={audit['other_writers']}")
+
+    # -- dump: the snapshot flowing to disk, zero API calls ----------------------
+    import json as _json
+    import tempfile
+    from pathlib import Path as _Path
+    from normalize import normalize as _normalize
+    from extract import extract as _extract
+
+    n = len(transport.calls)
+    assert ws.production_recipes() == prod, "production scope should be memoized"
+    with tempfile.TemporaryDirectory() as tmp:
+        result = ws.dump(dest=tmp)                    # default: the production set
+        assert not result["errors"], result["errors"]
+        files = sorted(p.name for p in _Path(tmp).glob("*.recipe.json"))
+        assert len(files) == 3 and "STS-01__84.recipe.json" in files, files
+
+        sts = _Path(tmp) / "STS-01__84.recipe.json"
+        dumped = _json.loads(sts.read_text(encoding="utf-8"))
+        assert dumped == ws.code(84), "round-trip: file must equal the snapshot's code exactly"
+        assert _extract(_normalize(dumped), 84), "a dumped file must re-enter the spine"
+
+        first_bytes = sts.read_bytes()
+        ws.dump(dest=tmp)                             # re-dump an unchanged corpus
+        assert sts.read_bytes() == first_bytes, "dump must be byte-deterministic"
+
+        manifest = _json.loads((_Path(tmp) / "_manifest.json").read_text(encoding="utf-8"))
+        assert len(manifest["recipes"]) == 3 and manifest["folder_id"] == str(FOLDER_ID)
+    assert len(transport.calls) == n, (
+        f"dump from a warm snapshot hit the network: {transport.calls[n:]}")
+    print("[ok] dump: 3 fixture-compatible files, exact round-trip, spine re-entry, "
+          "deterministic bytes, zero API calls")
 
     # -- refresh drops the snapshot ---------------------------------------------
     n = len(transport.calls)
