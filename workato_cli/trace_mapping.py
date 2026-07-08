@@ -92,6 +92,31 @@ def _normalize_code(raw_code):
     return None
 
 
+# Filename convention for API-fetched content: <PREFIX>_<recipeId>.recipe.json
+# e.g. "WFA-015_2121648.recipe.json" -> name "WFA-015", id 2121648.
+FILENAME_RE = re.compile(r"^(?P<name>.+?)_(?P<id>\d+)(?:\.recipe)?\.json$",
+                         re.IGNORECASE)
+
+
+def _identity_from_filename(filename):
+    """Returns (name, id) parsed from the filename convention, or (stem, None)."""
+    m = FILENAME_RE.match(filename)
+    if m:
+        return m.group("name"), m.group("id")
+    return Path(filename).stem, None
+
+
+def _is_bare_code_tree(obj):
+    """
+    True when the file IS the recipe's code tree (no {id, name, code} envelope):
+    a root step object carrying `block` and/or a trigger keyword. This is the
+    shape you get when saving the API's `code` payload directly, one per file.
+    """
+    if not isinstance(obj, dict) or "code" in obj:
+        return False
+    return isinstance(obj.get("block"), list) or obj.get("keyword") == "trigger"
+
+
 def _recipe_label(obj, fallback):
     """Human-readable recipe label: prefer name, fall back to id/file stem."""
     name = obj.get("name") or obj.get("title")
@@ -111,8 +136,21 @@ def load_corpus(path):
     raw_objects = []   # (obj, source_label)
     failures = []
 
+    # Optional identity manifest for bare code-tree corpora: _index.json in the
+    # folder, mapping filename-stem OR recipe name -> {"id": ..., "name": ...}.
+    # Produced trivially from GET /recipes (the list endpoint); lets numeric
+    # flow_id call bindings resolve when the per-file payloads carry no id.
+    index = {}
     if p.is_dir():
-        files = sorted(p.glob("*.json"))
+        idx_file = p / "_index.json"
+        if idx_file.exists():
+            try:
+                index = json.loads(idx_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                failures.append(("_index.json", f"unparseable, ignored: {e}"))
+
+    if p.is_dir():
+        files = sorted(f for f in p.glob("*.json") if f.name != "_index.json")
         if not files:
             failures.append((str(p), "no .json files found in directory"))
         for f in files:
@@ -149,14 +187,34 @@ def load_corpus(path):
         if not isinstance(obj, dict):
             failures.append((source, "not a JSON object"))
             continue
-        code = _normalize_code(obj.get("code"))
-        if code is None:
-            failures.append((source, "no parseable `code` (missing, or code string is not valid JSON)"))
-            continue
+
+        if _is_bare_code_tree(obj):
+            # File IS the code tree (API content payload saved directly).
+            # Identity must come from outside the file, in priority order:
+            #   1. filename convention <PREFIX>_<recipeId>.recipe.json
+            #      (e.g. "WFA-015_2121648.recipe.json" -> WFA-015 / 2121648)
+            #   2. _index.json manifest (stem or filename keyed)
+            #   3. bare numeric stem as the recipe id
+            stem = Path(source).stem
+            fn_name, fn_id = _identity_from_filename(source)
+            meta = index.get(stem) or index.get(source) or {}
+            rid = fn_id if fn_id is not None else meta.get("id")
+            if rid is None and stem.isdigit():
+                rid = int(stem)
+            name = meta.get("name") or fn_name
+            code = obj
+        else:
+            code = _normalize_code(obj.get("code"))
+            if code is None:
+                failures.append((source, "no parseable `code` (missing, or code string is not valid JSON)"))
+                continue
+            rid = obj.get("id")
+            name = obj.get("name")
+
         recipes.append({
-            "label": _recipe_label(obj, source),
-            "id": obj.get("id"),
-            "name": obj.get("name"),
+            "label": _recipe_label({"id": rid, "name": name}, source),
+            "id": rid,
+            "name": name,
             "code": code,
             "source_file": source,
         })
@@ -264,11 +322,10 @@ def cmd_fetch(recipes, failures, out_dir, args):
     rows = []
     for r in recipes:
         for step, loc in iter_steps(r["code"]):
+            # fetch steps are actions; skip if/foreach/try/etc.
+            # (keyword can be absent on some root objects - allow None through)
             if step.get("keyword") not in (None, "action"):
-                # fetch steps are actions; skip if/foreach/etc. (keyword absent on
-                # some root objects, so allow None through)
-                if step.get("keyword") != "action":
-                    continue
+                continue
             if _looks_like_fetch(step):
                 rows.append({
                     "recipe": r["label"],
@@ -380,6 +437,42 @@ def cmd_consumers(recipes, failures, out_dir, args):
                         )
                         changed = True
 
+    # --- Schema label -> UUID alias expansion -----------------------------
+    # Data-table pills reference columns by UUID-ish internal names
+    # (e.g. "ff89e5c6_b5b9_..."), while the human field name appears only as
+    # a `label` in step schemas. If a tracked field name shows up as a schema
+    # label, adopt its internal name (both underscore and hyphen spellings)
+    # so pills carrying it still match. Table column ids are workspace-global,
+    # so aliases apply corpus-wide.
+    def _iter_schema_entries(schema):
+        stack = list(schema or [])
+        while stack:
+            e = stack.pop()
+            if not isinstance(e, dict):
+                continue
+            yield e
+            stack.extend(e.get("properties") or [])
+            if isinstance(e.get("toggle_field"), dict):
+                stack.append(e["toggle_field"])
+
+    all_tracked_names = set()
+    for s in tracked.values():
+        all_tracked_names |= s
+    aliases = {}  # internal name -> the tracked label it stands for
+    for r in recipes:
+        for step, _loc in iter_steps(r["code"]):
+            for sk in ("extended_output_schema", "extended_input_schema"):
+                for entry in _iter_schema_entries(step.get(sk)):
+                    label = str(entry.get("label", ""))
+                    if label in all_tracked_names:
+                        internal = str(entry.get("name", ""))
+                        if internal and internal != label:
+                            aliases[internal] = label
+                            aliases[internal.replace("_", "-")] = label
+    if aliases:
+        for s in tracked.values():
+            s |= set(aliases.keys())
+
     # --- Identify consumer steps -----------------------------------------
     consumers = []
     for r in recipes:
@@ -407,6 +500,12 @@ def cmd_consumers(recipes, failures, out_dir, args):
     if propagation_log:
         lines.append("Cross-recipe field propagation (caller output -> callee parameter):")
         lines.extend(f"  {l}" for l in propagation_log)
+        lines.append("")
+    if aliases:
+        lines.append("Schema label -> internal (UUID) name aliases adopted:")
+        for internal, label in sorted(set(aliases.items()), key=lambda x: (x[1], x[0])):
+            if "-" not in internal:  # report each once; hyphen twin is implied
+                lines.append(f"  {label}  ->  {internal}")
         lines.append("")
     if unresolved:
         lines.append("UNRESOLVED call sites (verify manually - a consumer could hide here):")
