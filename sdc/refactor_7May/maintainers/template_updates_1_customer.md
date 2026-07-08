@@ -17,7 +17,7 @@
 | 3 | Config JSON serialization (`Drive.serializeConfig`) | Ships the entire sheet as a raw 2D array into the config JSON (and, via passthrough, into every variant JSON). | N/A — wholesale copy. Any cell change moves `config_fingerprint`. That is correct behavior. |
 | 4 | Connector (`parse_customer_sheet`) | Builds a kv map: label = column **B** (index 1) lowercased + trimmed, value = column **D** (index 3). Skips rows shorter than 4 cells. | Lowercase + trim only. Otherwise **exact**, and stricter than consumer 1: the value must be in column D specifically. |
 
-**The two-matcher rule.** Every label string exists in three places that must agree character-for-character (modulo case and edge whitespace): the sheet cell, `Labels` in `003_Schema.js`, and the kv key in `parse_customer_sheet`. A drift between any pair produces a **silent nil**, not an error — the field simply arrives blank downstream. Two such drifts shipped and lived undetected (§7). Treat every label change as a three-way sync.
+**The two-matcher rule (really a four-copy rule).** Every label string exists in three places that must agree character-for-character (modulo case and edge whitespace): the sheet cell, `Labels` in `003_Schema.js`, and the kv key in `parse_customer_sheet`. A drift between any pair produces a **silent nil**, not an error — the field simply arrives blank downstream. And there is a fourth coupling one level up: **library code references `Labels.someKey` by name**, and a mismatched key (`Labels.variant_count` defined, `Labels.variantCount` referenced) reads as `undefined`, which `findValueRightOfLabel` converts to null — same silent failure, key-to-key instead of label-to-cell. Case history: the D6 retirement shipped with exactly this typo, silently generating zero variant templates. The structural fix is the **Labels load-time guard** in `003_Schema.js`: every key referenced by library code is asserted present at load, converting the failure from "feature quietly vanishes" to "library refuses to load with the key named." When adding a Labels key, add it to the guard list in the same edit.
 
 **The column-D rule.** GAS forgives a value in C or E; the connector does not. A value in column C works in every GAS flow and arrives blank in the connector — "provision succeeds, downstream field empty," the worst kind of bug to chase. Convention, no exceptions: **label in B, value in D.**
 
@@ -99,16 +99,19 @@ if (Migrations.isMigrationNeeded(ss)) {
 
 **Rollout order:** library publish → template update → connector release → repin containers (versioned, not dev mode) → workbooks self-migrate via the onOpen menu item. The connector's `parse_customer_sheet` and the workbook must change in the same coordinated release; the GAS library tolerates nothing in between.
 
+**Pinning is a cache — treat it as one when debugging.** Pinned containers execute a frozen snapshot; **library edits are invisible until published and repinned.** When a fix "doesn't work," probe `SDC.Version.LIBRARY` from the container *before* debugging the fix itself — ten seconds, and it distinguishes "fix is wrong" from "fix never arrived." Working arrangement: the **development test workbook** runs the library in development mode (tracks HEAD, every save live); **all other workbooks stay pinned** and repin per release. Dev mode requires editor access to the library project and re-creates the scope-drift hazard, so it is a scoped exception, never fleet policy. Note that multiple accumulated fixes arrive *at once* on repin — several simultaneous behavior changes after a repin is expected, not a new mystery.
+
+**Multi-hop composition and lag.** `_planPath` composes the chain automatically (a 1.1 workbook walks 1.1→1.2→1.3 in one run, stamping after each step, so mid-chain failure leaves an honest intermediate version). A `1.0 → 1.1` notes-only bridge exists so pre-versioned workbooks — which read as `1.0` by default — are reachable; without a `{from}` entry matching the workbook's version, `_planPath` returns empty and the workbook is stranded. **Notes-only migrations do not self-enforce**: nothing breaks on an unmigrated workbook, so detection (the onOpen menu item) without enforcement lets lag accumulate silently until the next *mutating* migration inherits the debt. The `schema-outdated` guard in the orchestrators is what bounds the lag — it belongs in every flow that reads customer data (Provision has it; Validate and Preview should).
+
 ---
 
 ## 6. Invariants and gotchas
 
-### 6.1 The D6 landmine
-`Variant._readVariantCount` reads cell **`D6`** by address — the single positional read on an otherwise label-driven sheet. Inserting a row at or above row 6 silently shifts the variant count onto a neighboring cell; every downstream variant behavior degrades **without an error**. Two rules until it's fixed, one fix to retire it:
+### 6.1 The D6 landmine (RETIRED as of schema 1.3 / library 1.4)
+Historically, `Variant._readVariantCount` read cell **`D6`** by address — the single positional read on an otherwise label-driven sheet, meaning any row insertion at or above row 6 silently shifted the variant count onto a neighboring cell. As of library 1.4 it reads by label (`Labels.variantCount`, matching the connector's existing kv key), and the landmine is gone. Two residues worth keeping:
 
-- Never insert rows at or above row 6. Migrations append below existing content.
-- Never move the variant-count question from D6.
-- **Permanent fix (fold into the next SCHEMA bump):** add `Labels.variantCount: 'How many variations are there of the template?'` and convert `_readVariantCount` to `Util.findValueRightOfLabel`. The connector already reads this value by exactly that label — GAS is the only positional holdout.
+- **Migrations still append below existing content, never insert rows.** The positional read is gone, but row insertion still renumbers everything below it, invalidating any documentation, notes, or analyst muscle memory that references row positions. Append-below stays the convention.
+- **The retirement shipped with its own bug** — the Labels key landed as `variant_count` while the code read `variantCount`, silently zeroing variant generation (see §1's four-copy rule). The Labels load-time guard now catches this class at library load.
 
 ### 6.2 Column D discipline
 Label in B, value in D. Always. (Rationale in §1; the asymmetry between GAS's C/D/E forgiveness and the connector's D-only read is the trap.)
@@ -132,17 +135,31 @@ A date cell has three possible representations (`Date` instance, `yyyy-MM-dd` st
 - **Reject numeric serials (return null) rather than doing epoch arithmetic.** A serial in the cell means template data validation was bypassed; fail loudly at preflight with an actionable message, don't guess.
 - `YYYY-MM-DD` is the platform-wide date dialect: the connector's `check_data_type`/`check_data_format` regexes and `evaluate_date_interval`'s lexicographic comparison all assume it, and it's the one format where string comparison *is* date comparison. Datapills for these fields are declared `type: "string"` (with a format hint), **not** `date_time` — a `date_time` declaration invites `parse_output` conversion, reintroducing the timezone ambiguity. Recipes convert string → datetime only at the last step before a `date_time` Data Table column write, where the timezone decision is explicit and owned by the recipe author.
 
+### 6.8 Never `instanceof` across the library boundary — brand-check instead
+The container script and the SDC library are **separate execution contexts with separate global constructors**. A `Date` minted by `getValues()` on a container-created Spreadsheet fails `value instanceof Date` *inside the library* — different `Date` constructor, `false` — and falls through to whatever the non-Date branch does, silently. Case history: `Util.toIsoDate` rejected a perfectly valid picker-entered Date as MALFORMED, and `Drive.normalizeDates` had been silently skipping normalization on this path since day one (masked only because no connector sheet carried a true Date until the expected-date field).
+
+The cross-context-safe check is the brand check: `Object.prototype.toString.call(value) === '[object Date]'`. This applies to **any** type check on values that may cross the boundary (`Array.isArray` is already brand-safe; `instanceof` never is). This is the JavaScript twin of the documented Ruby-side lesson (`is_a?` unreliability on connector response objects): *at a context boundary, ask what a value looks like, not where it came from.*
+
+### 6.9 Formatting changes presentation, not value
+Sheets number formats affect **display only**; `getValues()`, data validation, and every downstream consumer see the underlying value. Applying a date format to a text cell converts nothing (and Format → Plain text actively converts a true Date *into* text). The only way to change a cell's type is **re-entry**: set format to Automatic, delete contents, re-enter (via the picker for date cells). Corollary for validation: `setAllowInvalid(false)` blocks *new* invalid entry but does not evict pre-existing content — a stale value sits flagged-but-present until deleted. Free visual tell: text left-aligns, numbers/dates right-align by default.
+
 ---
 
-## 7. Known live bugs (fix with the next connector release)
+## 7. Known bugs and their status
 
-Recorded here so they ship with the next coordinated release rather than being rediscovered.
+Recorded so fixes ship with coordinated releases rather than being rediscovered.
 
-1. **`incumbent_split_field` kv drift.** Connector key: *"what field should we use to split data by supplier?"* GAS label: *"...split **the** data by supplier?"* Missing "the" → lookup returns nil → the parsed customer copy of this field is silently blank. (Masked today because the split field also rides the provision payload directly.)
-2. **`wfa_instructions` kv drift.** GAS label ends with a trailing period, which survives `strip.downcase`; the connector key has no period. Same silent nil.
-3. **`validate_config` → `lookup_has_values` details lambda:** calls `field_select` (missing receiver — should be `fields.select`). Latent `NoMethodError` that fires exactly when the check fails, converting a useful validation finding into an action crash.
-4. **Same block:** emits `"emtity"` instead of `"entity"` — the finding renders blank in `ValidationReport._toRows`, which reads `d.entity`.
-5. **Cosmetic:** `lookup_rows_by_name` is defined twice in `validate_config`; drop one.
+**Resolved in GAS library 1.4.x:** the `variant_count`/`variantCount` Labels key mismatch (silent zero-variant provisions; now also guarded at load), the `instanceof Date` boundary failures in `Util.toIsoDate` and `Drive.normalizeDates` (§6.8), and `ValidationReport.write`'s silent failure paths (now returns `{reason, detail}` — `no-verdict` with the response's top-level keys, `sheet-unavailable`, or `exception` — threaded into `_script_logs` by both orchestrators; note a verdict-less *provision* response is a normal state, not a warning).
+
+**Pending — next connector release:**
+1. **`incumbent_split_field` kv drift.** Connector key missing "the" vs. the GAS label → silent nil.
+2. **`wfa_instructions` kv drift.** GAS label has a trailing period; connector key doesn't → silent nil.
+3. **`validate_config` → `lookup_has_values`:** `field_select` missing receiver (should be `fields.select`) — latent `NoMethodError` firing exactly when the check fails.
+4. **Same block:** `"emtity"` typo → finding renders blank in `ValidationReport._toRows`.
+5. **Cosmetic:** duplicate `lookup_rows_by_name` definition; drop one.
+6. **`expected_date` kv key** must be the lowercased final label wording (`"what is the target completion date?"`), plus the `customer_definition` field addition.
+
+**Pending — container shim:** `validationResultsHtml_` buckets on `c.c_status` only; must mirror `toModel`'s `c.c_status || c.status` resolution or a plain-`status` verdict renders "✓ passed" over failures. Invitations menu item routes to the hardcoded-webhook bridge (`sendAllInvitations`) instead of the library flow (`sendInvitations`) — no payload_version, no logging, no Result.
 
 ---
 
@@ -150,9 +167,10 @@ Recorded here so they ship with the next coordinated release rather than being r
 
 Run all of these before calling a `1_customer` change done.
 
+0. **Version probe first.** `Logger.log(SDC.Version.LIBRARY)` from the container. If it isn't the version you just built, nothing below tests your changes (§5, pinning).
 1. **Three-way string check, mechanically.** For every added/renamed label: sheet cell ↔ `Labels` value ↔ connector kv key. Normalize (lowercase + trim) and compare programmatically. Eyes miss trailing periods; diffs don't.
 2. **Column check.** Every value cell is in column D; every affected row is ≥ 4 cells wide.
-3. **D6 check.** `1_customer!D6` still holds the variant count (until §6.1's permanent fix lands).
+3. **Labels guard check.** New Labels keys are added to the load-time guard list in `003_Schema.js`; the library loads without throwing.
 4. **Migration idempotency.** Run the migration twice on a copy of a deployed workbook; the second run must report no changes.
 5. **Preflight on an unmigrated copy** (if the standing guard from §5 isn't in place yet): confirm the failure message is survivable, and document the "run migration first" answer for support.
 6. **Fingerprint stability regression.** Run validate twice back-to-back with no edits and diff the two JSONs: `_meta.serialized_at` differs, **nothing else** — including `config_fingerprint`. This is the standing test that catches any volatile content that slipped in (§6.5).
@@ -163,11 +181,25 @@ Run all of these before calling a `1_customer` change done.
 
 ---
 
-## Appendix: file-to-concern map
+## 9. Troubleshooting: field errors on 1_customer
+
+The lesson underneath every case below: **check the lookup path before the cell value.** `TYPE()` on the cell you intended can return a clean result while the code reads a different cell — or no cell at all. The `debugCustomerSheet` diagnostic (container script; dumps every Labels lookup with locus, neighbor types, duplicate detection, and a char-code diff of near-miss labels) runs the whole tree in one pass; the branches below are what its output means.
+
+**Error names the field as *missing*** → the lookup found nothing. In order of likelihood: label text drift between the B-cell and `Labels` (case/edge-whitespace forgiven, otherwise exact — punctuation and quote style count); an **invisible character** surviving trim (NBSP `U+A0`, smart quote — undetectable by eye, exposed by the diagnostic's char-code diff); or a `Labels.key` typo in code (undefined key → null lookup; the load guard should have caught it — if not, the key isn't in the guard list).
+
+**Error says the value is *malformed/unrecognizable* (date fields)** → the lookup found the label but returned something the normalizer rejects. Suspects in order: **`instanceof` across the library boundary** (§6.8 — a true Date rejected by the library's type check; the diagnostic shows `[Date]` raw with `toIsoDate: null`, the signature contradiction); the **column-C interceptor** (`findValueRightOfLabel` takes the first non-blank of C/D/E — a stray space in C returns C's content, never reaching your D-cell; check `=LEN(C‹row›)`); a **text-that-looks-like-a-date or bare serial** in the cell (§6.9 — re-entry, not reformatting, is the fix); or **duplicate label rows** (migration appended a row after a manual add — the lookup matches the *first*, likely the one with the blank D; scan column B for near-twins).
+
+**Fix applied but the same error persists** → probe `SDC.Version.LIBRARY` (§5). Pinned container + edited-but-unpublished library reproduces the old behavior faithfully, including in diagnostics that resolve through `SDC.*`.
+
+**New `ReferenceError` after a paste-in fix** (e.g. "cell is not defined" at stage `serialize`) → identifier mismatch between a pasted line and its enclosing callback's parameter name; replace the whole function, not the line.
+
+**"ValidationReport.write did not complete"** → read the `reason` in the warning (`no-verdict` = envelope drift, the detail lists the response's top-level keys so the missing `_extractVerdict` candidate is identifiable; `sheet-unavailable`; `exception` = the real message). Note **two log destinations**: `console.warn` output lands in the **Executions panel**, not `_script_logs` — when a sheet-side log line is generic, check Executions for the underlying warning before concluding the reason is unlogged.
+
+---
 
 | File | Owns |
 |---|---|
-| `000_Util.js` | Boundary primitives — `findValueRightOfLabel`, `toIsoDate` (date normalization, §6.7) |
+| `000_Util.js` | Boundary primitives — `findValueRightOfLabel`, `toIsoDate` (date normalization §6.7, brand-checked §6.8) |
 | `003_Schema.js` | `Labels` (label strings), `CONNECTOR_SHEETS`, layout constants — the structural contract |
 | `005_Preflight.js` | Extraction from `1_customer` + required-field enforcement |
 | `003_Payload.js` | Wire shape + presence validation (`_requireArgs`) |
