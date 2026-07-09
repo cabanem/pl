@@ -1,15 +1,22 @@
 /**
- * user_task_snapshot.gs — v2
+ * user_task_snapshot.gs — v3
  * Portal users × task state snapshot (standalone testing tool)
  *
- * Change from v1: task state now comes from the /task-state API recipe instead of a
- * spreadsheet. Both fetches are now twins over one generic paginated caller (fetchPaged_).
- * No new storage, no second writer — both endpoints read live state at run time.
+ * Change from v2: the /task-state call now sends a JSON request body carrying
+ * `project_start_date` (plus the round-tripped `page_token`). Because Workato GET
+ * endpoints read query parameters — not bodies — the task-state call is now a POST.
+ * Ensure the endpoint's method is POST and its request schema declares BOTH fields:
+ *
+ *   { "project_start_date": string (optional), "page_token": string (optional) }
+ *
+ * The caller transports project_start_date verbatim; its semantics (equality vs.
+ * on-or-after, date format) are owned by the recipe contract, not this script.
+ * /portal-users is unchanged: GET, page_token as a query param.
  *
  * Pipeline (frozen-snapshot model — fetches are the only impure stages):
  *   runUserTaskSnapshot()
  *     users = fetchPortalUsers_()       // impure: GET /portal-users, paginated
- *     tasks = fetchTaskState_()         // impure: GET /task-state, paginated
+ *     tasks = fetchTaskState_()         // impure: POST /task-state, paginated
  *     recs  = buildJoin_(users, tasks)  // pure: normalize, merge, aggregate
  *     recs.forEach(classify_)           // pure, total: every record gets exactly one bucket
  *     writeSheets_(recs)                // idempotent rewrite: Join + Summary tabs
@@ -18,14 +25,15 @@
  *   WFA_API_TOKEN         required  one API-platform key scoped to the collection holding BOTH endpoints
  *   WFA_USERS_ENDPOINT    required  e.g. https://apim.workato.com/<collection>/portal-users
  *   TASK_STATE_ENDPOINT   required  e.g. https://apim.workato.com/<collection>/task-state
+ *   PROJECT_START_DATE    optional  sent in the /task-state body when set (e.g. 2026-07-01);
+ *                                   omit to send no filter. Make it required here instead by
+ *                                   flipping the cfg_ flag in fetchTaskState_ if the recipe demands it.
  *   OUTPUT_SPREADSHEET_ID optional  omit if this script is container-bound to the output sheet
  *
  * Expected response contracts (both endpoints, same envelope shape):
  *   /portal-users: { users: [{user_id,name,email,status,groups:[{group_id,name}]}], continuation_token, ... }
  *   /task-state:   { tasks: [{email,status,updated_at,supplier_id}],               continuation_token, ... }
  *   Grain of /task-state: one row per user × request (fan-out is intentional).
- *   If your recipe uses a different list key or field names, the ONLY places to touch
- *   are the two thin wrappers fetchPortalUsers_ / fetchTaskState_.
  *
  * GasToolkit note: cfg_() and log_() are deliberate seams. To move onto the library,
  * rewire cfg_ -> ConfigStore and log_ -> AppLogger; nothing downstream changes.
@@ -99,28 +107,59 @@ function runUserTaskSnapshot() {
 }
 
 // ---------------------------------------------------------------------------
-// Generic paginated GET against an API-platform endpoint.
-// Contract: response body carries the list under `listKey` and a nullable
-// `continuation_token`; token round-trips as the `page_token` query param.
+// Generic paginated fetch against an API-platform endpoint.
+//
+// opts:
+//   method  'get' (default) | 'post'
+//   params  object of request parameters, sent every page:
+//           GET  -> query string;  POST -> JSON body (contentType application/json)
+// The continuation token is merged into params as `page_token` on each pass, so
+// pagination works identically for both transports.
+//
 // Asserts the list key exists — a missing key means a contract mismatch, and
 // silently treating it as an empty page would report every user as taskless.
 // ---------------------------------------------------------------------------
 
-function fetchPaged_(endpointUrl, listKey) {
+function fetchPaged_(endpointUrl, listKey, opts) {
+  opts = opts || {};
+  var method = (opts.method || 'get').toLowerCase();
   var token = cfg_('WFA_API_TOKEN', true);
   var items = [];
   var pageToken = null;
   var pages = 0;
 
   do {
-    var url = endpointUrl + (pageToken ? '?page_token=' + encodeURIComponent(pageToken) : '');
-    var resp = UrlFetchApp.fetch(url, {
+    // Rebuild params each pass: base params + current page token.
+    var params = {};
+    var base = opts.params || {};
+    for (var k in base) {
+      if (base.hasOwnProperty(k) && base[k] !== null && base[k] !== undefined && base[k] !== '') {
+        params[k] = base[k];
+      }
+    }
+    if (pageToken) params.page_token = pageToken;
+
+    var url = endpointUrl;
+    var fetchOpts = {
+      method: method,
       headers: { 'api-token': token },
       muteHttpExceptions: true
-    });
+    };
+
+    if (method === 'get') {
+      var qs = Object.keys(params).map(function (key) {
+        return encodeURIComponent(key) + '=' + encodeURIComponent(params[key]);
+      }).join('&');
+      if (qs) url += '?' + qs;
+    } else {
+      fetchOpts.contentType = 'application/json';
+      fetchOpts.payload = JSON.stringify(params);
+    }
+
+    var resp = UrlFetchApp.fetch(url, fetchOpts);
     if (resp.getResponseCode() !== 200) {
-      throw new Error('Fetch failed [' + endpointUrl + ']: HTTP ' + resp.getResponseCode() +
-                      ' — ' + resp.getContentText().slice(0, 500));
+      throw new Error('Fetch failed [' + method.toUpperCase() + ' ' + endpointUrl + ']: HTTP ' +
+                      resp.getResponseCode() + ' — ' + resp.getContentText().slice(0, 500));
     }
     var body = JSON.parse(resp.getContentText());
     if (!(listKey in body)) {
@@ -138,7 +177,7 @@ function fetchPaged_(endpointUrl, listKey) {
 }
 
 // ---------------------------------------------------------------------------
-// Impure stage 1: portal users. Thin wrapper — endpoint + list key + passthrough.
+// Impure stage 1: portal users. Thin wrapper — GET, no extra params.
 // ---------------------------------------------------------------------------
 
 function fetchPortalUsers_() {
@@ -147,13 +186,18 @@ function fetchPortalUsers_() {
 }
 
 // ---------------------------------------------------------------------------
-// Impure stage 2: task state. Thin wrapper — normalizes each task row at the
-// boundary so everything downstream sees exactly {email, status, updated_at,
-// supplier_id} regardless of incidental extras the recipe emits.
+// Impure stage 2: task state. POST with JSON body {project_start_date?, page_token?}.
+// Normalizes each task row at the boundary so everything downstream sees exactly
+// {email, status, updated_at, supplier_id} regardless of incidental extras.
 // ---------------------------------------------------------------------------
 
 function fetchTaskState_() {
-  var page = fetchPaged_(cfg_('TASK_STATE_ENDPOINT', true), 'tasks');
+  var page = fetchPaged_(cfg_('TASK_STATE_ENDPOINT', true), 'tasks', {
+    method: 'post',
+    params: {
+      project_start_date: cfg_('PROJECT_START_DATE', false) // flip to `true` if the recipe requires it
+    }
+  });
 
   var tasks = page.items
     .filter(function (t) { return t && t.email; })
@@ -328,6 +372,7 @@ function writeSheets_(recs, runId, portal, taskState) {
     ['run_id',             runId],
     ['portal_snapshot_at', portal.fetchedAt],
     ['task_snapshot_at',   taskState.fetchedAt],
+    ['project_start_date', cfg_('PROJECT_START_DATE', false) || '(none)'],
     ['portal_users_total', portal.users.length],
     ['task_rows_total',    taskState.tasks.length],
     ['join_records_total', recs.length],
@@ -356,7 +401,7 @@ function setupJoinFormatting() {
     'NEVER_LOGGED_IN': '#f4cccc',
     'ORPHAN_USER':     '#efefef', // grey — hygiene
     'STALLED':         '#fce5cd', // amber
-    'IN_PROGRESS':     '#fce5cd',
+    'IN_PROGRESS':     '#fce5cd', // amber
     'COMPLETED':       '#d9ead3'  // green
   };
 
