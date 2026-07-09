@@ -1,28 +1,33 @@
 /**
- * user_task_snapshot.gs — Portal users × task state snapshot (standalone testing tool)
+ * user_task_snapshot.gs — v2
+ * Portal users × task state snapshot (standalone testing tool)
  *
- * Answers: which portal users have logged on, and which have completed their tasks.
- * Grain: one row per email. Snapshot semantics: full clear-and-rewrite, no diffing.
+ * Change from v1: task state now comes from the /task-state API recipe instead of a
+ * spreadsheet. Both fetches are now twins over one generic paginated caller (fetchPaged_).
+ * No new storage, no second writer — both endpoints read live state at run time.
  *
  * Pipeline (frozen-snapshot model — fetches are the only impure stages):
  *   runUserTaskSnapshot()
- *     users = fetchPortalUsers_()       // impure: API recipe, paginated
- *     tasks = fetchTaskState_()         // impure: provider seam (sheet-backed default)
+ *     users = fetchPortalUsers_()       // impure: GET /portal-users, paginated
+ *     tasks = fetchTaskState_()         // impure: GET /task-state, paginated
  *     recs  = buildJoin_(users, tasks)  // pure: normalize, merge, aggregate
  *     recs.forEach(classify_)           // pure, total: every record gets exactly one bucket
  *     writeSheets_(recs)                // idempotent rewrite: Join + Summary tabs
  *
- * Script Properties (File > Project properties > Script properties):
- *   WFA_USERS_API_TOKEN        required  API-platform key scoped to the portal-users collection
- *   WFA_USERS_ENDPOINT         required  e.g. https://apim.workato.com/<collection>/portal-users
- *   TASK_STATE_SPREADSHEET_ID  required* spreadsheet holding task state (see fetchTaskState_)
- *   TASK_STATE_RANGE           required* e.g. TaskState!A1:D  (header row: email,status,updated_at,supplier_id)
- *   OUTPUT_SPREADSHEET_ID      optional  omit if this script is container-bound to the output sheet
+ * Script Properties:
+ *   WFA_API_TOKEN         required  one API-platform key scoped to the collection holding BOTH endpoints
+ *   WFA_USERS_ENDPOINT    required  e.g. https://apim.workato.com/<collection>/portal-users
+ *   TASK_STATE_ENDPOINT   required  e.g. https://apim.workato.com/<collection>/task-state
+ *   OUTPUT_SPREADSHEET_ID optional  omit if this script is container-bound to the output sheet
  *
- *   * required by the default sheet-backed provider only. Swapping fetchTaskState_ for a
- *     data-tables read or a second thin API recipe replaces these two keys with your own.
+ * Expected response contracts (both endpoints, same envelope shape):
+ *   /portal-users: { users: [{user_id,name,email,status,groups:[{group_id,name}]}], continuation_token, ... }
+ *   /task-state:   { tasks: [{email,status,updated_at,supplier_id}],               continuation_token, ... }
+ *   Grain of /task-state: one row per user × request (fan-out is intentional).
+ *   If your recipe uses a different list key or field names, the ONLY places to touch
+ *   are the two thin wrappers fetchPortalUsers_ / fetchTaskState_.
  *
- * GasToolkit note: cfg_() and log_() below are deliberate seams. To move onto the library,
+ * GasToolkit note: cfg_() and log_() are deliberate seams. To move onto the library,
  * rewire cfg_ -> ConfigStore and log_ -> AppLogger; nothing downstream changes.
  */
 
@@ -94,84 +99,74 @@ function runUserTaskSnapshot() {
 }
 
 // ---------------------------------------------------------------------------
-// Impure stage 1: portal users via the API recipe (GET /portal-users)
-// Contract v1.0: { users: [{user_id,name,email,status,groups:[{group_id,name}]}],
-//                  continuation_token, fetched_at, ... }
+// Generic paginated GET against an API-platform endpoint.
+// Contract: response body carries the list under `listKey` and a nullable
+// `continuation_token`; token round-trips as the `page_token` query param.
+// Asserts the list key exists — a missing key means a contract mismatch, and
+// silently treating it as an empty page would report every user as taskless.
 // ---------------------------------------------------------------------------
 
-function fetchPortalUsers_() {
-  var token = cfg_('WFA_USERS_API_TOKEN', true);
-  var base  = cfg_('WFA_USERS_ENDPOINT', true);
-  var users = [];
+function fetchPaged_(endpointUrl, listKey) {
+  var token = cfg_('WFA_API_TOKEN', true);
+  var items = [];
   var pageToken = null;
   var pages = 0;
 
   do {
-    var url = base + (pageToken ? '?page_token=' + encodeURIComponent(pageToken) : '');
+    var url = endpointUrl + (pageToken ? '?page_token=' + encodeURIComponent(pageToken) : '');
     var resp = UrlFetchApp.fetch(url, {
       headers: { 'api-token': token },
       muteHttpExceptions: true
     });
     if (resp.getResponseCode() !== 200) {
-      throw new Error('Portal users fetch failed: HTTP ' + resp.getResponseCode() +
+      throw new Error('Fetch failed [' + endpointUrl + ']: HTTP ' + resp.getResponseCode() +
                       ' — ' + resp.getContentText().slice(0, 500));
     }
     var body = JSON.parse(resp.getContentText());
-    Array.prototype.push.apply(users, body.users || []);
+    if (!(listKey in body)) {
+      throw new Error('Contract mismatch [' + endpointUrl + ']: response has no "' + listKey +
+                      '" key. Top-level keys: ' + Object.keys(body).join(', '));
+    }
+    Array.prototype.push.apply(items, body[listKey] || []);
     pageToken = body.continuation_token || null;
     pages++;
-    if (pages > 50) throw new Error('Pagination runaway: >50 pages; aborting.');
+    if (pages > 50) throw new Error('Pagination runaway [' + endpointUrl + ']: >50 pages; aborting.');
   } while (pageToken);
 
-  log_('portal users: ' + users.length + ' across ' + pages + ' page(s)');
-  return { users: users, fetchedAt: new Date().toISOString() };
+  log_(listKey + ': ' + items.length + ' across ' + pages + ' page(s)');
+  return { items: items, fetchedAt: new Date().toISOString() };
 }
 
 // ---------------------------------------------------------------------------
-// Impure stage 2: task state provider seam.
-// Required yield per task: { email, status, updated_at, supplier_id? }
-//
-// Default implementation reads a sheet range (header row: email, status,
-// updated_at, supplier_id — order-independent, matched by header name).
-// To source from a data-tables export or a second thin API recipe instead,
-// replace this function body; the yield contract is the only thing that matters.
+// Impure stage 1: portal users. Thin wrapper — endpoint + list key + passthrough.
+// ---------------------------------------------------------------------------
+
+function fetchPortalUsers_() {
+  var page = fetchPaged_(cfg_('WFA_USERS_ENDPOINT', true), 'users');
+  return { users: page.items, fetchedAt: page.fetchedAt };
+}
+
+// ---------------------------------------------------------------------------
+// Impure stage 2: task state. Thin wrapper — normalizes each task row at the
+// boundary so everything downstream sees exactly {email, status, updated_at,
+// supplier_id} regardless of incidental extras the recipe emits.
 // ---------------------------------------------------------------------------
 
 function fetchTaskState_() {
-  var ssId  = cfg_('TASK_STATE_SPREADSHEET_ID', true);
-  var range = cfg_('TASK_STATE_RANGE', true);
+  var page = fetchPaged_(cfg_('TASK_STATE_ENDPOINT', true), 'tasks');
 
-  var values = SpreadsheetApp.openById(ssId).getRange(range).getValues();
-  if (values.length < 2) {
-    log_('task state: no data rows in ' + range);
-    return { tasks: [], fetchedAt: new Date().toISOString() };
-  }
-
-  var headers = values[0].map(function (h) { return String(h).trim().toLowerCase(); });
-  var col = {
-    email:       headers.indexOf('email'),
-    status:      headers.indexOf('status'),
-    updated_at:  headers.indexOf('updated_at'),
-    supplier_id: headers.indexOf('supplier_id') // optional
-  };
-  if (col.email < 0 || col.status < 0) {
-    throw new Error('Task state range must include "email" and "status" headers. Found: ' + headers.join(', '));
-  }
-
-  var tasks = [];
-  for (var i = 1; i < values.length; i++) {
-    var row = values[i];
-    if (!row[col.email]) continue; // skip blanks
-    tasks.push({
-      email:       String(row[col.email]),
-      status:      String(row[col.status]).trim(),
-      updated_at:  col.updated_at >= 0 ? asIso_(row[col.updated_at]) : null,
-      supplier_id: col.supplier_id >= 0 && row[col.supplier_id] !== '' ? String(row[col.supplier_id]) : null
+  var tasks = page.items
+    .filter(function (t) { return t && t.email; })
+    .map(function (t) {
+      return {
+        email:       String(t.email),
+        status:      String(t.status || '').trim(),
+        updated_at:  asIso_(t.updated_at),
+        supplier_id: t.supplier_id != null && t.supplier_id !== '' ? String(t.supplier_id) : null
+      };
     });
-  }
 
-  log_('task state: ' + tasks.length + ' task rows');
-  return { tasks: tasks, fetchedAt: new Date().toISOString() };
+  return { tasks: tasks, fetchedAt: page.fetchedAt };
 }
 
 function asIso_(v) {
@@ -231,10 +226,10 @@ function buildJoin_(portal, taskState, runId) {
 
     if (dupEmails[email]) flags.push('duplicate_portal_email');
     if (a) {
-      var unknown = Object.keys(a.unknownStatuses);
-      unknown.forEach(function (s) { flags.push('unknown_task_status:' + s); });
-      var sids = Object.keys(a.supplierIds);
-      if (sids.length > 1) flags.push('multi_supplier_email');
+      Object.keys(a.unknownStatuses).forEach(function (s) {
+        flags.push('unknown_task_status:' + s);
+      });
+      if (Object.keys(a.supplierIds).length > 1) flags.push('multi_supplier_email');
     }
 
     return {
