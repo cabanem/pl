@@ -1,0 +1,306 @@
+{
+  "_recipe": "API-006 Fetch activity history",
+  "_contract_version": "2.0 (option B: bundled users + events, single events cursor)",
+  "_notes": [
+    "Trigger changes: (1) DELETE the continuation_token PATH parameter; (2) ADD continuation_token to the request BODY schema (one transport per endpoint); (3) REPLACE the 200 body schema with response_200_body_schema below.",
+    "Step 2 find_users: continuation_token input must be CLEARED (users are unpaginated by contract; the trigger token belongs to the events cursor).",
+    "Step 4 mapping: ok=true (static); users <- find_users Users list pill; users_truncated_token <- find_users Continuation token pill; activity_records <- lookup_events records list pill; continuation_token <- lookup_events Continuation token pill.",
+    "Step 3 lookup_events: continuation_token input now maps from the request BODY pill instead of path_params.",
+    "Step 6 mapping (500): ok=false (static); error_message <- catch error datapills.",
+    "users[] field names deliberately mirror performed_by (user_id/user_name/user_email/status/groups) so the payload speaks one vocabulary."
+  ],
+  "request_body_schema": [
+    {
+      "name": "project_start_date",
+      "type": "date_time",
+      "optional": false,
+      "label": "project_start_date",
+      "control_type": "date",
+      "render_input": "date_conversion",
+      "parse_output": "date_conversion"
+    },
+    {
+      "name": "continuation_token",
+      "type": "string",
+      "optional": true,
+      "label": "continuation_token",
+      "control_type": "text",
+      "hint": "Events cursor from the previous response. Omit for the first page."
+    }
+  ],
+  "response_200_body_schema": [
+    {
+      "name": "ok",
+      "type": "boolean",
+      "optional": false,
+      "label": "ok",
+      "control_type": "checkbox",
+      "render_input": "boolean_conversion",
+      "parse_output": "boolean_conversion",
+      "toggle_hint": "Select from option list",
+      "toggle_field": {
+        "label": "ok",
+        "control_type": "text",
+        "toggle_hint": "Use custom value",
+        "name": "ok",
+        "type": "boolean",
+        "optional": false
+      }
+    },
+    {
+      "name": "error_message",
+      "type": "string",
+      "optional": true,
+      "label": "error_message",
+      "hint": "Null if 'ok' is True",
+      "control_type": "text"
+    },
+    {
+      "name": "users",
+      "type": "array",
+      "of": "object",
+      "optional": true,
+      "label": "users",
+      "hint": "Complete roster (unpaginated). Mirror of performed_by field names.",
+      "properties": [
+        {
+          "name": "user_id",
+          "type": "string",
+          "optional": true,
+          "label": "user_id",
+          "control_type": "text"
+        },
+        {
+          "name": "user_name",
+          "type": "string",
+          "optional": true,
+          "label": "user_name",
+          "control_type": "text"
+        },
+        {
+          "name": "user_email",
+          "type": "string",
+          "optional": true,
+          "label": "user_email",
+          "control_type": "text"
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "optional": true,
+          "label": "status",
+          "control_type": "text"
+        },
+        {
+          "name": "groups",
+          "type": "array",
+          "optional": true,
+          "label": "groups",
+          "properties": [
+            {
+              "name": "group_id",
+              "type": "string",
+              "optional": true,
+              "label": "group_id",
+              "control_type": "text"
+            },
+            {
+              "name": "group_name",
+              "type": "string",
+              "optional": true,
+              "label": "group_name",
+              "control_type": "text"
+            }
+          ],
+          "of": "object"
+        }
+      ]
+    },
+    {
+      "name": "users_truncated_token",
+      "type": "string",
+      "optional": true,
+      "label": "users_truncated_token",
+      "control_type": "text",
+      "hint": "Map from find_users Continuation token pill. Non-null means >500 portal users: the roster is INCOMPLETE and the caller must abort."
+    },
+    {
+      "name": "activity_records",
+      "type": "array",
+      "optional": true,
+      "label": "activity_records",
+      "properties": [
+        {
+          "name": "id",
+          "type": "string",
+          "optional": true,
+          "label": "id",
+          "control_type": "text"
+        },
+        {
+          "name": "record_id",
+          "type": "string",
+          "optional": true,
+          "label": "record_id",
+          "control_type": "text"
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "optional": true,
+          "label": "kind",
+          "control_type": "text"
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": true,
+          "label": "description",
+          "control_type": "text"
+        },
+        {
+          "name": "comment_text",
+          "type": "string",
+          "optional": true,
+          "label": "comment_text",
+          "control_type": "text"
+        },
+        {
+          "name": "performed_at",
+          "type": "date_time",
+          "optional": true,
+          "label": "performed_at",
+          "control_type": "date_time",
+          "render_input": "date_time_conversion",
+          "parse_output": "date_time_conversion"
+        },
+        {
+          "name": "performed_by",
+          "type": "object",
+          "optional": true,
+          "label": "performed_by",
+          "properties": [
+            {
+              "name": "user_id",
+              "type": "string",
+              "optional": true,
+              "label": "user_id",
+              "control_type": "text"
+            },
+            {
+              "name": "user_name",
+              "type": "string",
+              "optional": true,
+              "label": "user_name",
+              "control_type": "text"
+            },
+            {
+              "name": "user_email",
+              "type": "string",
+              "optional": true,
+              "label": "user_email",
+              "control_type": "text"
+            },
+            {
+              "name": "status",
+              "type": "string",
+              "optional": true,
+              "label": "status",
+              "control_type": "text"
+            },
+            {
+              "name": "groups",
+              "type": "array",
+              "optional": true,
+              "label": "groups",
+              "properties": [
+                {
+                  "name": "group_id",
+                  "type": "string",
+                  "optional": true,
+                  "label": "group_id",
+                  "control_type": "text"
+                },
+                {
+                  "name": "group_name",
+                  "type": "string",
+                  "optional": true,
+                  "label": "group_name",
+                  "control_type": "text"
+                }
+              ],
+              "of": "object"
+            }
+          ]
+        },
+        {
+          "name": "workflow_stage",
+          "type": "object",
+          "optional": true,
+          "label": "workflow_stage",
+          "properties": [
+            {
+              "name": "workflow_stage_name",
+              "type": "string",
+              "optional": true,
+              "label": "workflow_stage_name",
+              "control_type": "text"
+            }
+          ]
+        },
+        {
+          "name": "previous_workflow_stage",
+          "type": "object",
+          "optional": true,
+          "label": "previous_workflow_stage",
+          "properties": [
+            {
+              "name": "previous_wf_stage_name",
+              "type": "string",
+              "optional": true,
+              "label": "previous_wf_stage_name",
+              "control_type": "text"
+            }
+          ]
+        }
+      ],
+      "of": "object"
+    },
+    {
+      "name": "continuation_token",
+      "type": "string",
+      "optional": true,
+      "label": "continuation_token",
+      "control_type": "text",
+      "hint": "EVENTS cursor only (from lookup_events). Round-trip in the next request body. Null = last page."
+    }
+  ],
+  "response_500_body_schema": [
+    {
+      "name": "ok",
+      "type": "boolean",
+      "optional": false,
+      "label": "ok",
+      "control_type": "checkbox",
+      "render_input": "boolean_conversion",
+      "parse_output": "boolean_conversion",
+      "toggle_hint": "Select from option list",
+      "toggle_field": {
+        "label": "ok",
+        "control_type": "text",
+        "toggle_hint": "Use custom value",
+        "name": "ok",
+        "type": "boolean",
+        "optional": false
+      }
+    },
+    {
+      "name": "error_message",
+      "type": "string",
+      "optional": true,
+      "label": "error_message",
+      "control_type": "text",
+      "hint": "Map from the catch block's error datapills."
+    }
+  ]
+}
