@@ -1,13 +1,14 @@
 {
   "_recipe": "API-006 Fetch activity history",
-  "_contract_version": "2.0 (option B: bundled users + events, single events cursor)",
+  "_contract_version": "2.1 (option B + bundled requests-table search)",
   "_notes": [
-    "Trigger changes: (1) DELETE the continuation_token PATH parameter; (2) ADD continuation_token to the request BODY schema (one transport per endpoint); (3) REPLACE the 200 body schema with response_200_body_schema below.",
-    "Step 2 find_users: continuation_token input must be CLEARED (users are unpaginated by contract; the trigger token belongs to the events cursor).",
-    "Step 4 mapping: ok=true (static); users <- find_users Users list pill; users_truncated_token <- find_users Continuation token pill; activity_records <- lookup_events records list pill; continuation_token <- lookup_events Continuation token pill.",
-    "Step 3 lookup_events: continuation_token input now maps from the request BODY pill instead of path_params.",
-    "Step 6 mapping (500): ok=false (static); error_message <- catch error datapills.",
-    "users[] field names deliberately mirror performed_by (user_id/user_name/user_email/status/groups) so the payload speaks one vocabulary."
+    "Trigger changes: (1) DELETE the continuation_token PATH parameter; (2) ADD continuation_token to the request BODY schema; (3) REPLACE the 200 body schema with response_200_body_schema below.",
+    "NEW step (in the try, alongside the other two): workato_workflow_task.search_requests \u2014 app = MARS RC Data Collection, NO created_at filter (unwindowed on purpose: enables EVENTS_MISSING detection), limit = 200 (action maximum), Next page token input CLEARED.",
+    "Step 2 find_users: continuation_token input CLEARED (users unpaginated by contract).",
+    "Step 3 lookup_events: continuation_token input maps from the request BODY pill (the one true cursor).",
+    "Step 4 mapping: ok=true; users <- find_users Users pill; users_truncated_token <- find_users Continuation token pill; requests <- search_requests Request list pill (flatten stage_name, nest active_task per schema, map chosen table columns into context); requests_truncated_token <- search_requests Next page token pill; activity_records <- lookup_events records pill; continuation_token <- lookup_events Continuation token pill.",
+    "Step 6 mapping (500): ok=false; error_message <- catch error datapills.",
+    "users[] and all embedded user objects mirror performed_by field names (user_id/user_name/user_email/status) \u2014 one vocabulary across the payload."
   ],
   "request_body_schema": [
     {
@@ -123,6 +124,163 @@
       "label": "users_truncated_token",
       "control_type": "text",
       "hint": "Map from find_users Continuation token pill. Non-null means >500 portal users: the roster is INCOMPLETE and the caller must abort."
+    },
+    {
+      "name": "requests",
+      "type": "array",
+      "of": "object",
+      "optional": true,
+      "label": "requests",
+      "hint": "From search_requests, UNWINDOWED (no project_start_date filter) so table-only records are detectable. Limit 200 (action max); complete on every page, taken from page 1.",
+      "properties": [
+        {
+          "name": "record_id",
+          "type": "string",
+          "optional": false,
+          "label": "record_id",
+          "control_type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "date_time",
+          "optional": true,
+          "label": "created_at",
+          "control_type": "date_time",
+          "render_input": "date_time_conversion",
+          "parse_output": "date_time_conversion"
+        },
+        {
+          "name": "updated_at",
+          "type": "date_time",
+          "optional": true,
+          "label": "updated_at",
+          "control_type": "date_time",
+          "render_input": "date_time_conversion",
+          "parse_output": "date_time_conversion"
+        },
+        {
+          "name": "stage_name",
+          "type": "string",
+          "optional": true,
+          "label": "stage_name",
+          "control_type": "text",
+          "hint": "Flatten from the Request's Stage object \u2014 map the stage name pill."
+        },
+        {
+          "name": "active_task",
+          "type": "object",
+          "optional": true,
+          "label": "active_task",
+          "hint": "Empty/null when the request has no active task (e.g. completed).",
+          "properties": [
+            {
+              "name": "task_id",
+              "type": "string",
+              "optional": true,
+              "label": "task_id",
+              "control_type": "text"
+            },
+            {
+              "name": "task_name",
+              "type": "string",
+              "optional": true,
+              "label": "task_name",
+              "control_type": "text"
+            },
+            {
+              "name": "status",
+              "type": "string",
+              "optional": true,
+              "label": "status",
+              "control_type": "text"
+            },
+            {
+              "name": "due_date",
+              "type": "date_time",
+              "optional": true,
+              "label": "due_date",
+              "control_type": "date_time",
+              "render_input": "date_time_conversion",
+              "parse_output": "date_time_conversion"
+            },
+            {
+              "name": "assigned_user",
+              "type": "object",
+              "optional": true,
+              "label": "assigned_user",
+              "properties": [
+                {
+                  "name": "user_id",
+                  "type": "string",
+                  "optional": true,
+                  "label": "user_id",
+                  "control_type": "text"
+                },
+                {
+                  "name": "user_name",
+                  "type": "string",
+                  "optional": true,
+                  "label": "user_name",
+                  "control_type": "text"
+                },
+                {
+                  "name": "user_email",
+                  "type": "string",
+                  "optional": true,
+                  "label": "user_email",
+                  "control_type": "text"
+                },
+                {
+                  "name": "status",
+                  "type": "string",
+                  "optional": true,
+                  "label": "status",
+                  "control_type": "text"
+                }
+              ]
+            },
+            {
+              "name": "assigned_group",
+              "type": "object",
+              "optional": true,
+              "label": "assigned_group",
+              "hint": "Populated instead of assigned_user when task is group-assigned. Adjust field names to the actual pills.",
+              "properties": [
+                {
+                  "name": "group_id",
+                  "type": "string",
+                  "optional": true,
+                  "label": "group_id",
+                  "control_type": "text"
+                },
+                {
+                  "name": "group_name",
+                  "type": "string",
+                  "optional": true,
+                  "label": "group_name",
+                  "control_type": "text"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "context",
+          "type": "object",
+          "optional": true,
+          "label": "context",
+          "hint": "Free-form: map whichever data-table columns are useful (supplier name, correlation_id, ...). The GAS reader spreads whatever keys appear here into Records-tab columns dynamically \u2014 no script change needed per column.",
+          "properties": []
+        }
+      ]
+    },
+    {
+      "name": "requests_truncated_token",
+      "type": "string",
+      "optional": true,
+      "label": "requests_truncated_token",
+      "control_type": "text",
+      "hint": "Map from search_requests Next page token pill. Non-null means >200 requests: the table view is INCOMPLETE and the caller must abort."
     },
     {
       "name": "activity_records",
