@@ -1,6 +1,6 @@
 # SDC Platform Expansion Roadmap — Master Data Collection & Strategic Tracks
 
-**Status:** DRAFT v0.2 — for internal review
+**Status:** DRAFT v0.3 — for internal review
 **Author:** Emily [last name]
 **Date:** [date]
 **Audience:** [leadership stakeholders]
@@ -98,8 +98,10 @@ surface them empirically rather than by manual audit.
 
 - The platform is maintained by **one developer** who also carries live-platform
   support and an active maintenance backlog.
-- Timeline assumptions below are based on **[PLACEHOLDER: X%]** of that
-  developer's capacity being allocated to this initiative.
+- Timeline ranges are **elapsed calendar time** and assume the established
+  working pattern: multiple concurrent workstreams, scattered rather than
+  contiguous focus. They are based on **[PLACEHOLDER: X%]** of the developer's
+  capacity being allocated to this initiative (D4).
 
 ---
 
@@ -160,7 +162,11 @@ through the platform — request, submission, validation, review, delivery.
    layer), not hard-coded; requirement source: [PLACEHOLDER: VMS configuration
    requirements? pending Q3]. *This workstream is also Track C's first item —
    see §4.4, capability C1.*
-5. **[A] Pilot execution & feedback** — run with [PLACEHOLDER: pilot client —
+5. **[A] Mid-phase stakeholder walkthrough** — skeleton templates and client
+   respondent flow demonstrated to the implementation team and pilot client
+   contact *before* build completion, so feedback lands while change is cheap.
+   Recorded sign-off gates workstream 6.
+6. **[A] Pilot execution & feedback** — run with [PLACEHOLDER: pilot client —
    pending Q5], capture deltas.
 
 **Explicitly out of scope for Phase 1:** the Respondent abstraction, ongoing
@@ -306,7 +312,7 @@ a **per-client capability, not platform core**.
 |---|---|---|---|
 | D1 | Which data domains are in the Phase 1 pilot scope | Workstream 1.2 | [date — before Phase 1 start] |
 | D2 | One-time collection vs. ongoing maintenance (Q4) | Phase 1 timeline commitment | [date — before Phase 1 estimate is committed] |
-| D3 | Pilot client / implementation selection | Workstream 1.5 | [Phase 1 midpoint] |
+| D3 | Pilot client / implementation selection | Workstreams 1.5–1.6 | [Phase 1 midpoint] |
 | D4 | Capacity allocation: [X%] of developer time formally allocated | Entire plan | [before Phase 1 start] |
 | D5 | Third use case prioritization | Phase 3 | [Phase 2 midpoint] |
 | D6 | VMS platform priority order for Track C | C3 scoping sequence | [Phase 2 midpoint] |
@@ -331,6 +337,7 @@ a **per-client capability, not platform core**.
 | Single maintainer; live-platform incidents preempt roadmap work | Timeline slip | Explicit capacity allocation (D4); ranges already assume [X%]; maintenance backlog triaged before Phase 1 start |
 | Q4 answered "ongoing" late in Phase 1 | Rework; timeline swing | D2 required *before* Phase 1 estimate is committed |
 | Cardinality assumptions run deeper than audit reveals | Phase 1 scope growth | Audit is workstream #1, before build; static analysis tooling reduces discovery risk |
+| Requirements or stakeholder feedback arrive after build ("nearly done" rework) | Rework; historically the largest schedule-variance driver on this platform | D1/D2 answered before estimates commit; mid-phase walkthrough (Phase 1 WS5) moves feedback to where change is cheap; pilot sits inside Phase 1 so discovery lands inside the estimate |
 | Validation source of truth is external and shifting | Validation rework | Rules live in the reference data layer from day one (Phase 1 WS4); updates are data changes, not code changes |
 | Premature abstraction pressure ("build the platform now") | Phase 2 built on speculation | Sequencing argument in §3; phases gated on evidence |
 | Pressure to date the Integration track | Speculative commitments on unscoped vendor APIs | Gates-only policy stated in §4.4; per-vendor sizing at gate opening; D7 de-risks the longest lead item early |
@@ -361,19 +368,40 @@ Estimates are by analogy to completed platform work, not summed task lists.
 Ranges are widened to account for coordination overhead (pilot client,
 implementation team) absent from prior solo builds.
 
-| Analogous prior work | Actual duration | Informs |
-|---|---|---|
-| [Phase 0 platform redesign — schema, state machines, build queue] | [X] | Phase 2 sizing |
-| [Provisioning chain build + debugging cycle] | [X] | Phase 1 workstreams 1.1/1.3 |
-| [Portal (WFA) request page development] | [X] | Phase 1 workstream 1.3 |
-| [Watchdog/observability build] | [X] | Phase 2 workstream 6 |
-| [Schema version migration (1.2→1.3)] | [X] | Phase 2 workstream 5 |
-| [Lookup/reference data handling in template pipeline] | [X] | Phase 2 workstream 4 (catalog) |
+Durations below are elapsed calendar time under the interleaved working pattern,
+derived from project history; entries marked *(derived — confirm)* await the
+maintainer's confirmation.
 
-**Calibration note:** fill in actual durations from project history, then check
-each phase range against the analogs. If a range and its analogs disagree,
-trust the analogs. Track C items are not estimated here by design — each is
-sized when its gate opens.
+| Analogous prior work | Elapsed duration | Informs |
+|---|---|---|
+| Full platform build, first iteration (incl. two requirement-driven rebuilds) | ~3 months | Program-level sanity check |
+| Phase 0 platform redesign — schema, state machines, build queue | ~6 focused hours (design) + 2–3 days close-out | Phase 2 design portion |
+| Provisioning chain build + debugging cycle | ~8 weeks elapsed, interleaved; ≥6 distinct build/debug episodes *(derived — confirm)* | Phase 1 workstreams 1.1/1.3 |
+| Portal (WFA) request page development | ~2 weeks concentrated (first iteration) *(derived — confirm)* | Phase 1 workstream 1.3 |
+| Watchdog/observability build | ~1 week *(derived — confirm)* | Phase 2 workstream 6 |
+| Schema version migration (1.2→1.3) | ~1 extended session + ~1 week follow-through *(derived — confirm)* | Phase 2 workstream 5 |
+| Lookup/reference data handling in template pipeline | Recurring ~2-month arc, episodic *(derived — confirm)* | Phase 2 workstream 4 (catalog) |
+
+**Calibration findings (from the record above):**
+
+1. **Design/build asymmetry is extreme.** A full platform redesign took hours;
+   the build it enabled took months. Phase estimates are therefore weighted
+   almost entirely by build-and-stabilize content; design workstreams are
+   nearly free.
+2. **The debugging tail is long and partly silent.** Defects on this platform
+   have surfaced 4–8 weeks after initial build, including silent wrong-output
+   failures that error nowhere. Phase 1's exit criterion (pilot completed
+   end-to-end) deliberately pulls this tail inside the estimate.
+3. **Elapsed calendar time is the correct estimation unit.** Historical spans
+   reflect interleaved, multi-workstream conditions — and those conditions
+   persist. D4 is the conversion factor between allocation and elapsed time.
+4. **Historical schedule variance was driven primarily by requirements
+   discovered late**, not by build velocity. The decision gates (D1/D2) and the
+   mid-phase walkthrough (Phase 1 WS5) exist to remove that driver; the phase
+   ranges are conditional on those gates holding.
+
+Track C items are not estimated here by design — each is sized when its gate
+opens.
 
 ---
 
@@ -405,211 +433,17 @@ sized when its gate opens.
   10. Open questions: added Q6, Q7, and dormant Q8.
   11. Risks: added Integration-track dating pressure, VMS vendor API
       variability, and reference-layer scope creep; updated the validation
-      source-of-truth mitigation to reference the layer.## 2. Current State
-
-SDC is a live, Workato-based platform managing supplier data collection for MSP
-client implementations: request provisioning, a supplier-facing portal (Workato
-Workflow Apps), configurable validation, review gates, reminder workflows,
-observability (watchdog/drift detection), and file lifecycle management.
-
-### Asset inventory
-
-| Bucket | Assets |
-|---|---|
-| **Reusable as-is** | Validation engine architecture, file storage & lifecycle patterns, observability/watchdog tooling, logging & config libraries (GasToolkit), static analysis / recipe model tooling |
-| **Reusable with generalization** | State machines (currently supplier-lifecycle-shaped), provisioning chain, portal request pages, reminder workflows, review gates |
-| **Supplier-specific (stays)** | Supplier entity model & naming (`SUP_` prefixes, supplier request objects), supplier-domain validation rules, incumbent-data handling |
-
-### The key structural shift
-
-In SDC today, the client is the **context** — the entity on whose behalf data is
-collected. In master data collection, the client becomes the **respondent**.
-This inverts an existing role rather than inventing a new one, but it changes
-cardinality assumptions embedded in the platform:
-
-- Supplier collection: one project → **many respondents**, ~one dataset each
-- Master data: one project → **one respondent** (possibly several contacts) → **many data domains**
-
-Provisioning, state tracking, and reminders all carry implicit assumptions about
-this shape. Identifying those assumptions is the first Phase 1 workstream, and
-existing static-analysis tooling (recipe call graphs, table-access matrices) can
-surface them empirically rather than by manual audit.
-
-### Constraints
-
-- The platform is maintained by **one developer** who also carries live-platform
-  support and an active maintenance backlog.
-- Timeline assumptions below are based on **[PLACEHOLDER: X%]** of that
-  developer's capacity being allocated to this initiative.
-
----
-
-## 3. Target State
-
-A collection platform, not a supplier tool: a **Respondent** abstraction
-(suppliers and clients are both instances), **data domain templates** as
-first-class configuration, and validation rules configured per domain rather
-than hard-coded per use case.
-
-Measurable definition of done: *a new collection use case (new respondent type
-and/or new data domains) can be configured and piloted in [X weeks] without
-platform code changes beyond configuration and templates.*
-
-Deliberately **not** in the target state: building this abstraction
-speculatively. The shared core is extracted in Phase 2 from the evidence of two
-working verticals — not designed up front from one vertical plus imagination.
-
----
-
-## 4. Phased Plan
-
-### Phase 1 — Master Data Collection Vertical (Pilot)
-
-**Theme:** Prove the use case on the existing platform, pragmatically, tolerating
-some duplication.
-
-**Outcome:** A pilot client completes a real master data collection cycle
-through the platform — request, submission, validation, review, delivery.
-
-**Major workstreams:**
-1. **Cardinality audit** — locate and document supplier-shape assumptions in
-   provisioning, state machines, and reminders (leverages existing static
-   analysis tooling).
-2. **Domain templates** — define collection templates for the pilot's data
-   domains: [PLACEHOLDER: pending Q1 — e.g., cost centers, locations].
-3. **Client respondent flow** — portal pages, provisioning, and notifications
-   for a client respondent ([PLACEHOLDER: single vs. multiple contacts —
-   pending Q2]).
-4. **Validation rules for master data** — sourced from [PLACEHOLDER: VMS
-   configuration requirements? pending Q3].
-5. **Pilot execution & feedback** — run with [PLACEHOLDER: pilot client —
-   pending Q5], capture deltas.
-
-**Explicitly out of scope for Phase 1:** the Respondent abstraction, ongoing
-master data *maintenance* (delta/change-request workflows) unless Q4 answers
-"ongoing," any third use case.
-
-**Timeline:** **[6–8 weeks — MEDIUM confidence]**
-⚠️ *Swing factor:* If Q4 (one-time vs. ongoing collection) answers "ongoing,"
-this phase requires new change-request workflow architecture and re-estimates to
-**[10–14 weeks]**. This single question is the largest open variable in the plan.
-
-**Exit criteria:** Pilot client cycle completed end-to-end; deviations and
-duplication documented as input to Phase 2.
-
----
-
-### Phase 2 — Extract the Shared Collection Core
-
-**Theme:** Generalize on evidence. With two working verticals (supplier + master
-data), extract what they demonstrably share.
-
-**Outcome:** Respondent abstraction, first-class domain templates, and
-per-domain validation configuration — with both existing verticals migrated onto
-the shared core and behaving identically to before.
-
-**Major workstreams:**
-1. Respondent entity model + migration of supplier and client flows onto it
-2. Domain template configuration model (replacing per-vertical template logic)
-3. Validation rule configuration generalization
-4. Naming/schema migration plan (managed as a versioned schema bump with
-   parallel-run verification, per established platform practice)
-5. Regression verification via existing observability + watchdog tooling
-
-**Explicitly out of scope:** new use cases, portal redesign, anything not proven
-necessary by the Phase 1 delta log.
-
-**Timeline:** **[8–12 weeks — LOW-MEDIUM confidence]**
-Confidence is inherently lower here: the scope of extraction is *defined by
-Phase 1 findings*. A firmer estimate will be committed at Phase 1 exit.
-
-**Entry criteria:** Phase 1 complete with delta log. **Exit criteria:** both
-verticals running on shared core; no behavioral regressions; extraction
-decisions documented.
-
----
-
-### Phase 3 — Third Use Case: Platform Validation
-
-**Theme:** Prove the platform claim. Onboard the next leadership-identified use
-case onto the shared core.
-
-**Outcome:** Use case **[PLACEHOLDER — pending leadership prioritization]**
-live, stood up primarily through configuration and templates. Success metric:
-elapsed setup time of **[X weeks]** vs. Phase 1's baseline.
-
-**Timeline:** **[Directional: following quarter — LOW confidence]**
-Sized properly at Phase 2 exit. If Phase 3 setup requires significant platform
-code changes, that is a *finding* — it tells us the abstraction was extracted at
-the wrong seam, and feeds a Phase 2 follow-up.
-
----
-
-## 5. Requirements & Dependencies
-
-### Decisions needed from leadership (blocking dates in brackets)
-
-| # | Decision | Blocks | Needed by |
-|---|---|---|---|
-| D1 | Which data domains are in the Phase 1 pilot scope | Workstream 1.2 | [date — before Phase 1 start] |
-| D2 | One-time collection vs. ongoing maintenance (Q4) | Phase 1 timeline commitment | [date — before Phase 1 estimate is committed] |
-| D3 | Pilot client / implementation selection | Workstream 1.5 | [Phase 1 midpoint] |
-| D4 | Capacity allocation: [X%] of developer time formally allocated | Entire plan | [before Phase 1 start] |
-| D5 | Third use case prioritization | Phase 3 | [Phase 2 midpoint] |
-
-### Access & dependencies
-
-- Client-side contact(s) for the pilot, identified during implementation kickoff
-- Source of truth for master data validation requirements ([VMS configuration
-  documentation / implementation team SMEs — pending Q3])
-- [PLACEHOLDER: any Workato workspace / licensing implications of client-facing
-  portal users]
-
----
-
-## 6. Risks & Mitigations
-
-| Risk | Impact | Mitigation |
-|---|---|---|
-| Single maintainer; live-platform incidents preempt roadmap work | Timeline slip | Explicit capacity allocation (D4); ranges already assume [X%]; maintenance backlog triaged before Phase 1 start |
-| Q4 answered "ongoing" late in Phase 1 | Rework; timeline swing | D2 required *before* Phase 1 estimate is committed |
-| Cardinality assumptions run deeper than audit reveals | Phase 1 scope growth | Audit is workstream #1, before build; static analysis tooling reduces discovery risk |
-| Validation source of truth is external and shifting | Validation rework | Treat rules as configuration from day one, even in Phase 1 |
-| Premature abstraction pressure ("build the platform now") | Phase 2 built on speculation | Sequencing argument in §3; phases gated on evidence |
-| Pilot client unavailability | Phase 1 exit blocked | Fallback: internal dry-run with implementation team as proxy respondent (reduced confidence, noted at exit) |
-
----
-
-## 7. Open Questions
-
-| # | Question | Why it matters |
-|---|---|---|
-| Q1 | Which master data domains, and how many, for the pilot? | Sets Phase 1 template scope |
-| Q2 | One client contact or several (per-domain owners)? | Multiple owners ≈ multi-respondent within one org; changes portal/provisioning design |
-| Q3 | Who defines "valid" for master data — our rules, or VMS configuration requirements? | Determines whether the validation source of truth is internal or external |
-| Q4 | **One-time (implementation) collection, or ongoing maintenance?** | **Largest timeline swing in the plan: 6–8 weeks vs. 10–14 weeks for Phase 1** |
-| Q5 | Is a pilot implementation available, and what is its go-live date? | Converts the plan into a schedule; provides the Phase 1 forcing function |
-
----
-
-## 8. Appendix — Estimation Basis
-
-Estimates are by analogy to completed platform work, not summed task lists.
-Ranges are widened to account for coordination overhead (pilot client,
-implementation team) absent from prior solo builds.
-
-| Analogous prior work | Actual duration | Informs |
-|---|---|---|
-| [Phase 0 platform redesign — schema, state machines, build queue] | [X] | Phase 2 sizing |
-| [Provisioning chain build + debugging cycle] | [X] | Phase 1 workstreams 1.1/1.3 |
-| [Portal (WFA) request page development] | [X] | Phase 1 workstream 1.3 |
-| [Watchdog/observability build] | [X] | Phase 2 workstream 5 |
-| [Schema version migration (1.2→1.3)] | [X] | Phase 2 workstream 4 |
-
-**Calibration note:** fill in actual durations from project history, then check
-each phase range against the analogs. If a range and its analogs disagree,
-trust the analogs.
-
----
-
-*Document history: v0.1 — initial draft.*
+      source-of-truth mitigation to reference the layer.
+- **v0.3** — calibration pass:
+  1. Constraints: timeline ranges restated as elapsed calendar time under the
+     established multi-workstream pattern; D4 named as the conversion factor.
+  2. Phase 1: added workstream 5 (mid-phase stakeholder walkthrough, sign-off
+     gating the pilot); pilot execution renumbered to workstream 6; D3
+     reference updated.
+  3. Risks: added late-arriving requirements/feedback as an explicit risk with
+     structural mitigations (decision gates, mid-phase walkthrough,
+     pilot-inside-phase).
+  4. Appendix: estimation analogs filled with history-derived elapsed
+     durations (pending maintainer confirmation); four calibration findings
+     documented, including the design/build asymmetry and the
+     requirements-variance driver.
