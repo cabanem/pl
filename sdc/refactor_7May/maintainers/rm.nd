@@ -1,11 +1,30 @@
-# SDC Platform Expansion Roadmap — Client Master Data Collection
+# SDC Platform Expansion Roadmap — Master Data Collection & Strategic Tracks
 
-**Status:** DRAFT v0.1 — for internal review
+**Status:** DRAFT v0.2 — for internal review
 **Author:** Emily [last name]
 **Date:** [date]
 **Audience:** [leadership stakeholders]
 
 > Items in `[BRACKETS]` are placeholders pending discovery answers or calibration.
+
+---
+
+## Roadmap at a glance
+
+Three parallel tracks, sequenced by phase. Phases are time horizons defined by
+exit criteria, not calendar dates. **Committed** items carry estimates;
+**gated** items are deliberately undated and are sized at the prior gate's exit.
+
+| Track | Phase 1 | Phase 2 | Phase 3 | Later |
+|---|---|---|---|---|
+| **A — Collection verticals** | Master data vertical (pilot) | Parallel-run both verticals on shared core | Third use case, config-only *(gated)* | — |
+| **B — Platform core** | Reference data layer seeded (rules as config) | Shared core extracted (Respondent, reference catalog) | — | — |
+| **C — Integration** | VMS as validation source | — | VMS reference data ingestion *(gate: catalog exists)* | VMS delivery *(gate: stable pipeline; per-vendor)* |
+| **Options** | — | — | — | Hosted-channel spike — SharePoint/Lists *(trigger-gated)* |
+
+Cross-track dependency: Track C's ingestion and delivery items depend on Track
+B's reference catalog and on a stable end-to-end collection pipeline,
+respectively. Empty cells are intentional.
 
 ---
 
@@ -23,18 +42,370 @@ slow / error-prone / unauditable]. SDC already solves this class of problem for
 supplier data: structured requests, portal-based submission, automated
 validation, state tracking, and full auditability.
 
+Leadership has additionally identified **VMS integration** as a strategic
+objective for this program. The end state completes the implementation loop:
+**collect → validate → configure** — client data flows from structured
+collection through validation into VMS configuration, rather than being handed
+off as files. This roadmap decomposes that objective into three distinct
+capabilities with separate gates (§4.4), rather than treating "VMS integration"
+as a single deliverable.
+
 **Objective:** Extend SDC into a general data collection platform, proven first
 on master data, such that a new collection use case can eventually be stood up
-in **[target: X weeks]** rather than requiring a ground-up build.
+in **[target: X weeks]** rather than requiring a ground-up build — with
+validated data flowing toward VMS configuration rather than terminating in
+file handoffs.
 
 **Approach in one sentence:** Build master data collection as a second concrete
 vertical on the existing platform (Phase 1), extract the shared collection core
-from what the two working verticals prove they share (Phase 2), then validate
-the platform by onboarding a third use case (Phase 3).
+from what the two working verticals prove they share (Phase 2), validate the
+platform by onboarding a third use case (Phase 3), and advance VMS integration
+capabilities on a parallel track as their gates open.
 
 ---
 
 ## 2. Current State
+
+SDC is a live, Workato-based platform managing supplier data collection for MSP
+client implementations: request provisioning, a supplier-facing portal (Workato
+Workflow Apps), configurable validation, review gates, reminder workflows,
+observability (watchdog/drift detection), and file lifecycle management.
+
+### Asset inventory
+
+| Bucket | Assets |
+|---|---|
+| **Reusable as-is** | Validation engine architecture, file storage & lifecycle patterns, observability/watchdog tooling, logging & config libraries (GasToolkit), static analysis / recipe model tooling |
+| **Reusable with generalization** | State machines (currently supplier-lifecycle-shaped), provisioning chain, portal request pages, reminder workflows, review gates, lookup/reference data handling (currently embedded per configuration) |
+| **Supplier-specific (stays)** | Supplier entity model & naming (`SUP_` prefixes, supplier request objects), supplier-domain validation rules, incumbent-data handling |
+
+### The key structural shift
+
+In SDC today, the client is the **context** — the entity on whose behalf data is
+collected. In master data collection, the client becomes the **respondent**.
+This inverts an existing role rather than inventing a new one, but it changes
+cardinality assumptions embedded in the platform:
+
+- Supplier collection: one project → **many respondents**, ~one dataset each
+- Master data: one project → **one respondent** (possibly several contacts) → **many data domains**
+
+Provisioning, state tracking, and reminders all carry implicit assumptions about
+this shape. Identifying those assumptions is the first Phase 1 workstream, and
+existing static-analysis tooling (recipe call graphs, table-access matrices) can
+surface them empirically rather than by manual audit.
+
+### Constraints
+
+- The platform is maintained by **one developer** who also carries live-platform
+  support and an active maintenance backlog.
+- Timeline assumptions below are based on **[PLACEHOLDER: X%]** of that
+  developer's capacity being allocated to this initiative.
+
+---
+
+## 3. Target State
+
+A collection platform, not a supplier tool:
+
+- A **Respondent** abstraction — suppliers and clients are both instances.
+- **Data domain templates** as first-class configuration.
+- A **reference data layer** — canonical lookup and validation tables
+  referenced by configurations rather than embedded in them, grown on evidence
+  (each table earns its place by a defect it would have prevented), serving as
+  the single landing zone for externally sourced reference data.
+- **VMS-connected data flow** — validation requirements sourced from VMS
+  configuration, reference data ingested from VMS sources, and (per-vendor,
+  gated) validated data delivered into the VMS: collect → validate → configure.
+
+Measurable definition of done: *a new collection use case (new respondent type
+and/or new data domains) can be configured and piloted in [X weeks] without
+platform code changes beyond configuration and templates.*
+
+Deliberately **not** in the target state: building any of this speculatively.
+The shared core is extracted in Phase 2 from the evidence of two working
+verticals; the reference data layer grows one table per prevented defect; the
+Integration track advances only as its gates open. Evidence first, abstraction
+second — throughout.
+
+---
+
+## 4. Phased Plan
+
+The plan runs as **three tracks** (see Roadmap at a glance): **A — Collection
+verticals** (the use cases), **B — Platform core** (the shared machinery), and
+**C — Integration** (VMS-facing capabilities). Phases 1–3 are the program's
+time horizons; each phase writeup below covers the Track A and B work in that
+horizon. Track C is described separately in §4.4 because its items are gated
+rather than dated.
+
+### 4.1 Phase 1 — Master Data Collection Vertical (Pilot)
+
+**Theme:** Prove the use case on the existing platform, pragmatically, tolerating
+some duplication.
+
+**Outcome:** A pilot client completes a real master data collection cycle
+through the platform — request, submission, validation, review, delivery.
+
+**Major workstreams:**
+1. **[A] Cardinality audit** — locate and document supplier-shape assumptions in
+   provisioning, state machines, and reminders (leverages existing static
+   analysis tooling).
+2. **[A] Domain templates** — define collection templates for the pilot's data
+   domains: [PLACEHOLDER: pending Q1 — e.g., cost centers, locations].
+3. **[A] Client respondent flow** — portal pages, provisioning, and notifications
+   for a client respondent ([PLACEHOLDER: single vs. multiple contacts —
+   pending Q2]).
+4. **[B] Validation rules as reference configuration** — master data validation
+   rules stored in reference tables from day one (seeding the reference data
+   layer), not hard-coded; requirement source: [PLACEHOLDER: VMS configuration
+   requirements? pending Q3]. *This workstream is also Track C's first item —
+   see §4.4, capability C1.*
+5. **[A] Pilot execution & feedback** — run with [PLACEHOLDER: pilot client —
+   pending Q5], capture deltas.
+
+**Explicitly out of scope for Phase 1:** the Respondent abstraction, ongoing
+master data *maintenance* (delta/change-request workflows) unless Q4 answers
+"ongoing," any third use case, any automated VMS connectivity.
+
+**Timeline:** **[6–8 weeks — MEDIUM confidence]**
+⚠️ *Swing factor:* If Q4 (one-time vs. ongoing collection) answers "ongoing,"
+this phase requires new change-request workflow architecture and re-estimates to
+**[10–14 weeks]**. This single question is the largest open variable in the plan.
+
+**Exit criteria:** Pilot client cycle completed end-to-end; deviations and
+duplication documented as input to Phase 2.
+
+---
+
+### 4.2 Phase 2 — Extract the Shared Collection Core
+
+**Theme:** Generalize on evidence. With two working verticals (supplier + master
+data), extract what they demonstrably share.
+
+**Outcome:** Respondent abstraction, first-class domain templates, per-domain
+validation configuration, and a formalized reference data catalog — with both
+existing verticals migrated onto the shared core and behaving identically to
+before.
+
+**Major workstreams:**
+1. **[B]** Respondent entity model + migration of supplier and client flows onto it
+2. **[B]** Domain template configuration model (replacing per-vertical template logic)
+3. **[B]** Validation rule configuration generalization
+4. **[B] Reference data catalog** — shared lookup/validation tables referenced
+   by configurations rather than embedded per project (eliminating
+   cross-project drift for shared tables), with a defined ingestion boundary
+   for externally sourced updates. Growth rule: tables are added on defect
+   evidence, not speculatively. *The ingestion boundary is the gate for Track
+   C capability C2 — see §4.4.*
+5. **[B]** Naming/schema migration plan (managed as a versioned schema bump with
+   parallel-run verification, per established platform practice)
+6. **[A]** Regression verification of both verticals via existing observability +
+   watchdog tooling
+
+**Explicitly out of scope:** new use cases, portal redesign, anything not proven
+necessary by the Phase 1 delta log.
+
+**Timeline:** **[8–12 weeks — LOW-MEDIUM confidence]**
+Confidence is inherently lower here: the scope of extraction is *defined by
+Phase 1 findings*. A firmer estimate will be committed at Phase 1 exit.
+
+**Entry criteria:** Phase 1 complete with delta log. **Exit criteria:** both
+verticals running on shared core; no behavioral regressions; extraction
+decisions documented; reference catalog live with its initial evidence-earned
+tables.
+
+---
+
+### 4.3 Phase 3 — Third Use Case: Platform Validation
+
+**Theme:** Prove the platform claim. Onboard the next leadership-identified use
+case onto the shared core.
+
+**Outcome:** Use case **[PLACEHOLDER — pending leadership prioritization, D5]**
+live, stood up primarily through configuration and templates. Success metric:
+elapsed setup time of **[X weeks]** vs. Phase 1's baseline.
+
+**Timeline:** **[Directional: following quarter — LOW confidence]**
+Sized properly at Phase 2 exit. If Phase 3 setup requires significant platform
+code changes, that is a *finding* — it tells us the abstraction was extracted at
+the wrong seam, and feeds a Phase 2 follow-up.
+
+---
+
+### 4.4 Track C — VMS Integration (gated, not dated)
+
+"VMS integration" decomposes into three capabilities with different scopes,
+different gates, and different costs. Naming them separately is what allows the
+strategic objective to be honored without committing dates to work whose
+prerequisites don't yet exist. **Items on this track are deliberately undated;
+each is sized when its gate opens.**
+
+**C1 — VMS as validation source of truth** *(active in Phase 1)*
+Master data is valid if the VMS will accept it. Validation requirements flow
+*from* VMS configuration into the reference data layer. The initial mechanism
+is deliberately low-tech — requirements read from VMS documentation and SME
+input into reference tables (Phase 1 workstream 4). Automating this sourcing
+is a later refinement, not a Phase 1 dependency.
+*Gate: none — starts with Phase 1.*
+
+**C2 — VMS as reference data source** *(gated)*
+Ongoing ingestion: when a VMS source emits updated reference data (e.g., job
+titles, cost centers), the update lands in the reference catalog through its
+ingestion boundary, and every configuration referencing that table is
+implicitly current.
+*Gate: reference catalog and ingestion boundary exist (Phase 2, workstream 4).
+Sized at Phase 2 exit.*
+
+**C3 — VMS as delivery target** *(gated)*
+Validated master data flows into the VMS rather than terminating in file
+handoffs — this is the capability that completes the collect → validate →
+configure loop and carries most of the strategic value. It is also the most
+expensive and the most **per-vendor**: API maturity, authentication models, and
+configuration surfaces differ materially across VMS platforms [PLACEHOLDER:
+Fieldglass / Beeline / other — pending Q6]. Scoping is per-VMS, in the priority
+order leadership sets (D6), and requires API/sandbox access with potentially
+long procurement lead times (D7 — initiate early even though the build is
+late).
+*Gates: stable end-to-end collection pipeline (Phase 2 exit) + per-vendor API
+access confirmed. Sized per vendor at gate opening.*
+
+---
+
+## 5. Later / Options (trigger-gated)
+
+Items here are visible by design but are **not committed work**. Each carries a
+written trigger; if the trigger fires, the item enters the plan as a bounded
+evaluation, not a build.
+
+**OPT-1 — Hosted-channel collection spike (SharePoint / Microsoft Lists)**
+An alternative respondent entry surface: browser-only hosted workbooks or
+Lists-based grids, offering entry-time enforcement properties the XLSX template
+channel cannot (template-side validation is a courtesy; the intake gate is the
+enforcement — hosted channels can move some enforcement to entry time).
+Client-environment-dependent: requires licensing (e.g., SharePoint Advanced
+Management for block-download) and external guest access (Entra B2B), making it
+a **per-client capability, not platform core**.
+
+- **Trigger (either):** (a) defect evidence that gate-time rejection is
+  materially too late or too costly for a class of errors the current channel
+  cannot prevent; or (b) a client security posture requiring browser-only
+  access for respondents.
+- **Shape if triggered:** time-boxed spike **[X days]** assessing licensing,
+  guest-access feasibility in the target tenant, and validation fidelity of
+  Lists columns vs. current rules; output is a go/no-go recommendation, not an
+  implementation.
+- **Status:** dormant. Q8 becomes relevant only if triggered.
+
+---
+
+## 6. Requirements & Dependencies
+
+### Decisions needed from leadership (blocking dates in brackets)
+
+| # | Decision | Blocks | Needed by |
+|---|---|---|---|
+| D1 | Which data domains are in the Phase 1 pilot scope | Workstream 1.2 | [date — before Phase 1 start] |
+| D2 | One-time collection vs. ongoing maintenance (Q4) | Phase 1 timeline commitment | [date — before Phase 1 estimate is committed] |
+| D3 | Pilot client / implementation selection | Workstream 1.5 | [Phase 1 midpoint] |
+| D4 | Capacity allocation: [X%] of developer time formally allocated | Entire plan | [before Phase 1 start] |
+| D5 | Third use case prioritization | Phase 3 | [Phase 2 midpoint] |
+| D6 | VMS platform priority order for Track C | C3 scoping sequence | [Phase 2 midpoint] |
+| D7 | Initiate VMS API / sandbox access requests | C3 gate (long procurement lead time — start well before the build) | [Phase 1 exit] |
+
+### Access & dependencies
+
+- Client-side contact(s) for the pilot, identified during implementation kickoff
+- Source of truth for master data validation requirements ([VMS configuration
+  documentation / implementation team SMEs — pending Q3])
+- VMS API documentation and sandbox environments for priority platforms
+  (pending Q7 / D7)
+- [PLACEHOLDER: any Workato workspace / licensing implications of client-facing
+  portal users]
+
+---
+
+## 7. Risks & Mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Single maintainer; live-platform incidents preempt roadmap work | Timeline slip | Explicit capacity allocation (D4); ranges already assume [X%]; maintenance backlog triaged before Phase 1 start |
+| Q4 answered "ongoing" late in Phase 1 | Rework; timeline swing | D2 required *before* Phase 1 estimate is committed |
+| Cardinality assumptions run deeper than audit reveals | Phase 1 scope growth | Audit is workstream #1, before build; static analysis tooling reduces discovery risk |
+| Validation source of truth is external and shifting | Validation rework | Rules live in the reference data layer from day one (Phase 1 WS4); updates are data changes, not code changes |
+| Premature abstraction pressure ("build the platform now") | Phase 2 built on speculation | Sequencing argument in §3; phases gated on evidence |
+| Pressure to date the Integration track | Speculative commitments on unscoped vendor APIs | Gates-only policy stated in §4.4; per-vendor sizing at gate opening; D7 de-risks the longest lead item early |
+| VMS vendor API variability / immaturity | C3 cost blowout on a given vendor | Per-vendor scoping before any C3 commitment; priority order (D6) puts the most tractable vendor first |
+| Reference layer scope creep (tables added speculatively) | Catalog becomes its own project | Growth rule: one table per evidenced defect; ingestion boundary is the only Phase 2 commitment |
+| Pilot client unavailability | Phase 1 exit blocked | Fallback: internal dry-run with implementation team as proxy respondent (reduced confidence, noted at exit) |
+
+---
+
+## 8. Open Questions
+
+| # | Question | Why it matters |
+|---|---|---|
+| Q1 | Which master data domains, and how many, for the pilot? | Sets Phase 1 template scope |
+| Q2 | One client contact or several (per-domain owners)? | Multiple owners ≈ multi-respondent within one org; changes portal/provisioning design |
+| Q3 | Who defines "valid" for master data — our rules, or VMS configuration requirements? | Determines the sourcing for capability C1 and the initial reference tables |
+| Q4 | **One-time (implementation) collection, or ongoing maintenance?** | **Largest timeline swing in the plan: 6–8 weeks vs. 10–14 weeks for Phase 1** |
+| Q5 | Is a pilot implementation available, and what is its go-live date? | Converts the plan into a schedule; provides the Phase 1 forcing function |
+| Q6 | Which VMS platforms, and in what priority order? | Sequences Track C scoping (D6); vendors differ materially in API maturity |
+| Q7 | Do we have — or can we obtain — API and sandbox access for the priority VMS platforms? | C3's gate; procurement lead time is why D7 initiates at Phase 1 exit |
+| Q8 | *(Dormant — only if OPT-1 triggers)* Do target client tenants support external guest access and the required SharePoint licensing? | Feasibility precondition for the hosted-channel spike |
+
+---
+
+## 9. Appendix — Estimation Basis
+
+Estimates are by analogy to completed platform work, not summed task lists.
+Ranges are widened to account for coordination overhead (pilot client,
+implementation team) absent from prior solo builds.
+
+| Analogous prior work | Actual duration | Informs |
+|---|---|---|
+| [Phase 0 platform redesign — schema, state machines, build queue] | [X] | Phase 2 sizing |
+| [Provisioning chain build + debugging cycle] | [X] | Phase 1 workstreams 1.1/1.3 |
+| [Portal (WFA) request page development] | [X] | Phase 1 workstream 1.3 |
+| [Watchdog/observability build] | [X] | Phase 2 workstream 6 |
+| [Schema version migration (1.2→1.3)] | [X] | Phase 2 workstream 5 |
+| [Lookup/reference data handling in template pipeline] | [X] | Phase 2 workstream 4 (catalog) |
+
+**Calibration note:** fill in actual durations from project history, then check
+each phase range against the analogs. If a range and its analogs disagree,
+trust the analogs. Track C items are not estimated here by design — each is
+sized when its gate opens.
+
+---
+
+## Document history
+
+- **v0.1** — initial draft: three-phase plan (master data vertical → shared
+  core extraction → third use case), decisions/risks/questions, estimation
+  basis.
+- **v0.2** — strategic track restructure:
+  1. Added "Roadmap at a glance" track/phase summary table with
+     committed-vs-gated convention.
+  2. Context: named VMS integration as a strategic objective; introduced the
+     collect → validate → configure end state.
+  3. Target State: added the reference data layer and VMS-connected data flow.
+  4. §4 restructured into three tracks (A — collection verticals, B — platform
+     core, C — integration); workstreams tagged by track.
+  5. Phase 1 workstream 4 reframed: validation rules stored as reference
+     configuration from day one (seeds the reference data layer; doubles as
+     capability C1).
+  6. Phase 2: added workstream 4 (reference data catalog with ingestion
+     boundary and one-table-per-defect growth rule).
+  7. New §4.4: VMS integration decomposed into C1 (validation source), C2
+     (reference data ingestion; gate: catalog), C3 (delivery; gates: stable
+     pipeline + per-vendor API access); gates-only, no dates.
+  8. New §5 Later/Options: hosted-channel spike (SharePoint/Lists) with
+     written triggers; dormant by default.
+  9. Decisions: added D6 (VMS priority order) and D7 (initiate API/sandbox
+     access early).
+  10. Open questions: added Q6, Q7, and dormant Q8.
+  11. Risks: added Integration-track dating pressure, VMS vendor API
+      variability, and reference-layer scope creep; updated the validation
+      source-of-truth mitigation to reference the layer.## 2. Current State
 
 SDC is a live, Workato-based platform managing supplier data collection for MSP
 client implementations: request provisioning, a supplier-facing portal (Workato
