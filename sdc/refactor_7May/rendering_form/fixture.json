@@ -1,0 +1,60 @@
+{
+  "config": {
+    "contract_version": "1.0",
+    "request": {
+      "correlation_token": "8f14e45f-ceea-4671-a5b9-6d3d6f1c2a9e",
+      "action_url": "https://script.google.com/macros/s/DEPLOY_ID/exec",
+      "template_version_id": "1.3",
+      "display": {
+        "project_name": "MARS RC Data Collection",
+        "supplier_name": "Acme Staffing LLC",
+        "due_date": "2026-08-15"
+      }
+    },
+    "template": {
+      "template_version_id": "1.3",
+      "title": "Supplier rate card submission",
+      "fields": [
+        {"field_id": "job_family", "label": "Job family", "type": "dropdown",
+         "required": true, "help_text": null, "parent_field_id": null,
+         "sort_order": 10, "constraints": {}},
+        {"field_id": "role", "label": "Role", "type": "dropdown",
+         "required": true, "help_text": null, "parent_field_id": "job_family",
+         "sort_order": 20, "constraints": {}},
+        {"field_id": "seniority", "label": "Seniority", "type": "dropdown",
+         "required": true, "help_text": null, "parent_field_id": "role",
+         "sort_order": 30, "constraints": {}},
+        {"field_id": "bill_rate", "label": "Bill rate (USD/hr)", "type": "number",
+         "required": true, "help_text": "Standard rate before markup.",
+         "parent_field_id": null, "sort_order": 40,
+         "constraints": {"min": 0, "max": 500, "step": 0.01}},
+        {"field_id": "effective_date", "label": "Effective date", "type": "date",
+         "required": true, "help_text": null, "parent_field_id": null,
+         "sort_order": 50, "constraints": {"max": "2026-12-31"}}
+      ],
+      "options": {
+        "job_family|": ["Engineering", "Finance"],
+        "role|Engineering": ["Integration developer", "Data engineer"],
+        "role|Finance": ["Financial analyst"],
+        "seniority|Integration developer": ["Level I", "Level II", "Level III"],
+        "seniority|Data engineer": ["Level I", "Level II"],
+        "seniority|Financial analyst": []
+      }
+    }
+  },
+  "values": {
+    "job_family": "Engineering",
+    "role": "Integration developer",
+    "seniority": null,
+    "bill_rate": "612.50",
+    "effective_date": "2027-02-01"
+  },
+  "errors": {
+    "field_errors": {
+      "seniority": ["Required."],
+      "bill_rate": ["Must be at most 500."],
+      "effective_date": ["Must be on or before 2026-12-31."]
+    },
+    "form_errors": []
+  }
+}
