@@ -79,7 +79,7 @@ main { max-width: 640px; margin: 0 auto; }
 header { margin: 0 0 20px; }
 h1 { font-size: 22px; font-weight: 600; margin: 0 0 6px; }
 .meta { font-size: 14px; color: #5c6873; margin: 0; }
-.meta span + span::before { content: " \00b7 "; }
+.meta span + span::before { content: " \\00b7 "; }
 form { background: #ffffff; border: 1px solid #d8dde3; border-radius: 8px;
   padding: 24px 24px 28px; }
 .form-errors { background: #fdf1f0; border: 1px solid #c8564a;
@@ -136,7 +136,7 @@ var SDC_CHAIN = [["job_family",null],["role","job_family"],["seniority","role"]]
     var ph = document.createElement("option");
     ph.value = "";
     if (opts === null || opts === undefined) {
-      ph.textContent = "Select\u2026";
+      ph.textContent = "Select\\u2026";
       sel.appendChild(ph);
       sel.disabled = true;
       return;
@@ -147,7 +147,7 @@ var SDC_CHAIN = [["job_family",null],["role","job_family"],["seniority","role"]]
       sel.disabled = true;
       return;
     }
-    ph.textContent = "Select\u2026";
+    ph.textContent = "Select\\u2026";
     sel.appendChild(ph);
     for (var i = 0; i < opts.length; i++) {
       var el = document.createElement("option");
