@@ -24,8 +24,11 @@ REGION="${REGION:-us-east1}"          # co-locate Run + SQL + Vertex here
 INSTANCE="${INSTANCE:-agentgraph}"
 DB_NAME="${DB_NAME:-agentgraph}"
 PG_VERSION="${PG_VERSION:-POSTGRES_16}"
-TIER="${TIER:-db-f1-micro}"           # cheapest shared-core; no SLA — fine for
-                                      # build-out. Real use: db-custom-1-3840.
+EDITION="${EDITION:-enterprise}"      # PG16+ may default to Enterprise Plus,
+                                      # which REJECTS shared-core tiers — pin it.
+TIER="${TIER:-db-f1-micro}"           # cheapest shared-core (Enterprise-only,
+                                      # no SLA) — fine for build-out.
+                                      # Real use: db-custom-1-3840.
 AR_REPO="${AR_REPO:-agent-graph}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -77,6 +80,7 @@ else
   echo ">> creating instance (takes ~10 minutes)..."
   gcloud sql instances create "$INSTANCE" \
     --database-version="$PG_VERSION" \
+    --edition="$EDITION" \
     --region="$REGION" \
     --tier="$TIER" \
     --storage-size=10GB \
