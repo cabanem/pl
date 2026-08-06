@@ -28,6 +28,11 @@ Design notes (the parts that encode hard-won recipe-JSON knowledge):
   * The manifest format varies; load_manifest() is the single adapter point.
     Without a manifest everything still derives — pill/field resolution just
     degrades to NULLs.
+  * The filename contract: recipes end in `.recipe.json`. A snapshot
+    directory also carries sidecars (manifest.json, _manifest.json,
+    _tables_raw.json) — ignored by ingest and reported, never derived.
+    Legacy dumps of plain `.json` recipes still work; sidecar names and
+    non-recipe shapes (list root, or no `code` key) are excluded there too.
 """
 
 import argparse
@@ -53,6 +58,28 @@ DB_WRITE_WORDS = ("add", "update", "upsert", "delete", "create", "insert", "batc
 # Loading
 # --------------------------------------------------------------------------
 
+def select_recipe_files(dumps_dir):
+    """The filename contract, applied. Returns (files, ignored).
+
+    Modern layout: `*.recipe.json` are the recipes; every other .json in the
+    directory is a sidecar. Legacy layout (no .recipe.json present): treat
+    plain .json as recipes, minus known sidecar names — underscore-prefixed
+    files and manifest.json are never recipes. load_recipe_file()'s shape
+    guard backstops whatever slips through either way."""
+    all_json = sorted(glob.glob(os.path.join(dumps_dir, "*.json")))
+    modern = [p for p in all_json if p.endswith(".recipe.json")]
+    if modern:
+        return modern, [p for p in all_json if not p.endswith(".recipe.json")]
+    files, ignored = [], []
+    for p in all_json:
+        base = os.path.basename(p)
+        if base.startswith("_") or base == "manifest.json":
+            ignored.append(p)
+        else:
+            files.append(p)
+    return files, ignored
+
+
 def load_recipe_file(path):
     """Return (recipe_id, top-level dict, code dict). Never raises on shape —
     returns None on unusable files so one bad export doesn't kill the run."""
@@ -62,7 +89,16 @@ def load_recipe_file(path):
     except (json.JSONDecodeError, OSError) as e:
         print(f"  SKIP {os.path.basename(path)}: {e}", file=sys.stderr)
         return None
-    code = data.get("code", {})
+    # A recipe export is a dict WITH a code key. A list root (manifest.json,
+    # _tables_raw.json) or a code-less dict (_manifest.json provenance) is a
+    # sidecar; the old `data.get("code", {})` let the latter through as a
+    # phantom zero-step recipe.
+    if not isinstance(data, dict) or "code" not in data:
+        shape = "list root" if isinstance(data, list) else "no code key"
+        print(f"  SKIP {os.path.basename(path)}: not a recipe export ({shape})",
+              file=sys.stderr)
+        return None
+    code = data["code"]
     if isinstance(code, str):
         try:
             code = json.loads(code)
@@ -211,9 +247,13 @@ def prefix_class(table_name):
 # --------------------------------------------------------------------------
 
 def derive(db, dumps_dir, manifest_path, workspace, source, notes):
-    files = sorted(glob.glob(os.path.join(dumps_dir, "*.json")))
+    files, ignored = select_recipe_files(dumps_dir)
     if not files:
-        sys.exit(f"No .json files in {dumps_dir}")
+        sys.exit(f"No recipe .json files in {dumps_dir}")
+    if ignored:
+        names = ", ".join(os.path.basename(p) for p in ignored[:5])
+        more = f" +{len(ignored) - 5} more" if len(ignored) > 5 else ""
+        print(f"ignoring {len(ignored)} sidecar file(s): {names}{more}")
 
     cur = db.cursor()
     cur.execute(
@@ -240,11 +280,12 @@ def derive(db, dumps_dir, manifest_path, workspace, source, notes):
                 n_fields += 1
 
     counts = {"recipes": 0, "steps": 0, "edges": 0, "datapills": 0,
-              "unresolved_edges": 0, "unresolved_pills": 0}
+              "unresolved_edges": 0, "unresolved_pills": 0, "skipped": 0}
 
     for path in files:
         loaded = load_recipe_file(path)
         if loaded is None:
+            counts["skipped"] += 1
             continue
         rid, data, code = loaded
         steps = list(walk_steps(code.get("block", [])))
@@ -364,6 +405,9 @@ def main(argv=None):
           f"{counts['edges']} edges, {counts['datapills']} datapills")
     print(f"manifest: {n_tables} tables, {n_fields} fields"
           if n_tables else "manifest: none (pill/field resolution degraded)")
+    if counts["skipped"]:
+        print(f"NOTE: {counts['skipped']} file(s) skipped as unusable "
+              f"(see SKIP lines above)")
     if counts["unresolved_edges"]:
         print(f"NOTE: {counts['unresolved_edges']} call edge(s) with degraded "
               f"targets (resolved=0) — bare flow_id in export")
