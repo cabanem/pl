@@ -8,15 +8,15 @@
 # dedicated service account (Vertex AI has no resource-level IAM).
 #
 # Identity model:
-#   - A dedicated SA (sdc-corpus-agent) owns all permissions. It is the same
-#     identity the promoted Cloud Run job will run as later, so the IAM you
-#     validate in M1 is exactly the IAM you ship with.
+#   - Your EXISTING service account (set SA_EMAIL below) owns all permissions.
+#     The script verifies it exists and audits what it already carries; it
+#     does not create SAs. It is the same identity the promoted Cloud Run job
+#     will run as later, so the IAM you validate in M1 is what you ship with.
 #   - You NEVER download a key. In Cloud Shell you impersonate the SA via
 #     short-lived tokens (ADC impersonation), which this script configures.
 #
 # Roles YOU need to run this successfully (else ask an admin per-section):
 #   - roles/serviceusage.serviceUsageAdmin        (section 1: enable APIs)
-#   - roles/iam.serviceAccountAdmin               (section 2: create SA)
 #   - roles/storage.admin                         (section 3: create bucket)
 #   - roles/secretmanager.admin                   (section 4: create secret)
 #   - roles/resourcemanager.projects.setIamPolicy (section 5: the two
@@ -30,8 +30,9 @@ PROJECT_ID="$(gcloud config get-value project 2>/dev/null)"
 USER_EMAIL="$(gcloud config get-value account 2>/dev/null)"
 APP="sdc-corpus"
 REGION="us-east1"                 # bucket location (near you; latency-irrelevant at MB scale)
-SA_NAME="${APP}-agent"
-SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+# Your existing SA. Edit here, or override at invocation:
+#   SA_EMAIL=my-existing-sa@project.iam.gserviceaccount.com ./phase0.sh
+SA_EMAIL="${SA_EMAIL:-CHANGE_ME@${PROJECT_ID}.iam.gserviceaccount.com}"
 BUCKET="gs://${APP}-${PROJECT_ID}"
 SECRET="${APP}-workato-token"
 
@@ -50,15 +51,30 @@ gcloud services enable \
   secretmanager.googleapis.com \
   iamcredentials.googleapis.com          # required for keyless impersonation
 
-# ---- 2. Dedicated service account --------------------------------------------
-echo "[2/6] Service account..."
+# ---- 2. Existing service account: verify + audit -----------------------------
+echo "[2/6] Service account (pre-existing)..."
+if [[ "${SA_EMAIL}" == CHANGE_ME@* ]]; then
+  echo "  !! SA_EMAIL is unset — edit the config block or pass SA_EMAIL=... "
+  exit 1
+fi
 if ! gcloud iam service-accounts describe "${SA_EMAIL}" >/dev/null 2>&1; then
-  gcloud iam service-accounts create "${SA_NAME}" \
-    --display-name="SDC corpus analysis agent" \
-    --description="Reads Workato snapshots, derives facts.db, calls Gemini. M1: impersonated from Cloud Shell. Later: Cloud Run job identity."
-  echo "  created ${SA_EMAIL}"
-else
-  echo "  exists, skipping"
+  echo "  !! ${SA_EMAIL} not found in ${PROJECT_ID}. Check the name:"
+  echo "     gcloud iam service-accounts list --format='value(email)'"
+  exit 1
+fi
+echo "  found ${SA_EMAIL}"
+echo "  project-level roles it ALREADY holds (the agent inherits all of these):"
+gcloud projects get-iam-policy "${PROJECT_ID}" \
+  --flatten="bindings[].members" \
+  --filter="bindings.members:serviceAccount:${SA_EMAIL}" \
+  --format="value(bindings.role)" 2>/dev/null | sed 's/^/     /' \
+  || echo "     (could not read project IAM policy — ask an admin for the list)"
+KEY_COUNT="$(gcloud iam service-accounts keys list --iam-account="${SA_EMAIL}" \
+  --managed-by=user --format='value(name)' 2>/dev/null | wc -l)"
+echo "  user-managed keys on this SA: ${KEY_COUNT}"
+if [[ "${KEY_COUNT}" -gt 0 ]]; then
+  echo "     note: this workload needs none of them (impersonation only) —"
+  echo "     once nothing else uses them, they are deletion candidates."
 fi
 
 # ---- 3. Bucket: versioned, uniform access, SA scoped to THIS bucket only -----
@@ -123,7 +139,7 @@ echo "[6/6] Impersonation setup..."
 gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
   --member="user:${USER_EMAIL}" \
   --role="roles/iam.serviceAccountTokenCreator" >/dev/null
-echo "  ${USER_EMAIL} can now impersonate ${SA_EMAIL} (no keys exist, ever)"
+echo "  ${USER_EMAIL} can now impersonate ${SA_EMAIL} (this path uses no keys)"
 echo
 echo "Run this once yourself (interactive browser flow; writes your ADC file):"
 echo "  gcloud auth application-default login --impersonate-service-account=${SA_EMAIL}"
