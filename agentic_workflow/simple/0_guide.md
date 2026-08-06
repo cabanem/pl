@@ -39,9 +39,11 @@ Rules that hold in every phase:
 3. Compute follows proof. Storage and identity were provisioned in Phase 0
    because they are near-free and shape every later phase; nothing that *runs
    unattended* is deployed before Phase 5 passes.
-4. One identity. Everything — CLI, Python, and later Cloud Run — acts as
-   `sdc-corpus-agent`. If something works as you but fails as the SA, the SA
-   is missing a grant; fix the grant, never widen your own access as a patch.
+4. One identity. Everything — CLI, Python, and later Cloud Run — acts as the
+   single SA in `${SA_EMAIL}`. If something works as you but fails as the SA,
+   the SA is missing a grant; fix the grant, never widen your own access as a
+   patch. One workload, one identity — resist splitting across multiple SAs
+   until there are genuinely multiple workloads (promotion, at the earliest).
 
 ---
 
@@ -52,7 +54,7 @@ each session with:
 
     export PROJECT_ID="$(gcloud config get-value project)"
     export APP=sdc-corpus
-    export SA_EMAIL="${APP}-agent@${PROJECT_ID}.iam.gserviceaccount.com"
+    export SA_EMAIL="<your-existing-sa>@${PROJECT_ID}.iam.gserviceaccount.com"
     export BUCKET="gs://${APP}-${PROJECT_ID}"
     export SECRET="${APP}-workato-token"
     export MODEL="<current Gemini id>"   # check the Agent Platform model
@@ -74,7 +76,9 @@ prints on each impersonated call is normal.
 
 ## Phase 0 — Provisioning (done)
 
-`phase0.sh` has run: SA created, bucket versioned, secret populated, IAM
+`phase0.sh` has run: the pre-existing SA verified and audited (its inherited
+project-level roles printed — that inheritance IS the agent's real permission
+surface, so read the list), bucket versioned, secret populated, new IAM
 scoped to resources, impersonated ADC configured, and
 `~/corpus-venv` exists with `google-genai` + `google-cloud-storage` installed.
 
@@ -236,7 +240,7 @@ route to exactly one of three fixes — a missing view, a prompt clarification,
 or (only if systemic) D1 fallback to the six-tool surface.
 
 Promotion is now *only* a compute decision, because identity and storage
-already exist: a Cloud Run job running as `sdc-corpus-agent` (the same SA —
+already exist: a Cloud Run job running as `${SA_EMAIL}` (the same SA —
 zero new IAM) doing acquisition + derivation on a Cloud Scheduler cadence,
 with the interactive loop pointed at `${BUCKET}/artifacts/facts.db`. The
 promotion runtime can be the parallel-agent-graph platform when its Phase 2+
