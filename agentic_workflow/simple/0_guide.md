@@ -1,0 +1,259 @@
+# SDC Corpus Agent — Milestone 1 Implementation Guide (rev. 2, post-Phase-0)
+
+Goal: a read-only Q&A agent over the recipe corpus, built entirely in Cloud
+Shell, with no *compute* deployed until the agent passes calibration.
+
+Spine of the design: **facts → tools → judgment → evidence.** The deterministic
+layer (`derive.py` → `facts.db`) produces facts. The agent only ever sees facts
+through the sanctioned tool surface. Every answer is traceable to tool calls;
+every tool result is traceable to rows; every row is traceable to a raw capture.
+
+**Dual use:** this file is a checklist for a human, and each phase is written
+with a definition of done so it can be pasted verbatim — together with
+`schema.sql`, `derive.py`, and (if D1 resolves to six tools) `tool_spec.py` —
+as the brief for a coding agent. Give an agent one phase at a time.
+
+**What changed in rev. 2:** Phase 0 is now `phase0.sh` (shared team project,
+dedicated service account, keyless impersonation, bucket + secret provisioned
+up front). Consequences ripple forward: the Workato token comes from Secret
+Manager in Phase 1 (never an env var pasted by hand), snapshots and artifacts
+write through to GCS as they are produced, and all model calls use the
+`google-genai` SDK — the old `vertexai.generative_models` modules were
+**removed from the SDK on June 24, 2026** and must not appear in any code.
+
+Files in this kit:
+
+    phase0.sh      shared-project provisioning (SA, bucket, secret, IAM)
+    schema.sql     the fact store DDL (7 tables, 3+ views) — the data contract
+    derive.py      dumps + manifest -> facts.db — the derivation pass
+    tool_spec.py   the original 6-tool contract — retained pending D1 (Phase 4)
+
+Rules that hold in every phase:
+
+1. The agent never parses raw recipe JSON. If a question can't be answered
+   through the tool surface, that is a signal to extend the surface (a new
+   view, or a new tool), not to hand the model JSON.
+2. Read-only against Workato throughout M1. The only Workato API calls are
+   GETs during acquisition. `facts.db` is opened read-only by every consumer
+   except `derive.py`.
+3. Compute follows proof. Storage and identity were provisioned in Phase 0
+   because they are near-free and shape every later phase; nothing that *runs
+   unattended* is deployed before Phase 5 passes.
+4. One identity. Everything — CLI, Python, and later Cloud Run — acts as
+   `sdc-corpus-agent`. If something works as you but fails as the SA, the SA
+   is missing a grant; fix the grant, never widen your own access as a patch.
+
+---
+
+## Environment prelude (paste at the top of every session)
+
+Cloud Shell sessions are ephemeral shells over a persistent `$HOME`. Start
+each session with:
+
+    export PROJECT_ID="$(gcloud config get-value project)"
+    export APP=sdc-corpus
+    export SA_EMAIL="${APP}-agent@${PROJECT_ID}.iam.gserviceaccount.com"
+    export BUCKET="gs://${APP}-${PROJECT_ID}"
+    export SECRET="${APP}-workato-token"
+    export MODEL="<current Gemini id>"   # check the Agent Platform model
+                                         # catalog; the 2.5 family retires
+                                         # 2026-10-16 — do not hardcode it
+    source ~/corpus-venv/bin/activate
+
+**Two credential planes, both pointed at the SA.** Python client libraries
+read the impersonated ADC file written in Phase 0 and need nothing further.
+The `gcloud` CLI is a *separate* plane — it runs as you unless told otherwise,
+and *you* hold no resource grants (only the SA does). Point it at the SA once:
+
+    gcloud config set auth/impersonate_service_account "${SA_EMAIL}"
+
+Every `gcloud` command below assumes this is set. The warning banner gcloud
+prints on each impersonated call is normal.
+
+---
+
+## Phase 0 — Provisioning (done)
+
+`phase0.sh` has run: SA created, bucket versioned, secret populated, IAM
+scoped to resources, impersonated ADC configured, and
+`~/corpus-venv` exists with `google-genai` + `google-cloud-storage` installed.
+
+**Done when:** both smoke tests pass —
+
+    gcloud secrets versions access latest --secret="${SECRET}" | head -c 8
+    echo hello | gcloud storage cp - "${BUCKET}/smoke.txt"
+
+If either 403s within a minute of running `phase0.sh`, wait 60 seconds —
+fresh IAM bindings propagate slowly and impersonation failures masquerade as
+real permission problems.
+
+## Phase 1 — Data in
+
+Two inputs: recipe dumps and the table manifest. The token now comes from
+Secret Manager — it never touches your shell history or a file:
+
+    WORKATO_API_TOKEN="$(gcloud secrets versions access latest --secret="${SECRET}")"
+    SNAP="snap_$(date -u +%Y%m%dT%H%M%SZ)"
+    mkdir -p ~/sdc-agent/dumps/${SNAP} && cd ~/sdc-agent
+
+Pull dumps with `dump_recipes.py` (or per recipe id):
+
+    curl -s -H "Authorization: Bearer ${WORKATO_API_TOKEN}" \
+      "https://www.workato.com/api/recipes/<id>" > dumps/${SNAP}/r_<id>.json
+
+Manifest — export the data-table manifest to `dumps/${SNAP}/manifest.json`.
+`derive.py` expects `[{table_id, name, fields:[{uuid, name, type}]}]` and
+tolerates common aliases; if your shape differs, `load_manifest()` is the
+single adapter point. Deriving without a manifest works but degrades field
+resolution to NULLs — get the manifest in before calibration.
+
+Write-through to the bucket immediately (versioning makes this the diffable
+history; `$HOME` is scratch, the bucket is canonical):
+
+    gcloud storage cp -r dumps/${SNAP} "${BUCKET}/snapshots/${SNAP}/"
+
+**Done when:** `gcloud storage ls "${BUCKET}/snapshots/${SNAP}/" | wc -l` ≈ 59
+(58 recipes + manifest), and `unset WORKATO_TOKEN` has run.
+
+## Phase 2 — Derive and sanity-check
+
+    sqlite3 facts.db < schema.sql
+    python3 derive.py --dumps dumps/${SNAP} --manifest dumps/${SNAP}/manifest.json \
+      --db facts.db --notes "${SNAP}"
+
+The report prints counts plus two honesty lines: degraded call edges
+(`resolved=0`) and unresolvable datapills. Nonzero is expected — investigate
+magnitude, not existence. Spot-check against the `edges.json` freeze: pick
+three edges you know by heart (a `call_sync`, a `table_write` with column
+detail, a property read) and confirm each appears with correct endpoints.
+
+Publish the artifact:
+
+    gcloud storage cp facts.db "${BUCKET}/artifacts/facts.db"
+
+**Done when:** recipe count matches the corpus, spot-checks pass, and the
+artifact is in the bucket. Every later phase may re-download it fresh:
+`gcloud storage cp "${BUCKET}/artifacts/facts.db" .`
+
+## Phase 3 — Answer questions by hand
+
+Before any agent exists, prove the *data* can answer real questions. Open the
+db read-only and work three calibration questions with raw SQL:
+
+    sqlite3 "file:facts.db?mode=ro"
+
+Suggested set (swap in your own — the point is questions whose answers you
+already know from hand analysis):
+
+1. Which recipes write `WFA_SupplierRequest`, and which columns?
+2. Every consumer of one `CFG_` table field, across the corpus.
+3. The full call chain from UPL-01 downward, with sync/async marked.
+
+As you work, notice which joins recur. **Promote each recurring join into a
+named view in `schema.sql`** (e.g. `v_datapill_consumers`). This is not
+housekeeping — in the two-tool design (D1 below) the view catalog *is* the
+tool surface, and this phase is where it gets discovered rather than invented.
+
+**Done when:** all three questions answered in ≤3 SQL statements each, and
+every recurring join has become a view.
+
+## Phase 4 — The tool layer
+
+**Decision D1 — resolve before writing code.** Two candidate surfaces:
+
+- **(a) Two tools** — `query(sql)` (read-only, row-capped, SELECT-only) +
+  `get_step(recipe_id, step_path)` (the one sanctioned drill-down, UUIDs
+  resolved). The views from Phase 3 are the curated API; extending the system
+  means writing a view, not tool code. Evidence = the SQL text itself,
+  reproducible verbatim. *Recommended for M1.*
+- **(b) Six tools** — `tool_spec.py` as originally designed. More bounded,
+  more code, extension means new declarations + dispatch. Falls back cleanly
+  if (a) shows the model writing bad SQL against your schema.
+
+The middle path is real: start with (a); any query the agent uses repeatedly
+gets promoted to a view, and the view catalog becomes a record of which
+questions turned out to matter. If (a) fails calibration, (b) costs one file
+you already have.
+
+Build `corpus.py` with CLI subcommands mirroring the tool surface exactly:
+
+    python3 corpus.py query "SELECT ... FROM v_call_graph WHERE ..."
+    python3 corpus.py get-step UPL-01 0/2/1
+
+Non-negotiables regardless of D1:
+
+- Open with `sqlite3.connect("file:facts.db?mode=ro", uri=True)` — the URI
+  mode is the guarantee; statement inspection is just a courtesy error.
+- Row cap (default 200) with an explicit `truncated: true` marker in output.
+- `input_json` and other blob columns are excluded from `query` results; big
+  detail flows only through `get_step`, one step at a time. (Rule: no tool
+  ever returns a raw code tree.)
+- Output is JSON on stdout — the same functions get imported by Phase 5's
+  loop, so keep them pure: `def query(sql) -> dict`, `def get_step(...) -> dict`.
+
+**Done when:** the three Phase 3 questions are answerable using only the CLI —
+no direct sqlite3 access — and a `get_step` on a py_eval step returns resolved
+field names.
+
+## Phase 5 — The agent loop
+
+Hand-rolled function calling with `google-genai` — roughly fifty lines, every
+moving part understood. The skeleton:
+
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(vertexai=True, project=PROJECT_ID, location="global")
+    # tools: FunctionDeclarations matching corpus.py's surface exactly
+
+Loop: send question + declarations → while the response contains function
+calls, dispatch to the imported `corpus.py` functions, append results, log
+every call as a JSON line (`{tool, args, row_count, truncated}`) → final text.
+
+Notes that will save you an afternoon:
+
+- The SDK is client-based; there is no `vertexai.init()`. Anything you find
+  in older notes or samples using `vertexai.generative_models` is dead code
+  as of 2026-06-24.
+- `google-genai` offers *automatic* function calling (pass Python callables
+  directly). Decline it for M1: the manual loop is what produces the evidence
+  log, and the evidence log is the product's credibility.
+- Responses are Pydantic models — `.model_dump()`, not `.to_dict()`.
+- System prompt = a short brief: the spine, the schema tour (tables + view
+  catalog with one-line purposes), the rules ("cite tool calls for every
+  claim", "prefer views", "say so when the row cap truncates").
+
+**Done when (acceptance test):** the agent, using only the tool surface,
+reproduces your hand-derived diagnosis of the steps-25/26 dead-end — same
+root cause, evidence log showing the tool calls that support it.
+
+## Phase 6 — Calibrate, then decide about promotion
+
+Run a ~10-question calibration set spanning the question classes you actually
+ask (impact-of-rename, who-writes-this-table, call-chain, config-resolution).
+For each: correct/incorrect, evidence quality, tool calls consumed. Failures
+route to exactly one of three fixes — a missing view, a prompt clarification,
+or (only if systemic) D1 fallback to the six-tool surface.
+
+Promotion is now *only* a compute decision, because identity and storage
+already exist: a Cloud Run job running as `sdc-corpus-agent` (the same SA —
+zero new IAM) doing acquisition + derivation on a Cloud Scheduler cadence,
+with the interactive loop pointed at `${BUCKET}/artifacts/facts.db`. The
+promotion runtime can be the parallel-agent-graph platform when its Phase 2+
+exists; `query` and `get_step` become two action-registry entries. That
+convergence is a reward for passing calibration, not a prerequisite.
+
+**Done when:** calibration score recorded with transcripts in
+`${BUCKET}/artifacts/calibration/${SNAP}/`, and a written go/no-go on
+promotion.
+
+---
+
+## Deliberately out of scope for M1 (unchanged from rev. 1)
+
+No embeddings/RAG. No contracts engine (contracts live in a markdown file the
+agent may read). No findings table (an M1 finding is an answer with its
+evidence log attached). No snapshot diffing (the schema already supports it;
+the bucket already versions for it). No BigQuery (a `bq load` mirror is one
+command away if ad-hoc console SQL ever earns its keep). No ADK, no Agent
+Engine, no Workato write paths.
