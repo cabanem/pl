@@ -1,10 +1,25 @@
-This is the itch the schema was built to scratch — "M2 diffing is a self-join" has been a promissory note since July, and you're now holding everything it needs. No new derivation, no new tables: recipe edits are already sitting in `facts.db` as differences between snapshot rows. Let me show you the query family, plus two honest caveats and one experiment your existing fossils make possible.
+Same format as the Phase 3 session, but structured as three acts with a prediction before each — because this walkthrough's real product isn't the diffs, it's *calibrated trust* in the diff machinery: one true-negative, one live demonstration of the conflation trap, one true-positive you manufacture yourself.
 
-**Level 1 — *that* something changed.** The `fingerprint` column exists precisely for this: a hash of the normalized code tree, so any edit anywhere in a recipe changes it. Latest-vs-previous is a full outer self-join:
+**Step 0 — setup.** Your local `facts.db` already holds all three fossils (the bucket artifact does too if you've been syncing after each derive — the db accumulates snapshots, which is the whole point). Open it read-only, and check one version gate:
+
+```bash
+sqlite3 --version    # need ≥ 3.39 for FULL OUTER JOIN; Cloud Shell's is newer
+sqlite3 "file:facts.db?mode=ro"
+```
 
 ```sql
-WITH a AS (SELECT * FROM recipes WHERE snapshot_id=(SELECT MAX(snapshot_id)-1 FROM snapshots)),
-     b AS (SELECT * FROM recipes WHERE snapshot_id=(SELECT MAX(snapshot_id) FROM snapshots))
+.headers on
+.mode box
+SELECT snapshot_id, captured_at, recipe_count, notes FROM snapshots;
+```
+
+Keep a `diff.sql` scratch file going as you work (`.read diff.sql` replays it) — winners get promoted at the end.
+
+**Act 1 — the true-negative.** Snapshots 1, 2, 3 were derived from the *same recipe dumps* by three versions of the pipeline. Fingerprints hash only the code tree, which none of the pipeline fixes touched. **Prediction: zero rows.** Diff the extremes:
+
+```sql
+WITH a AS (SELECT * FROM recipes WHERE snapshot_id=1),
+     b AS (SELECT * FROM recipes WHERE snapshot_id=3)
 SELECT COALESCE(b.name, a.name) AS recipe,
        CASE WHEN a.recipe_id IS NULL THEN 'added'
             WHEN b.recipe_id IS NULL THEN 'removed'
@@ -14,14 +29,11 @@ FROM a FULL OUTER JOIN b ON a.recipe_id = b.recipe_id
 WHERE status <> 'unchanged';
 ```
 
-(`FULL OUTER JOIN` needs SQLite ≥3.39 — Cloud Shell's is newer, fine.)
+Empty result = the machinery correctly reports "nothing happened" when nothing happened — the diff equivalent of a clean control group. If anything *does* appear, that's interesting rather than wrong: `added`/`removed` would mean the two derive runs saw different file sets (compare `raw_path`s), and `edited` would mean fingerprinting isn't deterministic — either one worth bringing to me before proceeding.
 
-**Level 2 — roughly *where*.** Same shape over `steps` on `(recipe_id, step_path)`, comparing `provider/name/keyword/input_json`. But here's caveat one, worth internalizing before you trust it: **`step_path` is positional identity**, so inserting one step shifts every sibling after it, and a single insertion reads as N "modifications." Level 2 answers "what region of the recipe moved," not "the precise edit." The M2-grade refinement, when it's earned, is per-step content hashes in derive — but even those don't fully solve insertion shift; that's the classic tree-diff problem, and resisting solving it before a real question demands it is exactly your guard working.
-
-**Level 3 — the semantic diff, and honestly the gem.** Diff *edges* instead of steps: because typed relationships ignore position, set-comparing them is stable where Level 2 is noisy, and it speaks your platform's language directly:
+**Act 2 — watch the conflation trap fire, on purpose.** Now the Level 3 field-writers diff between snapshots **2 and 3**. Prediction first, and reason it out: the writers CTE joins `edges.dst_id` to `tables.table_id` — in snapshot 2 the manifest still carried UUIDs, so that join produces *nothing* on the `a` side, while snapshot 3 resolves fully. So the diff should scream that **every field writer in the corpus was "added"** — dozens of rows of apparent drift, none of it real:
 
 ```sql
--- writers gained or lost per (table, field) between the last two snapshots
 WITH w AS (
   SELECT e.snapshot_id, t.name AS table_name, tf.field_name, r.name AS recipe
   FROM edges e
@@ -31,18 +43,68 @@ WITH w AS (
   JOIN table_fields tf ON tf.snapshot_id=e.snapshot_id AND tf.table_id=e.dst_id
                       AND tf.field_key=c.value
   WHERE e.kind='table_write')
-SELECT COALESCE(b.table_name,a.table_name) AS tbl,
+SELECT COALESCE(b.recipe,a.recipe) AS recipe,
+       COALESCE(b.table_name,a.table_name) AS tbl,
        COALESCE(b.field_name,a.field_name) AS field,
-       COALESCE(b.recipe,a.recipe) AS recipe,
        CASE WHEN a.recipe IS NULL THEN 'writer added' ELSE 'writer removed' END AS drift
-FROM (SELECT * FROM w WHERE snapshot_id=(SELECT MAX(snapshot_id)-1 FROM snapshots)) a
-FULL OUTER JOIN (SELECT * FROM w WHERE snapshot_id=(SELECT MAX(snapshot_id) FROM snapshots)) b
+FROM (SELECT * FROM w WHERE snapshot_id=2) a
+FULL OUTER JOIN (SELECT * FROM w WHERE snapshot_id=3) b
   ON a.table_name=b.table_name AND a.field_name=b.field_name AND a.recipe=b.recipe
 WHERE a.recipe IS NULL OR b.recipe IS NULL;
 ```
 
-"REM-02 stopped writing `last_reminder_sent_at`" as a query result is drift diagnosis — capability #2 on your own ranking — falling out of M1's schema for free. Same pattern works for call edges and connections.
+Sit with that output for a moment — it's what derivation drift looks like when it masquerades as corpus drift, and it's why the discipline is *only diff same-pipeline snapshots*. Make the discipline enforceable going forward by tagging every future derive: `--notes "${SNAP} derive=r3"`. (For the three untagged fossils, I'd just record the mapping in your phase notes rather than opening a write session — bending the derive-is-the-only-writer rule to annotate history isn't worth it for three rows you'll soon stop diffing against.)
 
-**Caveat two, and it matters for your existing data:** snapshots 1, 2, and 3 differ by *derivation*, not by corpus — same dumps, three versions of the pipeline. So a snapshot diff conflates two kinds of change: recipe edits and derive.py edits. Level 1 across your fossils should report **zero edited recipes** (fingerprints hash the code tree, untouched by the backfill or manifest fixes) — run it; it's a free true-negative test of the diff machinery. But Level 3 across them will light up with the backfill and id-space changes, which demonstrates the conflation live. The discipline that follows: only diff snapshots derived by the same pipeline version, and make that checkable by tagging derive's version in `--notes` (you already pass `--notes`; something like `"${SNAP} derive=r3"` costs nothing and makes the constraint queryable).
+**Act 3 — manufacture a true-positive.** In Workato, make one *revertible, code-tree-touching* edit to a sandbox or low-stakes recipe — renaming a step or editing a step comment is ideal, because it lands inside the step node (so the fingerprint moves) without inserting anything (so Act 3 stays clean of the positional-shift effect — that gets its own moment below). Recipe *description* won't work: it's metadata outside `code`, invisible to the fingerprint by design. Then the full pipeline, tagged:
 
-Where the boundary sits: run these by hand now — it's Phase 3 methodology applied forward, and the true-negative check plus one deliberate test edit (touch a sandbox recipe, re-dump, re-derive, watch Level 1 catch exactly it) would validate the whole family in an afternoon. The Level 1 query is even eligible for the catalog as `v_recipe_drift` since "latest vs previous" needs no parameters. What stays firmly M2: scheduling dumps so snapshots track real time, drift *findings* with review flow, and step-level precision. The agent, notably, needs nothing new to participate — `query` already reaches all of this, and one paragraph in BRIEF.md ("for change questions, diff snapshots; beware derivation-version conflation") would make it drift-capable the day snapshots start accumulating for real. That last part I'd genuinely hold until calibration passes — but the hand-run experiment costs an afternoon and pays for itself in trust.
+```bash
+export WORKATO_API_TOKEN="$(gcloud secrets versions access latest --secret="${SECRET}")"
+SNAP2="snap_$(date -u +%Y%m%dT%H%M%SZ)"
+python3 dump_recipes.py --folder <id> --dest dumps/${SNAP2}
+python3 derive.py --dumps dumps/${SNAP2} --manifest dumps/${SNAP2}/manifest.json \
+  --db facts.db --notes "${SNAP2} derive=r3 test-edit"
+```
+
+**Prediction: exactly one `edited` row.** Run the Act 1 query with `snapshot_id=3` and `snapshot_id=4` — same-pipeline snapshots now, so the comparison is legitimate. One row, your sandbox recipe: the machinery detects a real edit against a background of 57 unchanged. That's your true-positive, and the pair of acts together is the validation.
+
+Then localize it with Level 2, scoped to just that recipe — note the `IS NOT` comparisons, which is SQLite's null-safe "differs" (plain `<>` silently swallows NULL-vs-value differences):
+
+```sql
+WITH a AS (SELECT * FROM steps WHERE snapshot_id=3 AND recipe_id='<rid>'),
+     b AS (SELECT * FROM steps WHERE snapshot_id=4 AND recipe_id='<rid>')
+SELECT COALESCE(b.step_path,a.step_path) AS step_path,
+       CASE WHEN a.step_path IS NULL THEN 'added'
+            WHEN b.step_path IS NULL THEN 'removed'
+            WHEN a.input_json IS NOT b.input_json OR a.name IS NOT b.name
+              OR a.provider IS NOT b.provider OR a.keyword IS NOT b.keyword
+            THEN 'modified' ELSE 'same' END AS status,
+       COALESCE(b.provider,a.provider) AS provider,
+       COALESCE(b.name,a.name) AS name
+FROM a FULL OUTER JOIN b ON a.step_path = b.step_path
+WHERE status <> 'same';
+```
+
+One `modified` row at the step you touched. And if you want to *feel* the caveat rather than take my word for it: as an optional epilogue, insert a step early in the same sandbox recipe, dump, derive snapshot 5, rerun Level 2 — and watch one insertion read as a cascade of "modified" rows as every positional identity after it shifts. Seeing that once inoculates you against ever over-trusting step-level diffs. Revert the sandbox recipe when done.
+
+**Promotion, if and only if both acts pass.** Level 1's latest-vs-previous shape is parameter-free, so it's catalog-eligible — append to `schema_catalog.sql`:
+
+```sql
+-- Drift: recipes changed between the latest two snapshots. Only meaningful
+-- when both snapshots share a derive version (check snapshots.notes).
+CREATE VIEW IF NOT EXISTS v_recipe_drift AS
+WITH latest AS (SELECT MAX(snapshot_id) AS s FROM snapshots),
+     prev   AS (SELECT MAX(snapshot_id) AS s FROM snapshots
+                 WHERE snapshot_id < (SELECT s FROM latest)),
+     a AS (SELECT * FROM recipes WHERE snapshot_id=(SELECT s FROM prev)),
+     b AS (SELECT * FROM recipes WHERE snapshot_id=(SELECT s FROM latest))
+SELECT COALESCE(b.name, a.name) AS recipe,
+       COALESCE(b.recipe_id, a.recipe_id) AS recipe_id,
+       CASE WHEN a.recipe_id IS NULL THEN 'added'
+            WHEN b.recipe_id IS NULL THEN 'removed'
+            ELSE 'edited' END AS status
+  FROM a FULL OUTER JOIN b ON a.recipe_id = b.recipe_id
+ WHERE a.recipe_id IS NULL OR b.recipe_id IS NULL
+    OR a.fingerprint <> b.fingerprint;
+```
+
+Exit criteria for the afternoon: Act 1 empty, Act 2's noise understood (and the tagging habit adopted), Act 3 catching exactly your one edit, `v_recipe_drift` in the catalog. At that point the drift machinery is *validated*, and what remains for real M2 is only cadence and workflow — scheduled dumps so snapshots track calendar time, and findings review. The Level 2/3 shapes stay in `diff.sql` as proven-but-unpromoted, which is exactly where they belong until a real question pulls them up.
