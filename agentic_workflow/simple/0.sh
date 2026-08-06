@@ -66,7 +66,7 @@ echo "  found ${SA_EMAIL}"
 echo "  project-level roles it ALREADY holds (the agent inherits all of these):"
 gcloud projects get-iam-policy "${PROJECT_ID}" \
   --flatten="bindings[].members" \
-  --filter="bindings.members:serviceAccount:${SA_EMAIL}" \
+  --filter="bindings.members=serviceAccount:${SA_EMAIL}" \
   --format="value(bindings.role)" 2>/dev/null | sed 's/^/     /' \
   || echo "     (could not read project IAM policy — ask an admin for the list)"
 KEY_COUNT="$(gcloud iam service-accounts keys list --iam-account="${SA_EMAIL}" \
