@@ -166,7 +166,11 @@ def build_table_manifest(tables: list[dict]) -> list[dict]:
     for t in tables:
         fields = t.get("schema") or t.get("fields") or []
         out.append({
-            "table_id": t.get("id"),
+            # Recipe code references tables by NUMERIC id; the listing's `id`
+            # is a UUID that code never uses. Canonicalize on the code-side
+            # identity so every join in facts.db speaks one id-space.
+            # (The UUID survives untransformed in _tables_raw.json.)
+            "table_id": t.get("numeric_id") or t.get("id"),
             "name": t.get("name"),
             "fields": [{
                 "uuid": field_uuid(f),
