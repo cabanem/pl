@@ -93,31 +93,38 @@ real permission problems.
 
 ## Phase 1 — Data in
 
-Two inputs: recipe dumps and the table manifest. The token now comes from
-Secret Manager — it never touches your shell history or a file:
+Two inputs: recipe dumps and the table manifest — `dump_recipes.py` (standalone
+Cloud Shell edition) now captures both in one run. The token comes from Secret
+Manager; it must be exported (the script reads the environment, never a file):
 
-    WORKATO_API_TOKEN="$(gcloud secrets versions access latest --secret="${SECRET}")"
+    export WORKATO_API_TOKEN="$(gcloud secrets versions access latest --secret="${SECRET}")"
     SNAP="snap_$(date -u +%Y%m%dT%H%M%SZ)"
-    mkdir -p ~/sdc-agent/dumps/${SNAP} && cd ~/sdc-agent
+    cd ~/sdc-agent
+    python3 dump_recipes.py --folder <SDC_FOLDER_ID> --dest dumps/${SNAP}
 
-Pull dumps with `dump_recipes.py` (or per recipe id):
+This writes one `{handle}__{id}.recipe.json` per recipe (code tree parsed),
+plus three sidecars: `manifest.json` (the table schema map derive.py consumes),
+`_manifest.json` (provenance of this dump: what, when, errors), and
+`_tables_raw.json` (the untransformed data-tables API response — the escape
+hatch if field-uuid mapping degrades). EU data center: set
+`WORKATO_API_BASE=https://app.eu.workato.com` first.
 
-    curl -s -H "Authorization: Bearer ${WORKATO_API_TOKEN}" \
-      "https://www.workato.com/api/recipes/<id>" > dumps/${SNAP}/r_<id>.json
-
-Manifest — export the data-table manifest to `dumps/${SNAP}/manifest.json`.
-`derive.py` expects `[{table_id, name, fields:[{uuid, name, type}]}]` and
-tolerates common aliases; if your shape differs, `load_manifest()` is the
-single adapter point. Deriving without a manifest works but degrades field
-resolution to NULLs — get the manifest in before calibration.
+Manifest shape — `derive.py` expects `[{table_id, name, fields:[{uuid, name,
+type}]}]`, which `dump_recipes.py` emits; if the dump report counts fields
+without uuids, inspect `_tables_raw.json` and adapt `load_manifest()` in
+`derive.py` — that remains the single adapter point. Deriving without a
+manifest works but degrades field resolution to NULLs — get the manifest in
+before calibration.
 
 Write-through to the bucket immediately (versioning makes this the diffable
 history; `$HOME` is scratch, the bucket is canonical):
 
     gcloud storage cp -r dumps/${SNAP} "${BUCKET}/snapshots/${SNAP}/"
 
-**Done when:** `gcloud storage ls "${BUCKET}/snapshots/${SNAP}/" | wc -l` ≈ 59
-(58 recipes + manifest), and `unset WORKATO_TOKEN` has run.
+**Done when:** `ls dumps/${SNAP}/*.recipe.json | wc -l` ≈ 58, `manifest.json`
+exists with zero (or explained) uuid-less fields, the dump report shows zero
+errors, the snapshot is in `${BUCKET}/snapshots/${SNAP}/`, and
+`unset WORKATO_API_TOKEN` has run.
 
 ## Phase 2 — Derive and sanity-check
 
