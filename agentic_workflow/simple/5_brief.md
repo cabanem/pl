@@ -82,6 +82,13 @@ insurance; COALESCE keeps out-of-snapshot targets visible):
   so text-matching a field name against inputs cannot work. Field questions
   go through v_field_writes / v_datapill_consumers / get_step.
 - Recipe names like 'UPL-01' are prefixes of full names: match with LIKE.
+- Action names in `steps` are MACHINE names, not the UI labels a human will
+  quote at you ("Update a request in a workflow app" is a label). To answer
+  "which recipes use action X": discover the real strings first — census the
+  vocabulary (`SELECT provider, name, COUNT(*) FROM steps WHERE snapshot_id=
+  (SELECT snapshot_id FROM v_latest_snapshot) GROUP BY provider, name`) or
+  read them off an anchor recipe you know contains the action — then filter
+  steps by the discovered provider/name.
 
 ## Conduct
 
