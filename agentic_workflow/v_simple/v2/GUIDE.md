@@ -52,7 +52,10 @@ Rules that hold in every phase:
 ## Environment prelude (paste at the top of every session)
 
 Cloud Shell sessions are ephemeral shells over a persistent `$HOME`. Start
-each session with:
+each session with the exports below, then run `./preflight.sh` — a read-only
+verifier that proves this entire prelude plus both credential planes, the
+GCP chain, and artifact freshness, printing the fix for anything broken
+(`--ui` adds the UI tier; `--live` adds a one-token Gemini probe):
 
     export PROJECT_ID="$(gcloud config get-value project)"
     export APP=sdc-corpus
