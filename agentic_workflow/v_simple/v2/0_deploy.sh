@@ -1,156 +1,158 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# deploy.sh — SDC Corpus Agent UI: Cloud Run + IAP (shared-project edition, v4)
+# preflight.sh — SDC Corpus Agent: session preflight (READ-ONLY, always safe)
 #
-# Default identity model (the simple chain, probed before anything runs):
-#     you ──deploy/build──▶ service ──runs as──▶ CORPUS_SA ──▶ Vertex/bucket/secret
+# Run at the start of every work session:   ./preflight.sh [--ui] [--live]
 #
-# Optional configuration for locked-down setups:
-#   BUILD_SA=<sa>    pin Cloud Build to an SA holding run.builder (use when the
-#                    default build identity fails or org policy constrains it)
-#   DEPLOY_SA=<sa>   full choreography: impersonate this SA for every deploy-
-#                    plane command (use when YOU lack service-plane access —
-#                    ./find_deployer.sh discovers whether you do)
+# Verifies the full prerequisite chain and prints a fix for every failure.
+# Creates nothing, grants nothing, writes nothing. The provisioners
+# (phase0.sh, deploy.sh) create state; this script only proves it.
 #
-# Idempotent. Ambient CLI impersonation (session prelude -> corpus SA) is
-# always suspended for this provisioner and restored on exit — the corpus SA
-# is a runtime identity and must never appear on the deploy plane.
+#   (default)  tooling, session env, credential planes, GCP chain, artifacts
+#   --ui       adds the UI tier (chainlit, ui/ files, IAP consent brand)
+#   --live     adds one tiny Gemini call (costs a few tokens; proves Vertex
+#              end-to-end under the SA)
 # ==============================================================================
-set -euo pipefail
+set -uo pipefail    # deliberately no -e: we want to reach the end and summarize
 
-# ---- Config ------------------------------------------------------------------
-PROJECT_ID="$(gcloud config get-value project 2>/dev/null)"
-REGION="us-east1"
-SERVICE="sdc-corpus-ui"
-APP="sdc-corpus"
-SA_EMAIL="${SA_EMAIL:?set SA_EMAIL to the corpus (runtime) service account}"
-BUCKET="gs://${APP}-${PROJECT_ID}"
-MODEL="${MODEL:?set MODEL to the current Gemini id}"
-ACCESS_MEMBER="${ACCESS_MEMBER:?set ACCESS_MEMBER, e.g. group:team@domain or user:you@domain}"
-DEPLOY_SA="${DEPLOY_SA:-}"
-BUILD_SA="${BUILD_SA:-}"
+PASS=0; FAIL=0; WARN=0
+ok()   { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
+bad()  { printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        fix: %s\n' "$2"; FAIL=$((FAIL+1)); }
+warn() { printf '  warn  %s\n' "$1"; [ -n "${2:-}" ] && printf '        note: %s\n' "$2"; WARN=$((WARN+1)); }
+have() { command -v "$1" >/dev/null 2>&1; }
 
-PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
-IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
+UI=0; LIVE=0
+for a in "$@"; do case "$a" in --ui) UI=1;; --live) LIVE=1;; esac; done
 
-AS_DEPLOYER=()
-[ -n "${DEPLOY_SA}" ] && AS_DEPLOYER=(--impersonate-service-account="${DEPLOY_SA}")
-BUILD_FLAGS=()
-[ -n "${BUILD_SA}" ] && BUILD_FLAGS=(--build-service-account="projects/${PROJECT_ID}/serviceAccounts/${BUILD_SA}")
-
-echo "Project : ${PROJECT_ID} (${PROJECT_NUMBER})"
-echo "Deploys : ${DEPLOY_SA:-you ($(gcloud config get-value account 2>/dev/null))}"
-echo "Builds  : ${BUILD_SA:-default build identity}"
-echo "Runtime : ${SA_EMAIL}"
-echo "Service : ${SERVICE} in ${REGION}"
-echo "Access  : ${ACCESS_MEMBER}"
-echo
-
-# ---- 0a. Identity: suspend ambient impersonation, probe the chain ------------
-SAVED_IMP="$(gcloud config get-value auth/impersonate_service_account 2>/dev/null || true)"
-if [ -n "${SAVED_IMP}" ]; then
-  echo "[0a] suspending ambient impersonation of ${SAVED_IMP} for this provisioner"
-  gcloud config unset auth/impersonate_service_account >/dev/null
-  trap "gcloud config set auth/impersonate_service_account '${SAVED_IMP}' >/dev/null; echo '  (impersonation restored)'" EXIT
-fi
-DEPLOYER_HUMAN="$(gcloud config get-value account 2>/dev/null)"
-
-if [ -n "${DEPLOY_SA}" ]; then
-  gcloud auth print-access-token "${AS_DEPLOYER[@]}" >/dev/null 2>&1 \
-    && echo "[0a] you can impersonate ${DEPLOY_SA}" \
-    || { echo "[0a] !! cannot impersonate ${DEPLOY_SA} — need tokenCreator on it"; exit 1; }
-  ACTOR_MEMBER="serviceAccount:${DEPLOY_SA}"
+echo "== 1. Tooling =="
+have python3 && ok "python3 $(python3 -V 2>&1 | cut -d' ' -f2)" \
+  || bad "python3 missing" "install Python 3.9+"
+have gcloud && ok "gcloud present" \
+  || bad "gcloud missing" "run this in Cloud Shell, or install the SDK"
+if have sqlite3; then
+  SV="$(sqlite3 --version | cut -d' ' -f1)"
+  case "$SV" in
+    3.3[9-9]*|3.4*|3.5*|4.*) ok "sqlite3 ${SV} (FULL OUTER JOIN ok)";;
+    *) warn "sqlite3 ${SV} < 3.39" "drift queries use FULL OUTER JOIN; use LEFT JOIN + UNION shims or upgrade";;
+  esac
 else
-  ACTOR_MEMBER="user:${DEPLOYER_HUMAN}"
+  bad "sqlite3 CLI missing" "sudo apt-get install -y sqlite3"
 fi
+python3 - <<'PY' 2>/dev/null && ok "google-genai importable" || warn "google-genai not importable" "source ~/corpus-venv/bin/activate  (only --fake works without it)"
+import google.genai
+PY
 
-# Service-plane probe for whoever deploys (fails fast with the fix, never mid-build):
-if gcloud run services list --region "${REGION}" --limit=1 "${AS_DEPLOYER[@]}" >/dev/null 2>&1; then
-  echo "[0a] deploy identity sees the service plane"
-else
-  echo "[0a] !! no service-plane access for ${ACTOR_MEMBER}.
-     Run ./find_deployer.sh to discover a capable identity, or ask an admin for:
-       gcloud projects add-iam-policy-binding ${PROJECT_ID} \\
-         --member=${ACTOR_MEMBER} --role=roles/run.sourceDeveloper"
-  exit 1
-fi
-
-# actAs: whoever deploys must hold serviceAccountUser on the RUNTIME SA.
-gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
-  --member="${ACTOR_MEMBER}" --role="roles/iam.serviceAccountUser" >/dev/null 2>&1 \
-  && echo "[0a] ${ACTOR_MEMBER} holds actAs on ${SA_EMAIL}" \
-  || echo "[0a] !! could not assert actAs (may already exist, or ask an admin:
-     gcloud iam service-accounts add-iam-policy-binding ${SA_EMAIL} \\
-       --member=${ACTOR_MEMBER} --role=roles/iam.serviceAccountUser)"
-
-# If a build SA is pinned, the deployer also needs actAs on IT:
-if [ -n "${BUILD_SA}" ]; then
-  gcloud iam service-accounts add-iam-policy-binding "${BUILD_SA}" \
-    --member="${ACTOR_MEMBER}" --role="roles/iam.serviceAccountUser" >/dev/null 2>&1 \
-    && echo "[0a] ${ACTOR_MEMBER} holds actAs on build SA ${BUILD_SA}" \
-    || echo "[0a] !! could not assert actAs on ${BUILD_SA} — ask its owner/admin
-     for roles/iam.serviceAccountUser there"
-fi
-
-# ---- 0b. Org-policy preflight (informational) --------------------------------
-echo "[0b] Org policies that could bite (blank = unset, fine):"
-for C in run.allowedIngress iam.allowedPolicyMemberDomains; do
-  printf '  %s: ' "$C"
-  gcloud resource-manager org-policies describe "$C" --project="${PROJECT_ID}" \
-    --format='value(listPolicy)' 2>/dev/null || echo "(not readable/unset)"
+echo "== 2. Session environment =="
+for V in PROJECT_ID SA_EMAIL BUCKET SECRET MODEL; do
+  VAL="${!V:-}"
+  if [ -z "$VAL" ]; then
+    bad "$V unset" "run the session prelude in GUIDE.md"
+  elif [ "$V" = "SA_EMAIL" ]; then
+    # The stripped-hyphen trap: an empty prefix var leaves '-name@...' or '@...'
+    case "$VAL" in
+      -*|@*) bad "SA_EMAIL looks truncated: '$VAL'" "a composing variable was unset — paste the literal email";;
+      *@*.iam.gserviceaccount.com) ok "SA_EMAIL=$VAL";;
+      *) warn "SA_EMAIL='$VAL' doesn't look like an SA email" "expected <name>@<project>.iam.gserviceaccount.com";;
+    esac
+  else
+    ok "$V=$VAL"
+  fi
 done
 
-# ---- 1. APIs (tolerant: may already be enabled) ------------------------------
-echo "[1/4] Enabling APIs..."
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
-  artifactregistry.googleapis.com iap.googleapis.com 2>/dev/null \
-  || echo "  !! could not enable APIs (fine if already enabled — the deploy will
-     tell you; otherwise ask an admin for run, cloudbuild, artifactregistry, iap)"
+echo "== 3. Credential planes =="
+[ -n "${CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT:-}" ] \
+  && warn "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT is exported (${CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT})" \
+          "this OVERRIDES gcloud config; provisioners cannot suspend it — unset unless deliberate"
+[ -n "${DEPLOY_SA:-}" ] \
+  && warn "DEPLOY_SA is exported (${DEPLOY_SA})" \
+          "deploy.sh will enter choreography mode; unset if you deploy as yourself"
+if have gcloud; then
+  ACCT="$(gcloud config get-value account 2>/dev/null)"
+  [ -n "$ACCT" ] && ok "gcloud account: $ACCT" || bad "no gcloud account" "gcloud auth login"
+  IMP="$(gcloud config get-value auth/impersonate_service_account 2>/dev/null)"
+  if [ -n "$IMP" ] && [ "$IMP" = "${SA_EMAIL:-}" ]; then
+    ok "gcloud CLI plane impersonates the SA"
+  else
+    bad "gcloud CLI plane not impersonating (${IMP:-none})" \
+        "gcloud config set auth/impersonate_service_account \${SA_EMAIL}"
+  fi
+  ADC="${HOME}/.config/gcloud/application_default_credentials.json"
+  if [ -f "$ADC" ]; then
+    grep -q impersonated_service_account "$ADC" \
+      && ok "ADC plane is impersonated (client libraries act as the SA)" \
+      || warn "ADC exists but is NOT impersonated" \
+              "gcloud auth application-default login --impersonate-service-account=\${SA_EMAIL}"
+  else
+    bad "no ADC file" "gcloud auth application-default login --impersonate-service-account=\${SA_EMAIL}"
+  fi
+fi
 
-# ---- 2. Build + deploy -------------------------------------------------------
-echo "[2/4] Deploying ${SERVICE}..."
-gcloud run deploy "${SERVICE}" \
-  "${AS_DEPLOYER[@]}" \
-  "${BUILD_FLAGS[@]}" \
-  --source . \
-  --region "${REGION}" \
-  --service-account "${SA_EMAIL}" \
-  --no-allow-unauthenticated \
-  --session-affinity \
-  --memory 1Gi --cpu 1 --timeout 300 \
-  --min-instances 0 --max-instances 3 \
-  --set-env-vars "BUCKET=${BUCKET},MODEL=${MODEL},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},LOCATION=global"
-# If the BUILD step fails on a build-identity complaint, re-run with
-# BUILD_SA=<an SA holding run.builder> — that is exactly what run.builder is for.
+echo "== 4. GCP chain (read-only probes, as the SA) =="
+if have gcloud && [ -n "${SA_EMAIL:-}" ]; then
+  gcloud iam service-accounts describe "${SA_EMAIL}" >/dev/null 2>&1 \
+    && ok "SA exists" || bad "SA not found: ${SA_EMAIL}" "check the name / project"
+  if [ -n "${SECRET:-}" ]; then
+    HEAD="$(gcloud secrets versions access latest --secret="${SECRET}" 2>/dev/null | head -c 4)"
+    [ -n "$HEAD" ] && ok "secret readable (token present)" \
+      || bad "cannot read secret '${SECRET}'" "check impersonation + secretAccessor grant; re-run phase0.sh"
+  fi
+  if [ -n "${BUCKET:-}" ]; then
+    if gcloud storage ls "${BUCKET}/" >/dev/null 2>&1; then
+      ok "bucket reachable"
+      AGE="$(gcloud storage ls -l "${BUCKET}/artifacts/facts.db" 2>/dev/null | awk 'NR==1{print $2}')"
+      if [ -n "$AGE" ]; then
+        ok "artifacts/facts.db present (uploaded ${AGE})"
+      else
+        warn "no artifacts/facts.db in bucket" "run Phase 1-2 (dump + derive), then upload"
+      fi
+    else
+      bad "bucket unreachable: ${BUCKET}" "check name + objectAdmin grant; re-run phase0.sh"
+    fi
+  fi
+fi
 
-# ---- 3. IAP: enable directly on the service, then the two grants -------------
-echo "[3/4] IAP..."
-gcloud run services update "${SERVICE}" --region "${REGION}" --iap "${AS_DEPLOYER[@]}" 2>/dev/null \
-  || gcloud beta run services update "${SERVICE}" --region "${REGION}" --iap "${AS_DEPLOYER[@]}" 2>/dev/null \
-  || echo "  !! could not enable IAP via CLI — enable it in Console (Cloud Run ->
-     ${SERVICE} -> Security -> IAP). If prompted about an OAuth consent
-     screen, create it (Internal type)."
+echo "== 5. Repo files =="
+for F in corpus.py agent.py BRIEF.md derive.py dump_recipes.py schema.sql schema_catalog.sql; do
+  [ -f "$F" ] && ok "$F" || warn "$F missing here" "fine if you're in a different directory on purpose"
+done
+[ -f facts.db ] && ok "local facts.db present" \
+  || warn "no local facts.db" "gcloud storage cp \${BUCKET}/artifacts/facts.db ."
+[ -n "${WORKATO_API_TOKEN:-}" ] \
+  && warn "WORKATO_API_TOKEN is exported in this shell" \
+          "prefer per-command fetch so it can't go stale after rotation" \
+  || ok "no long-lived Workato token in the environment"
 
-gcloud run services add-iam-policy-binding "${SERVICE}" --region "${REGION}" "${AS_DEPLOYER[@]}" \
-  --member="serviceAccount:${IAP_AGENT}" --role="roles/run.invoker" >/dev/null 2>&1 \
-  && echo "  IAP service agent granted run.invoker (service-scoped)" \
-  || echo "  !! invoker grant failed (needs run.services.setIamPolicy — run.admin
-     tier). Console fallback: grant run.invoker to ${IAP_AGENT} on ${SERVICE}."
+if [ "$UI" = 1 ]; then
+  echo "== 6. UI tier =="
+  python3 - <<'PY' 2>/dev/null && ok "chainlit importable" || bad "chainlit not importable" "pip install chainlit (in the venv)"
+import chainlit
+PY
+  for F in ui/app.py ui/deploy.sh ui/Dockerfile ui/requirements.txt; do
+    [ -f "$F" ] && ok "$F" || bad "$F missing" "re-assemble the ui/ bundle"
+  done
+  if have gcloud; then
+    gcloud services list --enabled --filter="name:run.googleapis.com" \
+      --format='value(config.name)' 2>/dev/null | grep -q run \
+      && ok "Cloud Run API enabled" || warn "Cloud Run API not enabled" "deploy.sh section 1 enables it"
+    BRANDS="$(gcloud iap oauth-brands list --format='value(name)' 2>/dev/null | head -1)"
+    [ -n "$BRANDS" ] && ok "OAuth consent brand exists (IAP-ready)" \
+      || warn "no OAuth consent brand" "create the consent screen (Internal) once, in Console, before IAP"
+  fi
+fi
 
-gcloud beta iap web add-iam-policy-binding \
-  --resource-type=cloud-run --service="${SERVICE}" --region="${REGION}" "${AS_DEPLOYER[@]}" \
-  --member="${ACCESS_MEMBER}" --role="roles/iap.httpsResourceAccessor" >/dev/null 2>&1 \
-  && echo "  ${ACCESS_MEMBER} granted iap.httpsResourceAccessor" \
-  || echo "  !! accessor grant via CLI failed — grant '${ACCESS_MEMBER}' the
-     'IAP-secured Web App User' role on ${SERVICE} from Console -> Security ->
-     Identity-Aware Proxy."
+if [ "$LIVE" = 1 ]; then
+  echo "== 7. Live model probe (costs a few tokens) =="
+  python3 - "$@" <<'PY' && ok "Gemini reachable as the SA" || bad "Gemini call failed" "check MODEL id, aiplatform.user grant, and ADC impersonation"
+import os
+from google import genai
+c = genai.Client(vertexai=True, project=os.environ["PROJECT_ID"],
+                 location=os.environ.get("LOCATION", "global"))
+r = c.models.generate_content(model=os.environ["MODEL"], contents="Reply: ok")
+assert r.text
+PY
+fi
 
-# ---- 4. Summary --------------------------------------------------------------
-echo "[4/4] Done."
-URL="$(gcloud run services describe "${SERVICE}" --region "${REGION}" "${AS_DEPLOYER[@]}" --format='value(status.url)')"
 echo
-echo "Open (as a member of ${ACCESS_MEMBER}): ${URL}"
-echo
-echo "facts.db refresh after a new derive+upload (instances cache their copy):"
-echo "  gcloud run services update ${SERVICE} --region ${REGION} \\"
-echo "    --update-env-vars REFRESH=\$(date +%s)     # forces new revision -> fresh cold start"
+echo "== Summary: ${PASS} ok, ${WARN} warn, ${FAIL} FAIL =="
+[ "$FAIL" -eq 0 ] && echo "Preflight clean — fly." || echo "Fix the FAILs above before proceeding."
+exit "$([ "$FAIL" -eq 0 ] && echo 0 || echo 1)"
