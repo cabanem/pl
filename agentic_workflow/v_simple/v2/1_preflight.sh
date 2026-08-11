@@ -60,6 +60,12 @@ for V in PROJECT_ID SA_EMAIL BUCKET SECRET MODEL; do
 done
 
 echo "== 3. Credential planes =="
+[ -n "${CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT:-}" ] \
+  && warn "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT is exported (${CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT})" \
+          "this OVERRIDES gcloud config; provisioners cannot suspend it — unset unless deliberate"
+[ -n "${DEPLOY_SA:-}" ] \
+  && warn "DEPLOY_SA is exported (${DEPLOY_SA})" \
+          "deploy.sh will enter choreography mode; unset if you deploy as yourself"
 if have gcloud; then
   ACCT="$(gcloud config get-value account 2>/dev/null)"
   [ -n "$ACCT" ] && ok "gcloud account: $ACCT" || bad "no gcloud account" "gcloud auth login"
@@ -70,7 +76,11 @@ if have gcloud; then
     bad "gcloud CLI plane not impersonating (${IMP:-none})" \
         "gcloud config set auth/impersonate_service_account \${SA_EMAIL}"
   fi
-  ADC="${HOME}/.config/gcloud/application_default_credentials.json"
+  GCLOUD_DIR="${CLOUDSDK_CONFIG:-${HOME}/.config/gcloud}"
+  [ -n "${CLOUDSDK_CONFIG:-}" ] \
+    && warn "config dir relocated by CLOUDSDK_CONFIG -> ${GCLOUD_DIR}" \
+            "coherent (google-auth follows the same variable) — but if this path is ephemeral (/tmp), auth state evaporates between sessions"
+  ADC="${GCLOUD_DIR}/application_default_credentials.json"
   if [ -f "$ADC" ]; then
     grep -q impersonated_service_account "$ADC" \
       && ok "ADC plane is impersonated (client libraries act as the SA)" \
