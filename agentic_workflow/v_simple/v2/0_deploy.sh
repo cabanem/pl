@@ -24,35 +24,48 @@ MODEL="${MODEL:?set MODEL to the current Gemini id}"
 # Who may open the UI. Prefer a group; a single user works too:
 #   ACCESS_MEMBER="group:sdc-team@yourdomain.com"
 ACCESS_MEMBER="${ACCESS_MEMBER:?set ACCESS_MEMBER, e.g. group:team@domain or user:you@domain}"
+# The deploy-plane SA (holds run.builder + deploy perms). The corpus SA stays
+# purely runtime — the whole point of the split:
+DEPLOY_SA="${DEPLOY_SA:?set DEPLOY_SA to the deployment service account email}"
 
 PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
 IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
+AS_DEPLOYER=(--impersonate-service-account="${DEPLOY_SA}")
 
 echo "Project : ${PROJECT_ID} (${PROJECT_NUMBER})"
-echo "Service : ${SERVICE} in ${REGION}, running as ${SA_EMAIL}"
+echo "Deploys : ${DEPLOY_SA} (impersonated per-command)"
+echo "Runtime : ${SA_EMAIL}"
+echo "Service : ${SERVICE} in ${REGION}"
 echo "Access  : ${ACCESS_MEMBER}"
 echo
 
-# ---- 0a. Provisioners run as YOU, not as the workload SA ---------------------
-# The session prelude points the gcloud CLI at the corpus SA (workload mode).
-# Deploying is a provisioning action: Cloud Build rejects the runtime SA as a
-# deploy/build identity ("unsupported service account"). Suspend impersonation
-# for this script only; the trap restores it no matter how we exit.
+# ---- 0a. Identity choreography -----------------------------------------------
+# you --tokenCreator--> DEPLOY_SA --deploys--> service --runs as--> CORPUS_SA
+# Ambient impersonation (session prelude -> corpus SA) is suspended for this
+# provisioner; deploy-plane commands impersonate DEPLOY_SA explicitly.
 SAVED_IMP="$(gcloud config get-value auth/impersonate_service_account 2>/dev/null || true)"
 if [ -n "${SAVED_IMP}" ]; then
-  echo "[0a] CLI was impersonating ${SAVED_IMP} — suspending for this provisioner"
+  echo "[0a] suspending ambient impersonation of ${SAVED_IMP} for this script"
   gcloud config unset auth/impersonate_service_account >/dev/null
   trap "gcloud config set auth/impersonate_service_account '${SAVED_IMP}' >/dev/null; echo '  (impersonation restored)'" EXIT
 fi
 
-# Deploying a service that RUNS AS the SA requires you to hold actAs on it —
-# a different grant from the tokenCreator you already have. Idempotent:
-DEPLOYER="$(gcloud config get-value account 2>/dev/null)"
+# Link 1: can you mint tokens for the deploy SA?
+gcloud auth print-access-token "${AS_DEPLOYER[@]}" >/dev/null 2>&1 \
+  && echo "[0a] link 1 ok: you can impersonate ${DEPLOY_SA}" \
+  || { echo "[0a] !! cannot impersonate ${DEPLOY_SA} — need
+     roles/iam.serviceAccountTokenCreator on it for $(gcloud config get-value account)"; exit 1; }
+
+# Link 2 (the one usually missing): DEPLOY_SA must hold actAs on the runtime SA
+# to deploy a service that runs as it. You can self-serve this grant because
+# you administer the corpus SA (same path as phase0's tokenCreator grant).
 gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
-  --member="user:${DEPLOYER}" --role="roles/iam.serviceAccountUser" >/dev/null 2>&1 \
-  && echo "[0a] ${DEPLOYER} holds serviceAccountUser (actAs) on the SA" \
-  || echo "[0a] !! could not self-grant actAs — ask an admin for
-     roles/iam.serviceAccountUser on ${SA_EMAIL} for ${DEPLOYER}"
+  --member="serviceAccount:${DEPLOY_SA}" \
+  --role="roles/iam.serviceAccountUser" >/dev/null 2>&1 \
+  && echo "[0a] link 2 ok: ${DEPLOY_SA} holds actAs on ${SA_EMAIL}" \
+  || echo "[0a] !! could not grant actAs — ask an admin to run:
+     gcloud iam service-accounts add-iam-policy-binding ${SA_EMAIL} \\
+       --member=serviceAccount:${DEPLOY_SA} --role=roles/iam.serviceAccountUser"
 
 # ---- 0. Org-policy preflight (informational — the jumpbox-saga reflex) -------
 echo "[0/4] Org policies that could bite (blank = unset, fine):"
@@ -62,41 +75,52 @@ for C in run.allowedIngress iam.allowedPolicyMemberDomains; do
     --format='value(listPolicy)' 2>/dev/null || echo "(not readable/unset)"
 done
 
-# ---- 1. APIs -----------------------------------------------------------------
+# ---- 1. APIs (tolerant: may already be enabled, or need the deploy SA) -------
 echo "[1/4] Enabling APIs..."
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
-  artifactregistry.googleapis.com iap.googleapis.com
+  artifactregistry.googleapis.com iap.googleapis.com 2>/dev/null \
+  || gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+       artifactregistry.googleapis.com iap.googleapis.com "${AS_DEPLOYER[@]}" 2>/dev/null \
+  || echo "  !! could not enable APIs (fine if already enabled — the deploy
+     will tell you; otherwise ask an admin to enable run, cloudbuild,
+     artifactregistry, iap)"
 
-# ---- 2. Build + deploy from source (uses the Dockerfile) ---------------------
-echo "[2/4] Deploying ${SERVICE}..."
+# ---- 2. Build + deploy: DEPLOY_SA does both (it holds run.builder) -----------
+echo "[2/4] Deploying ${SERVICE} as ${DEPLOY_SA}..."
 gcloud run deploy "${SERVICE}" \
+  "${AS_DEPLOYER[@]}" \
   --source . \
   --region "${REGION}" \
   --service-account "${SA_EMAIL}" \
+  --build-service-account "projects/${PROJECT_ID}/serviceAccounts/${DEPLOY_SA}" \
   --no-allow-unauthenticated \
   --session-affinity \
   --memory 1Gi --cpu 1 --timeout 300 \
   --min-instances 0 --max-instances 3 \
   --set-env-vars "BUCKET=${BUCKET},MODEL=${MODEL},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},LOCATION=global"
-# --session-affinity: Chainlit uses websockets; sticky sessions keep a chat
-# pinned to one instance. --no-allow-unauthenticated: nothing gets in except
-# via IAP once section 3 lands.
+# --build-service-account: pins Cloud Build to the deploy SA (run.builder is
+# exactly the role prescribed for source-build accounts), sidestepping any
+# org constraint on default build identities. --service-account: the service
+# RUNS as the corpus SA — runtime scope stays minimal.
 
 # ---- 3. IAP: enable directly on the service, then the two grants -------------
-echo "[3/4] IAP..."
-gcloud run services update "${SERVICE}" --region "${REGION}" --iap 2>/dev/null \
-  || gcloud beta run services update "${SERVICE}" --region "${REGION}" --iap 2>/dev/null \
+echo "[3/4] IAP (as ${DEPLOY_SA})..."
+gcloud run services update "${SERVICE}" --region "${REGION}" --iap "${AS_DEPLOYER[@]}" 2>/dev/null \
+  || gcloud beta run services update "${SERVICE}" --region "${REGION}" --iap "${AS_DEPLOYER[@]}" 2>/dev/null \
   || echo "  !! could not enable IAP via CLI — flag may have moved; enable it on
      the service in Console (Cloud Run -> ${SERVICE} -> Security -> IAP).
      If prompted about an OAuth consent screen, create it (Internal type)."
 
-gcloud run services add-iam-policy-binding "${SERVICE}" --region "${REGION}" \
+gcloud run services add-iam-policy-binding "${SERVICE}" --region "${REGION}" "${AS_DEPLOYER[@]}" \
   --member="serviceAccount:${IAP_AGENT}" --role="roles/run.invoker" >/dev/null \
   && echo "  IAP service agent granted run.invoker (service-scoped)"
 
 gcloud beta iap web add-iam-policy-binding \
-  --resource-type=cloud-run --service="${SERVICE}" --region="${REGION}" \
+  --resource-type=cloud-run --service="${SERVICE}" --region="${REGION}" "${AS_DEPLOYER[@]}" \
   --member="${ACCESS_MEMBER}" --role="roles/iap.httpsResourceAccessor" >/dev/null 2>&1 \
+  || gcloud beta iap web add-iam-policy-binding \
+       --resource-type=cloud-run --service="${SERVICE}" --region="${REGION}" \
+       --member="${ACCESS_MEMBER}" --role="roles/iap.httpsResourceAccessor" >/dev/null 2>&1 \
   && echo "  ${ACCESS_MEMBER} granted iap.httpsResourceAccessor" \
   || echo "  !! accessor grant via CLI failed — grant '${ACCESS_MEMBER}' the
      'IAP-secured Web App User' role on ${SERVICE} from Console -> Security ->
@@ -104,7 +128,7 @@ gcloud beta iap web add-iam-policy-binding \
 
 # ---- 4. Summary --------------------------------------------------------------
 echo "[4/4] Done."
-URL="$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format='value(status.url)')"
+URL="$(gcloud run services describe "${SERVICE}" --region "${REGION}" "${AS_DEPLOYER[@]}" --format='value(status.url)')"
 echo
 echo "Open (as a member of ${ACCESS_MEMBER}): ${URL}"
 echo
