@@ -93,8 +93,14 @@ fi
 
 echo "== 4. GCP chain (read-only probes, as the SA) =="
 if have gcloud && [ -n "${SA_EMAIL:-}" ]; then
-  gcloud iam service-accounts describe "${SA_EMAIL}" >/dev/null 2>&1 \
-    && ok "SA exists" || bad "SA not found: ${SA_EMAIL}" "check the name / project"
+  # Existence-by-capability, not by metadata: an SA has NO implicit right to
+  # read its own IAM metadata (describe fails as the SA — correctly). Minting
+  # a token proves the SA exists AND your tokenCreator link works, and needs
+  # no permissions on the SA at all.
+  gcloud auth print-access-token >/dev/null 2>&1 \
+    && ok "SA exists and is impersonable (token minted)" \
+    || bad "cannot mint a token as ${SA_EMAIL}" \
+           "check the SA name, your tokenCreator grant, and the impersonation config"
   if [ -n "${SECRET:-}" ]; then
     HEAD="$(gcloud secrets versions access latest --secret="${SECRET}" 2>/dev/null | head -c 4)"
     [ -n "$HEAD" ] && ok "secret readable (token present)" \
