@@ -51,8 +51,14 @@ Rules that hold in every phase:
 
 ## Environment prelude (paste at the top of every session)
 
-Cloud Shell sessions are ephemeral shells over a persistent `$HOME`. Start
-each session with the exports below, then run `./preflight.sh` — a read-only
+Cloud Shell sessions are ephemeral shells over a persistent `$HOME` — with
+one sharp edge: **concurrent tabs shard your gcloud identity**. Extra
+simultaneous sessions get a temp config dir via `CLOUDSDK_CONFIG`
+(`/tmp/tmp.XXXX`), so impersonation and ADC state set in one tab do not
+exist in another, producing phantom permission loss. Discipline: one tab for
+identity-sensitive work; preflight announces a relocated config dir — treat
+any such tab as untrusted for provisioning. Start each session with the
+exports below, then run `./preflight.sh` — a read-only
 verifier that proves this entire prelude plus both credential planes, the
 GCP chain, and artifact freshness, printing the fix for anything broken
 (`--ui` adds the UI tier; `--live` adds a one-token Gemini probe):
