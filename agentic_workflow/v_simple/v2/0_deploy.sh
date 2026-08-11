@@ -33,6 +33,27 @@ echo "Service : ${SERVICE} in ${REGION}, running as ${SA_EMAIL}"
 echo "Access  : ${ACCESS_MEMBER}"
 echo
 
+# ---- 0a. Provisioners run as YOU, not as the workload SA ---------------------
+# The session prelude points the gcloud CLI at the corpus SA (workload mode).
+# Deploying is a provisioning action: Cloud Build rejects the runtime SA as a
+# deploy/build identity ("unsupported service account"). Suspend impersonation
+# for this script only; the trap restores it no matter how we exit.
+SAVED_IMP="$(gcloud config get-value auth/impersonate_service_account 2>/dev/null || true)"
+if [ -n "${SAVED_IMP}" ]; then
+  echo "[0a] CLI was impersonating ${SAVED_IMP} — suspending for this provisioner"
+  gcloud config unset auth/impersonate_service_account >/dev/null
+  trap "gcloud config set auth/impersonate_service_account '${SAVED_IMP}' >/dev/null; echo '  (impersonation restored)'" EXIT
+fi
+
+# Deploying a service that RUNS AS the SA requires you to hold actAs on it —
+# a different grant from the tokenCreator you already have. Idempotent:
+DEPLOYER="$(gcloud config get-value account 2>/dev/null)"
+gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+  --member="user:${DEPLOYER}" --role="roles/iam.serviceAccountUser" >/dev/null 2>&1 \
+  && echo "[0a] ${DEPLOYER} holds serviceAccountUser (actAs) on the SA" \
+  || echo "[0a] !! could not self-grant actAs — ask an admin for
+     roles/iam.serviceAccountUser on ${SA_EMAIL} for ${DEPLOYER}"
+
 # ---- 0. Org-policy preflight (informational — the jumpbox-saga reflex) -------
 echo "[0/4] Org policies that could bite (blank = unset, fine):"
 for C in run.allowedIngress iam.allowedPolicyMemberDomains; do
