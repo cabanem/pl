@@ -1,0 +1,5 @@
+runs/
+dumps/
+fx/
+*.db
+__pycache__/
