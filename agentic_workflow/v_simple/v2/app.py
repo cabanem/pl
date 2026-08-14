@@ -50,6 +50,13 @@ STARTERS = [
 ]
 
 
+def clip(text, limit=4000):
+    """Bound what the UI renders per step; the evidence file keeps the full record."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n… (+{len(text) - limit} chars — full record in the evidence file)"
+
+
 def friendly_failure(ex):
     """Map infrastructure failures to actionable messages instead of tracebacks."""
     s = str(ex).lower()
@@ -141,7 +148,7 @@ async def on_message(message: cl.Message):
 
     base_len = len(contents)            # rollback point: a failed turn must not poison the session
     contents.append(adapter.user(message.content))
-    answer, err_streak, last_hint, turn = None, 0, None, 0
+    answer, err_streak, zero_streak, last_hint, turn = None, 0, 0, None, 0
     try:
         for turn in range(1, MAX_TURNS + 1):
             calls, model_content, text = await asyncio.to_thread(
@@ -155,19 +162,20 @@ async def on_message(message: cl.Message):
                     step.input = args
                     result = await asyncio.to_thread(dispatch, name, args)
                     evidence.record(name, args, result)
-                    view = compact(result)
+                    view = json.dumps(compact(result), indent=2,
+                                      ensure_ascii=False)
                     if "error" in result:
                         err_streak += 1
                         last_hint = result.get("hint")
-                        step.output = "⚠ " + json.dumps(view, indent=2,
-                                                        ensure_ascii=False)
+                        step.output = clip("⚠ " + view)
                     else:
                         err_streak = 0
-                        step.output = json.dumps(view, indent=2,
-                                                 ensure_ascii=False)
+                        step.output = clip(view)
+                    if name == "query" and "error" not in result:
+                        zero_streak = zero_streak + 1 if result.get("count") == 0 else 0
                 contents.append(adapter.tool_response(name, bound_payload(result)))
-            # Thrash-breaker: repeated tool failures mean the question shape is
-            # fighting the data — stop burning turns and reshape instead.
+            # Thrash-breakers: repeated failures OR repeated empty results mean
+            # the question is fighting the data — stop burning turns, reshape.
             if err_streak >= 3:
                 answer = (
                     "I couldn't land this one — the last few lookups kept "
@@ -176,6 +184,14 @@ async def on_message(message: cl.Message):
                     + ". A more specific framing usually fixes it: name the "
                     "exact table, field, or recipe — e.g. *Who writes "
                     "WFA_SupplierRequest.status?* or *Call chain below UPL-01*."
+                )
+                break
+            if zero_streak >= 4:
+                answer = (
+                    "I kept finding nothing under that name — it may not exist "
+                    "as spelled. Try confirming the exact name first (*list the "
+                    "data tables* or *which recipes have UPL in the name?*), "
+                    "then re-ask with it."
                 )
                 break
         else:
@@ -190,6 +206,5 @@ async def on_message(message: cl.Message):
 
     await cl.Message(
         content=answer,
-        elements=[cl.File(name=evidence.path.name, path=str(evidence.path),
-                          display="inline")],
+        elements=[cl.File(name=evidence.path.name, path=str(evidence.path))],
     ).send()
