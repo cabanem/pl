@@ -1,3 +1,28 @@
+# Workato Developer API connector — v2 (inspector fold)
+#
+# Merge of:
+#   * Workato Developer API connector (multi-environment CI/CD)
+#   * SDC Recipe Inspector (recipe_to_spec pure transform)
+#
+# Merge design:
+#   * The inspector's standalone connection/test scaffolding is dropped —
+#     recipe_to_spec is a pure transform and ignores the connection.
+#   * The code-tree → contract-spec transform lives in exactly ONE method
+#     (build_spec). Both recipe_to_spec (pure) and inspect_recipe
+#     (fetch + spec composite) are thin shells over it.
+#   * inspect_recipe stamps recipe id/name/folder/environment from the live
+#     fetch and folds the recipe's `config` connection bindings into the spec
+#     as `connection_bindings` — no extra API call.
+#   * contract_field lives in object_definitions (not methods) because it is
+#     referenced from multiple output slots; the SDK manages per-site copies,
+#     avoiding the shared-reference namespace collision.
+#   * inspect_one (method) is the per-recipe fetch+spec unit. inspect_recipe
+#     calls it once and lets failures raise (hard fail); inspect_recipes
+#     (batch) loops it with a per-item rescue so one bad recipe doesn't sink
+#     the batch. No reinvoke machinery — batches are capped at 50 to stay
+#     inside the SDK's 180-second action limit; chunk larger estates by
+#     folder in the recipe layer.
+
 {
   title: "Workato Developer API",
 
@@ -412,6 +437,62 @@
         'connection_bindings' => args['connection_bindings'],
         'log'                 => log.join('; ')
       }.compact
+    end,
+
+    # ── inspect_one ───────────────────────────────────────────
+    # Per-recipe fetch + spec unit: GET the recipe, guard on a
+    # missing code field, fold config bindings, build the spec,
+    # merge fetch metadata. Raises via error() on any failure —
+    # callers choose the failure policy (inspect_recipe lets it
+    # propagate; inspect_recipes rescues per item).
+    #
+    # args: headers, dc, env_name, recipe_id,
+    #       output_step_hint (optional), include_tags (optional)
+    inspect_one: lambda do |args|
+      dc        = args['dc']
+      recipe_id = args['recipe_id']
+
+      url = "#{dc}/recipes/#{recipe_id}"
+      url = "#{url}?includes[]=tags" if args['include_tags'].is_true?
+
+      recipe = get(url)
+                 .headers(args['headers'])
+                 .after_error_response(/.*/) do |_c, b, _h, m|
+                   error("Recipe #{recipe_id} fetch failed: #{m} — #{b}")
+                 end
+
+      if recipe['code'].blank?
+        error("Recipe #{recipe_id} returned no code field.")
+      end
+
+      bindings = (recipe['config'] || []).map do |c|
+        {
+          'keyword'    => c['keyword'],
+          'provider'   => c['provider'],
+          'name'       => c['name'],
+          'account_id' => c['account_id']
+        }.compact
+      end
+
+      spec = call('build_spec', {
+        'code'                => recipe['code'],
+        'recipe_id'           => recipe['id'].to_s,
+        'recipe_name'         => recipe['name'],
+        'folder'              => recipe['folder_id'].to_s,
+        'environment'         => args['env_name'],
+        'output_step_hint'    => args['output_step_hint'],
+        'connection_bindings' => bindings
+      })
+
+      spec.merge(
+        'workato_environment' => args['env_name'],
+        'recipe_id'           => recipe['id'],
+        'folder_id'           => recipe['folder_id'],
+        'running'             => recipe['running'],
+        'version_no'          => recipe['version_no'],
+        'updated_at'          => recipe['updated_at'],
+        'tags'                => recipe['tags']
+      ).compact
     end
   },
 
@@ -1613,50 +1694,15 @@
 
       execute: lambda do |connection, input|
         env_name = input['workato_environment']
-        headers  = call('get_auth_headers', connection, env_name)
-        dc       = call('get_datacenter', connection, env_name)
 
-        url = "#{dc}/recipes/#{input['recipe_id']}"
-        url = "#{url}?includes[]=tags" if input['include_tags'].is_true?
-
-        recipe = get(url)
-                   .headers(headers)
-                   .after_error_response(/.*/) do |_c, b, _h, m|
-                     error("Inspect recipe fetch failed: #{m} — #{b}")
-                   end
-
-        if recipe['code'].blank?
-          error("Recipe #{input['recipe_id']} returned no code field.")
-        end
-
-        bindings = (recipe['config'] || []).map do |c|
-          {
-            'keyword'    => c['keyword'],
-            'provider'   => c['provider'],
-            'name'       => c['name'],
-            'account_id' => c['account_id']
-          }.compact
-        end
-
-        spec = call('build_spec', {
-          'code'                => recipe['code'],
-          'recipe_id'           => recipe['id'].to_s,
-          'recipe_name'         => recipe['name'],
-          'folder'              => recipe['folder_id'].to_s,
-          'environment'         => env_name,
-          'output_step_hint'    => input['output_step_hint'],
-          'connection_bindings' => bindings
+        call('inspect_one', {
+          'headers'          => call('get_auth_headers', connection, env_name),
+          'dc'               => call('get_datacenter', connection, env_name),
+          'env_name'         => env_name,
+          'recipe_id'        => input['recipe_id'],
+          'output_step_hint' => input['output_step_hint'],
+          'include_tags'     => input['include_tags']
         })
-
-        spec.merge(
-          'workato_environment' => env_name,
-          'recipe_id'           => recipe['id'],
-          'folder_id'           => recipe['folder_id'],
-          'running'             => recipe['running'],
-          'version_no'          => recipe['version_no'],
-          'updated_at'          => recipe['updated_at'],
-          'tags'                => recipe['tags']
-        ).compact
       end,
 
       output_fields: lambda do |object_definitions|
@@ -1692,6 +1738,135 @@
           ] },
           { name: 'tags', type: :array, of: :string },
           { name: 'log' }
+        ]
+      end
+    },
+
+    # ── Inspect recipes (batch) ───────────────────────────────
+    inspect_recipes: {
+      title: 'Inspect recipes (batch)',
+      subtitle: 'Fetch and spec a group of recipes in one call',
+      description: 'Runs Inspect recipe over a group: either an explicit ' \
+                   'list of recipe IDs or every recipe in a folder. Fetches ' \
+                   'are sequential; a failure on one recipe is recorded in ' \
+                   'the errors list and the batch continues. Batches are ' \
+                   'capped at 50 recipes to stay inside the SDK action ' \
+                   'timeout — chunk larger estates by folder. Successful ' \
+                   'specs are returned per recipe and also combined into ' \
+                   'specs_json, a single JSON array ready to write to ' \
+                   'FileStorage or Drive.',
+
+      input_fields: lambda do |_object_definitions|
+        [
+          { name: 'workato_environment', control_type: 'select', pick_list: 'environments', toggle_hint: 'Use datapill', optional: false, hint: 'The environment the recipes are in.' },
+          { name: 'recipe_ids',       label: 'Recipe IDs', optional: true, hint: 'Comma-separated recipe IDs. From a List recipes step, use the formula <b>items.pluck(:id).join(",")</b>. Provide this or Folder ID, not both.' },
+          { name: 'folder_id',        label: 'Folder ID',  optional: true, hint: 'Inspect every recipe in this folder (first 100). Provide this or Recipe IDs, not both.' },
+          { name: 'output_step_hint', label: 'Output step hint', optional: true, hint: 'Substring matched against a step name/title to choose the return/response step (e.g. "return", "respond"). Applied to every recipe in the batch. Leave blank to use the last step.' }
+        ]
+      end,
+
+      execute: lambda do |connection, input|
+        env_name = input['workato_environment']
+        headers  = call('get_auth_headers', connection, env_name)
+        dc       = call('get_datacenter', connection, env_name)
+
+        ids_given    = input['recipe_ids'].present?
+        folder_given = input['folder_id'].present?
+
+        if ids_given && folder_given
+          error('Provide Recipe IDs or Folder ID, not both.')
+        end
+        if !ids_given && !folder_given
+          error('Provide Recipe IDs or a Folder ID.')
+        end
+
+        ids = if ids_given
+                input['recipe_ids'].to_s
+                                   .split(',')
+                                   .map(&:strip)
+                                   .reject(&:blank?)
+                                   .uniq
+              else
+                listing = get("#{dc}/recipes?folder_id=#{input['folder_id']}&per_page=100")
+                            .headers(headers)
+                            .after_error_response(/.*/) do |_c, b, _h, m|
+                              error("Folder listing failed: #{m} — #{b}")
+                            end
+                items = listing.is_a?(::Array) ? listing : (listing['items'] || [])
+                items.map { |r| r['id'].to_s }
+              end
+
+        error('No recipes to inspect.') if ids.blank?
+        if ids.length > 50
+          error("Batch of #{ids.length} recipes exceeds the 50-recipe cap " \
+                '(SDK actions have a 180-second execution limit). Split the ' \
+                'batch — run per folder, or chunk the ID list.')
+        end
+
+        results = []
+        errors  = []
+
+        ids.each do |rid|
+          begin
+            one = call('inspect_one', {
+              'headers'          => headers,
+              'dc'               => dc,
+              'env_name'         => env_name,
+              'recipe_id'        => rid,
+              'output_step_hint' => input['output_step_hint']
+            })
+
+            results << {
+              'recipe_id'       => one['recipe_id'],
+              'recipe_name'     => one['recipe_name'],
+              'folder_id'       => one['folder_id'],
+              'running'         => one['running'],
+              'version_no'      => one['version_no'],
+              'updated_at'      => one['updated_at'],
+              'step_count'      => one['step_count'],
+              'connectors_used' => one['connectors_used'],
+              'spec_json'       => one['spec_json'],
+              'log'             => one['log']
+            }.compact
+          rescue StandardError => e
+            errors << { 'recipe_id' => rid, 'error' => e.message }
+          end
+        end
+
+        {
+          'requested_count' => ids.length,
+          'succeeded_count' => results.length,
+          'failed_count'    => errors.length,
+          'specs_json'      => "[#{results.map { |r| r['spec_json'] }.join(',')}]",
+          'results'         => results,
+          'errors'          => errors
+        }
+      end,
+
+      output_fields: lambda do |_object_definitions|
+        [
+          { name: 'requested_count', type: :integer },
+          { name: 'succeeded_count', type: :integer },
+          { name: 'failed_count',    type: :integer },
+          { name: 'specs_json', label: 'Specs (JSON array string)',
+            hint: 'All successful specs combined into one JSON array — ' \
+                  'write straight to FileStorage, Drive, or GCS.' },
+          { name: 'results', type: :array, of: :object, properties: [
+            { name: 'recipe_id', type: :integer },
+            { name: 'recipe_name' },
+            { name: 'folder_id', type: :integer },
+            { name: 'running', type: :boolean },
+            { name: 'version_no', type: :integer },
+            { name: 'updated_at' },
+            { name: 'step_count', type: :integer },
+            { name: 'connectors_used', type: :array, of: :string },
+            { name: 'spec_json' },
+            { name: 'log' }
+          ] },
+          { name: 'errors', type: :array, of: :object, properties: [
+            { name: 'recipe_id' },
+            { name: 'error' }
+          ] }
         ]
       end
     },
