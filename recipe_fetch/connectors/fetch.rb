@@ -351,6 +351,23 @@
         'schema'   => step['extended_input_schema']
       }
 
+      # Provider-specific retentions — the two edges that turn the step
+      # inventory into a resolvable call graph + table access map.
+      # Defensive on shape: flow_id / table_id may be a hash ({name, id})
+      # or a bare scalar depending on export vintage; prefer the name,
+      # fall back to the id.
+      if step['provider'] == 'workato_recipe_function'
+        flow   = (step['input'] || {})['flow_id']
+        callee = flow.is_a?(::Hash) ? (flow['name'] || flow['id']) : flow
+        here['calls_recipe'] = callee.to_s if callee.present?
+      end
+
+      if step['provider'] == 'workato_db_table'
+        table     = (step['input'] || {})['table_id']
+        table_ref = table.is_a?(::Hash) ? (table['name'] || table['id']) : table
+        here['table_id'] = table_ref.to_s if table_ref.present?
+      end
+
       children = []
       (step['block'] || []).each_with_index do |child, idx|
         children.concat(call('flatten_steps', child, "#{path}.#{idx}", depth + 1))
@@ -381,7 +398,9 @@
       trigger = flat.first
       actions = flat[1..-1] || []
 
-      providers = flat.map { |s| s['provider'] }.compact.uniq.sort
+      providers      = flat.map { |s| s['provider'] }.compact.uniq.sort
+      recipes_called = flat.map { |s| s['calls_recipe'] }.compact.uniq.sort
+      tables_used    = flat.map { |s| s['table_id'] }.compact.uniq.sort
 
       # Input contract == trigger's declared schema (authoritative).
       input_contract = call('compact_schema', trigger['schema'])
@@ -416,6 +435,8 @@
         'input_contract'  => input_contract,
         'output_contract' => output_contract,
         'connectors_used' => providers,
+        'recipes_called'  => recipes_called,
+        'tables_used'     => tables_used,
         'step_count'      => steps.length,
         'steps'           => steps
       }
@@ -431,6 +452,8 @@
         'trigger_name'        => trigger['name'],
         'step_count'          => steps.length,
         'connectors_used'     => providers,
+        'recipes_called'      => recipes_called,
+        'tables_used'         => tables_used,
         'input_contract'      => input_contract,
         'output_contract'     => output_contract,
         'steps'               => steps,
@@ -1654,6 +1677,10 @@
           { name: 'trigger_name' },
           { name: 'step_count', type: 'integer' },
           { name: 'connectors_used', type: 'array', of: 'string' },
+          { name: 'recipes_called', type: 'array', of: 'string',
+            hint: 'Distinct recipe-function callees (call-graph edges).' },
+          { name: 'tables_used', type: 'array', of: 'string',
+            hint: 'Distinct data table identifiers touched by this recipe.' },
           { name: 'input_contract',  type: 'array', of: 'object', properties: object_definitions['contract_field'] },
           { name: 'output_contract', type: 'array', of: 'object', properties: object_definitions['contract_field'] },
           { name: 'steps', type: 'array', of: 'object', properties: [
@@ -1663,7 +1690,9 @@
             { name: 'provider' },
             { name: 'name' },
             { name: 'as' },
-            { name: 'title' }
+            { name: 'title' },
+            { name: 'calls_recipe' },
+            { name: 'table_id' }
           ] },
           { name: 'log' }
         ]
@@ -1719,6 +1748,10 @@
           { name: 'trigger_name' },
           { name: 'step_count', type: :integer },
           { name: 'connectors_used', type: :array, of: :string },
+          { name: 'recipes_called', type: :array, of: :string,
+            hint: 'Distinct recipe-function callees (call-graph edges).' },
+          { name: 'tables_used', type: :array, of: :string,
+            hint: 'Distinct data table identifiers touched by this recipe.' },
           { name: 'connection_bindings', type: :array, of: :object, properties: [
             { name: 'keyword' },
             { name: 'provider' },
@@ -1734,7 +1767,9 @@
             { name: 'provider' },
             { name: 'name' },
             { name: 'as' },
-            { name: 'title' }
+            { name: 'title' },
+            { name: 'calls_recipe' },
+            { name: 'table_id' }
           ] },
           { name: 'tags', type: :array, of: :string },
           { name: 'log' }
@@ -1825,6 +1860,8 @@
               'updated_at'      => one['updated_at'],
               'step_count'      => one['step_count'],
               'connectors_used' => one['connectors_used'],
+              'recipes_called'  => one['recipes_called'],
+              'tables_used'     => one['tables_used'],
               'spec_json'       => one['spec_json'],
               'log'             => one['log']
             }.compact
@@ -1860,6 +1897,8 @@
             { name: 'updated_at' },
             { name: 'step_count', type: :integer },
             { name: 'connectors_used', type: :array, of: :string },
+            { name: 'recipes_called', type: :array, of: :string },
+            { name: 'tables_used', type: :array, of: :string },
             { name: 'spec_json' },
             { name: 'log' }
           ] },
