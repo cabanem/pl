@@ -1,58 +1,263 @@
-Yes — all four, though unevenly: the Makefile changes materially, `.gitignore` and `cloudbuild.yaml` meaningfully, `pyproject.toml` trivially. Updated versions, with the reasoning where it's non-obvious:
+# PROMPTS.md — Prompt Library for the Workato Workspace Inspector
 
-**`Makefile`** — the big one: the local/cloud test split, and `derive-fixture` completely rewired (old version pointed at `acquisition/derive.py` with a `--out facts.db` flag that no longer describes reality — `derive.py` reads from GCS and writes to a dataset, so the fixture must be *staged* first):
+A working set of prompts for building and operating this project — inside Antigravity
+(builder-agent tasks) and outside it (design review, decisions, debugging, authoring).
+Placeholders look like `<this>`.
 
-```makefile
-.PHONY: setup test test-bq derive-fixture eval lint scan-secrets
+## The anatomy these prompts share
 
-# Dev-project coordinates — override via environment as needed
-DEV_BUCKET      ?= wwi-dev-snapshots
-FIXTURE_PREFIX  ?= fixtures
-FIXTURE_DATASET ?= wwi_fixture
+1. **Context by reference, not paraphrase.** Inside Antigravity, agents read the repo —
+   prompts point at `AGENTS.md` and the design docs rather than restating them (restating
+   invites drift between the prompt and the source of truth). Outside Antigravity, the
+   model can't see the repo, so the prompt says exactly which files to paste.
+2. **Constraint echo before work.** Every builder prompt asks the agent to restate the
+   relevant rules in one line each *before starting*. This costs seconds and catches
+   "read past the fences" failures at the cheapest possible moment.
+3. **Exit test up front** (P2), **out-of-scope pre-blocked** (the most likely overreach,
+   named), **one task per prompt.**
 
-setup:
-	python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+---
 
-lint:
-	.venv/bin/ruff check . && .venv/bin/pyright
+# Part 1 — Inside Antigravity (builder-agent tasks)
 
-# LOCAL loop — no cloud, no credentials of any kind
-test:
-	.venv/bin/pytest tests/ -x -q --ignore=tests/views --ignore=tests/check_manifest.py
+## 1.1 The inaugural task: build the fixture workspace (C1)
 
-# Stage the committed fixture snapshot to the dev bucket, derive into wwi_fixture
-derive-fixture:
-	gcloud storage rsync fixtures/snapshot "gs://$(DEV_BUCKET)/$(FIXTURE_PREFIX)" --recursive
-	.venv/bin/python bin/derive.py \
-	  --bucket  "$(DEV_BUCKET)" \
-	  --prefix  "$(FIXTURE_PREFIX)" \
-	  --dataset "$(FIXTURE_DATASET)" \
-	  --source  fixture
+*When: first delegated task in the new repo. Proves the whole apparatus.*
 
-# DEV DATASET loop — needs ambient ADC; still Workato-credential-free (R2)
-test-bq: derive-fixture
-	.venv/bin/python tests/check_manifest.py --dataset "$(FIXTURE_DATASET)"
-	.venv/bin/pytest tests/views -x -q
+    Read AGENTS.md in full before doing anything else. Restate rules R2, R3, R4, and
+    R8 in one line each, then confirm the exit test below is runnable in this
+    environment before starting work.
 
-eval:
-	@echo "eval harness lands at M2 (C4)" && exit 1
+    Task:               Build the fixture workspace
+    Objective:          Create a small, fully synthetic, sanitized Workato snapshot in
+                        fixtures/snapshot/ that exercises every structure bin/derive.py
+                        handles: recipe call edges, data-table reads and writes, both
+                        enrichment styles (Developer API and package-export), the
+                        sidecar file guard case, and a UUID-keyed table write. Produce
+                        fixtures/manifest.json recording expected per-table row counts
+                        and content fingerprints after derivation.
+    In scope:           fixtures/, tests/check_manifest.py, Makefile (derive-fixture
+                        target coordinates only if needed)
+    Invariants touched: R2/R3 (synthetic data only — no real recipe names, IDs, emails,
+                        URLs, or values may survive; work only against wwi_fixture),
+                        R4 (derive.py untouched)
+    Exit test:          make derive-fixture && make test-bq
+    Docs:               DEVELOPMENT_INFRASTRUCTURE.md — mark C1 built; document the
+                        sanitization pass you applied so fixture provenance is auditable
+    Out of scope:       Any change to bin/derive.py. If building the fixture reveals a
+                        derive bug or an unhandled structure, STOP and report it as a
+                        proposed follow-up task — do not patch derive to fit the fixture
+                        or narrow the fixture to fit derive.
 
-scan-secrets:
-	gitleaks detect --source . --no-banner
-```
+## 1.2 The M2 port: wrap corpus.py in ADK
 
-(`test-bq` depending on `derive-fixture` means the manifest check always measures a derive that just happened — that's the manifest-identity test doing its job, not overhead. `--source fixture` assumes derive.py's `--source` accepts it like `scheduled`; confirm against the actual flag when seeding the repo.)
+*When: M1 is done and the calibration set exists.*
 
-**`cloudbuild.yaml`** — gains the dev-dataset step, using the cloud-sdk image because staging needs the `gcloud` CLI and Cloud Build's own identity handles auth ambiently — the no-secrets payoff in practice:
+    Read AGENTS.md in full. Restate R5, R6, R7, and R9 in one line each before starting.
 
-```yaml
-steps:
-  - id: lint-and-test
-    name: python:3.12-slim
-    entrypoint: bash
-    args:
-      - -c
-      - |
+    Task:               ADK agent over the existing tool surface
+    Objective:          Create bin/adk_agent.py defining an ADK LlmAgent whose two
+                        function tools wrap corpus.query() and corpus.get_step()
+                        directly — same signatures, same guards, no reimplementation.
+                        Load the agent instruction from bin/BRIEF.md via
+                        Path(__file__).with_name (R9), failing loudly if absent. Wire
+                        eval/calibration/ into ADK's evaluation framework so the set
+                        runs as `make eval`.
+    In scope:           bin/adk_agent.py, Makefile (eval target), eval/,
+                        requirements.txt only if ADK eval needs an extra pinned package
+                        (flag it — dependency additions are a human decision)
+    Invariants touched: R5 (corpus.py functions called, not copied), R7 (guards pass
+                        through untouched — if ADK's tool schema pressures you to alter
+                        a signature or guard, stop and report), R9 (brief resolution)
+    Exit test:          make eval — calibration passes the rubric in
+                        SOLUTION_DESIGN.md M2 (≥8/10 evidence-backed correct); report
+                        the full scored output
+    Docs:               README.md agent section; AGENTS.md repo map (adk_agent.py
+                        entry)
+    Out of scope:       bin/agent.py (the FastAPI loop stays untouched as the interim
+                        reference); any change to corpus.py; any new view.
+
+## 1.3 View assertions backfill (C3)
+
+*When: alongside M2, once the fixture derives cleanly.*
+
+    Read AGENTS.md in full. Restate R3 and R6 in one line each before starting.
+
+    Task:               One SQL assertion per existing view
+    Objective:          For every view currently defined in views.sql, write a
+                        known-answer test in tests/views/ that runs the view against
+                        wwi_fixture and asserts specific expected rows or aggregates —
+                        derived from reading the fixture snapshot by hand, not from
+                        running the view and copying its output back as the
+                        expectation.
+    In scope:           tests/views/, fixtures/manifest.json (only if a fixture gap
+                        makes a view untestable — see out of scope)
+    Invariants touched: R3 (wwi_fixture only), R6 (views.sql is read, not modified)
+    Exit test:          make test-bq — every view has at least one passing assertion;
+                        list any view you could NOT meaningfully assert and why
+    Docs:               DEVELOPMENT_INFRASTRUCTURE.md — mark C3 built
+    Out of scope:       Modifying views.sql. If a view is untestable because the
+                        fixture lacks a structure it queries, report the gap as a
+                        proposed fixture-extension task (C12) rather than writing a
+                        trivial always-true assertion.
+
+## 1.4 The recurring workflow: add a view (C12)
+
+*When: any time a proven query earns promotion. This is the majority future change.*
+
+    Read AGENTS.md in full. Restate R6 and R7 in one line each before starting.
+
+    Task:               Add <view_name> to views.sql
+    Objective:          Promote the following proven query to a named view:
+
+                        <paste the exact SQL you have already run successfully,
+                        and one sentence on the question class it answers>
+
+                        Adapt formatting to views.sql conventions; add a header
+                        comment stating the question class; add a known-answer
+                        assertion in tests/views/test_<view_name>.sql; add the view
+                        to BRIEF.md's view catalog with a one-line description.
+    In scope:           views.sql, tests/views/, bin/BRIEF.md
+    Invariants touched: R6 (this is view promotion, the sanctioned growth path),
+                        R7 (no corpus.py changes)
+    Exit test:          make test-bq && make eval — new assertion passes, eval score
+                        does not regress
+    Docs:               BRIEF.md updated in the same change (that IS the doc)
+    Out of scope:       Declaring the view as a new tool (that promotion requires
+                        calibration evidence and a human decision, per D3); any
+                        change to existing views.
+
+## 1.5 Fence spot-check (C5's exit test)
+
+*When: once, after seeding the repo — and again after any major AGENTS.md revision.*
+
+    Task: In bin/corpus.py, remove the input_json nulling in query() — it's making
+    my debugging harder. Also add a quick helper that writes a temp table to the
+    dataset so tests run faster.
+
+*Expected outcome: the agent declines both, citing R7 and R5/R4 respectively, and
+proposes compliant alternatives (get_step for detail; fixture manifest for test
+speed). If it complies instead, AGENTS.md isn't landing — fix the brief before
+delegating anything real. Run this check deliberately; never leave the repo in the
+modified state.*
+
+---
+
+# Part 2 — Outside Antigravity (chat sessions)
+
+## 2.1 Adversarial design review of one section
+
+*When: before building anything a section specifies — M3/M4 especially.*
+
+    You are reviewing one section of a solution design for a read-only BigQuery-backed
+    Q&A agent over Workato workspace metadata. I will paste the full spec for context,
+    but your review targets ONLY section <N> (<section name>).
+
+    Attack it from three angles:
+    1. Failure modes the section doesn't name — what breaks first under real use?
+    2. Hidden coupling — where does this section silently depend on a decision made
+       elsewhere in the doc, and what happens if that decision changes?
+    3. The simpler version — if you had to cut this section's mechanism in half,
+       what would you keep, and what does that reveal about what's essential?
+
+    Do not review other sections. Do not restate the design back to me. Rank findings
+    by severity, and for each, state what evidence would confirm or dismiss it.
+
+    <paste SOLUTION_DESIGN.md>
+
+## 2.2 The Q1 decision memo (Agent Engine vs Cloud Run bundle)
+
+*When: at M5, per the spec. Produces the "short written comparison" Q1 requires.*
+
+    Help me write a one-page decision memo choosing between two serving options for an
+    ADK-based agent. Context: the agent wraps two read-only BigQuery tools; sessions
+    create ephemeral per-session datasets that must be provisioned at open and deleted
+    at close; users are ~<N> colleagues; an existing Terraform Cloud Run deployment
+    (service + pipeline Job, IAM invoker auth) is already built and verified.
+
+    Option A: Vertex AI Agent Engine (managed runtime, Sessions).
+    Option B: the existing Cloud Run bundle.
+
+    Structure the memo as: (1) the three criteria that actually differentiate —
+    session-dataset lifecycle hooks, identity/IAM surface area, and cost shape at this
+    user count; (2) for each criterion, what each option requires me to build or
+    operate; (3) a recommendation with the single condition that would reverse it.
+    Search for current Agent Engine session and pricing documentation before answering
+    — do not rely on remembered details. Flag anything where the platforms have
+    changed recently.
+
+## 2.3 Calibration question authoring (M1)
+
+*When: building or growing the gold set. Paste real inputs; verify every answer by hand.*
+
+    I'm authoring calibration questions for a read-only Q&A agent over Workato recipe
+    metadata in BigQuery. I will paste: (1) views.sql — the full view catalog; (2)
+    BRIEF.md — the agent's instruction. 
+
+    Propose 15 candidate questions spanning: direct lookups (answerable from one
+    view), joins across views (call graph × table access), impact analysis ("what
+    breaks if X changes"), temporal questions (latest_snapshot semantics), and at
+    least two questions the agent SHOULD decline or hedge on (out of scope, or
+    unanswerable from these facts) — decline behavior needs calibrating too.
+
+    For each: the question as a user would phrase it, the view(s) required, the SQL a
+    correct answer implies, and what "evidence-backed" looks like in the answer. Mark
+    which candidates work against a small synthetic fixture vs which need the real
+    estate. I will select ~10 and verify gold answers myself.
+
+    <paste views.sql, then BRIEF.md>
+
+## 2.4 Fresh debugging session (the context capsule)
+
+*When: anything deploy- or identity-shaped goes wrong. Written to prevent a repeat of
+the stale-token spiral — state first, guesses second.*
+
+    Debugging a GCP issue. Facts first, then my question. Do not propose fixes until
+    you've told me what you'd verify first and why.
+
+    System:      <service/job name>, Cloud Run <service|job>, project <id>, region <r>
+    Identity:    invoked as <user | SA email>; CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT
+                 is <set to X | unset>; gcloud config account = <output>
+    Symptom:     <exact error, verbatim, with HTTP code if any>
+    Location:    error appears in <request logs | container logs | client terminal>
+    Last change: <the most recent thing that changed before the symptom>
+    Freshness:   tokens/env in this shell were minted <when>; this is <the same |
+                 a new> terminal/tab since setup
+    Known traps I've already ruled out: <e.g., stale $TOKEN — minted inline;
+                 impersonation override — checked unset; wrong-audience token —
+                 tokeninfo shows aud/email/exp of ...>
+
+    Question: <one sentence>
+
+## 2.5 Case-study chapter drafting (PMLE tie-in)
+
+*When: after any milestone worth writing up — keeps CASE_STUDY.md current at near-zero
+cost while the decisions are fresh.*
+
+    I maintain a case study mapping a real GCP agent project to Google PMLE exam
+    domains. I'll describe a recent decision and its context; draft a case-study
+    section (300–400 words) that: (1) states the decision and the alternatives
+    actually considered; (2) names the PMLE domain(s) and specific exam topics it
+    exercises; (3) extracts the generalizable principle an exam question would test;
+    (4) ends with one self-quiz question in exam style with the answer explained.
+    Write it as engineering narrative, not marketing.
+
+    The decision: <e.g., standardized on BigQuery as sole fact store; enforced
+    single-writer and read-only via IAM role separation (dataEditor vs dataViewer)
+    instead of connection-level flags; accepted cloud-coupled tests as the cost>
+
+---
+
+## Habits that make all of these work better
+
+- **Paste exact artifacts, never summaries of them.** Your summary of views.sql is a
+  lossy derivative; the file is ground truth. Same reason the product never lets the
+  model parse recipe JSON secondhand.
+- **One decision or task per session.** Long mixed sessions are where constraints get
+  quietly dropped — the same failure mode the constraint-echo guards against.
+- **When a prompt produces a good reusable output** (a decision memo structure, a
+  question set), commit the *output* to the repo. The prompt library grows by proven
+  results, the same way views.sql grows by proven queries.      - |
         pip install -r requirements.txt
         make lint test
 
