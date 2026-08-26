@@ -52,15 +52,47 @@ class LedgerFixtures {
   }
 
   /**
+   * ***UPDATED*** Root recipe code with REAL Workato call-action names. The extractor grades an
+   * edge STRONG only when provider ∈ RECIPE_PROVIDERS AND step.name ∈ CALL_ACTION_NAMES
+   * ('call_recipe' / 'call_recipe_async') — friendly display names go in `as`. The 50-file fixture
+   * uses friendly names as `name`, so ALL its edges are weak by design; fine for shape tests,
+   * wrong for a corpus-ordering test. The last step is a deliberate weak decoy: an id-shaped key
+   * on a non-call step, which must surface as a WEAK_EDGE finding and never as an edge.
+   */
+  static rootRecipeCode() {
+    return {
+      block: [
+        { provider: "gmail", name: "Trigger: New email", input: { subject: "Hello" } },
+        {
+          keyword: "if",
+          name: "Is urgent?",
+          input: { operand: "and", conditions: [{ lhs: "sev", operand: "=", rhs: "P1" }] },
+          block: [
+            { provider: "workato_recipe_function", name: "call_recipe", as: "Call Escalation", input: { flow_id: "200" } }
+          ],
+          else_block: [
+            { provider: "workato_recipe_function", name: "call_recipe", as: "Call Triage", input: { recipe_id: "300" } }
+          ],
+          error_block: [
+            { provider: "workato_callable_recipe", name: "call_recipe", as: "Fallback callable", input: { callable_recipe_id: "400" } }
+          ]
+        },
+        { provider: "workato_recipe_function", name: "call_recipe_async", as: "Call Billing helper", input: { flow_id: "500" } },
+        { provider: "gmail", name: "Log reference", input: { note: { recipe_id: "999" } } }
+      ]
+    };
+  }
+
+  /**
    * A three-recipe corpus for the ledger lifecycle:
-   *   100 (branches + calls fixture) -> 200 (IF), 300 (ELSE),
-   *   plus calls to 400 (error block) and 500 (top level), which are
+   *   100 -> 200 (IF branch), 100 -> 300 (ELSE branch),
+   *   plus strong calls to 400 (error block) and 500 (top level), which are
    *   deliberately NOT in the corpus — they must surface as EXTERNAL_CALLEE
-   *   findings in the AMBIGUITY report, never as edges.
+   *   findings in the AMBIGUITY report, never as edges — and one weak decoy (999).
    */
   static corpusRecipes() {
     return [
-      Fixtures.recipePayload("100", "PRV-01 Root", "p1", "f1", Fixtures.recipeCodeBlock_withBranchesAndCalls()),
+      Fixtures.recipePayload("100", "PRV-01 Root", "p1", "f1", LedgerFixtures.rootRecipeCode()),
       LedgerFixtures.simpleRecipe("200", "INV-01 Escalation"),
       LedgerFixtures.simpleRecipe("300", "INV-02 Triage")
     ];
@@ -297,10 +329,13 @@ function registerLedgerIntegrationTests(runner) {
       Assert.equal(log().length, 1, "baseline journals exactly one row");
       Assert.equal(log()[0][1], "system", "…of kind system");
       Assert.equal(fakeSheets.writtenData["FINGERPRINTS"].length, 4, "header + 3 recipe fingerprints");
-      Assert.equal(fakeSheets.writtenData["EDGE_STATE"].length, 3, "header + edges 100->200, 100->300");
+      const edgeState = fakeSheets.writtenData["EDGE_STATE"].slice(1).map(r => r.join("->")).sort();
+      Assert.deepEqual(edgeState, ["100->200", "100->300"], "strong call edges only — weak/external never ordered"); // ***UPDATED***
       const ambiguity = fakeSheets.writtenData["AMBIGUITY"].slice(1).map(r => r.join(" "));
       Assert.ok(ambiguity.some(s => s.includes("400")), "external callee 400 reported, not ordered");
       Assert.ok(ambiguity.some(s => s.includes("500")), "external callee 500 reported, not ordered");
+      Assert.ok(ambiguity.some(s => s.includes("WEAK_EDGE") && s.includes("999")),
+        "id-shaped key on a non-call step reported weak, never ordered"); // ***UPDATED*** the extractor's honesty, now covered
 
       // RUN 2 — quiet night: same estate, journal must not grow
       led.run(ctx);
