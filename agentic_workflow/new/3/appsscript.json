@@ -1,0 +1,62 @@
+{
+  "timeZone": "America/New_York",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      {
+        "userSymbol": "VertexAI",
+        "serviceId": "aiplatform",
+        "version": "v1"
+      },
+      {
+        "userSymbol": "Drive",
+        "serviceId": "drive",
+        "version": "v3"
+      }
+    ],
+    "libraries": [
+      {
+        "userSymbol": "WorkatoLib",
+        "libraryId": "1sl2ZfkgwX57EIygRwEP7nkXTK8BEXaB60cnFKsqhg2DWic3V0SVAzrYS",
+        "version": "0",
+        "developmentMode": true
+      },
+      {
+        "userSymbol": "GeminiLib",
+        "libraryId": "1YtU_IzHUv1km8oKYJbg6qcsv32wHohtsk3o4dmZs9YUVtpThiFbx7uxF",
+        "version": "0",
+        "developmentMode": true
+      },
+      {
+        "userSymbol": "Toolkit",
+        "libraryId": "1fpzinGcvx07Jnu8YZ7GL4IUaXU33aLYMhQ0905E1Uo7kW1RdFAqWGHX0",
+        "version": "0",
+        "developmentMode": true
+      },
+      {
+        "userSymbol": "OrderLib",
+        "libraryId": "1-Vs5wZWfWav3uP58MIip1nvwfJUMyUZUNpNxtjxfF_OBD84k9eRTP3jo",
+        "version": "0",
+        "developmentMode": true
+      },
+      {
+        "userSymbol": "WorkatoGraphLib",
+        "libraryId": "1DGpSPjs3NnnHf7GxnZY-tGlgLHk73E-lvIVZrtoYdXzcrDjG4Drzn1yw",
+        "version": "0",
+        "developmentMode": true
+      }
+    ]
+  },
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "DOMAIN"
+  },
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/script.container.ui"
+  ]
+}
