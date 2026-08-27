@@ -2,67 +2,84 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────
-# Rebuild clasp project directories from scratch.
+# Zip files of the given type(s) from a directory.
 #
-# For each pair below: delete the directory, recreate it,
-# and run `clasp clone <script_id>` inside it.
+# Usage:
+#   zip_by_type.sh <input_dir> <extensions> <output_zip>
 #
-# Format: dir_name, script_id   (one per line; trailing ';' ok,
-# blank lines and lines starting with # are ignored)
+#   input_dir    directory to pull files from (searched recursively)
+#   extensions   comma-separated, dot optional: "js" or "js,sh,html"
+#   output_zip   where to write the zip; parent dirs created as
+#                needed, ".zip" appended if missing
+#
+# Example:
+#   ./zip_by_type.sh ./my-project js,gs /tmp/backups/project-src.zip
 # ─────────────────────────────────────────────────────────────
-PAIRS="
-# my-first-project, 1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890
-# another-project,  1ZyXwVuTsRqPoNmLkJiHgFeDcBa0987654321
-"
 
-command -v clasp >/dev/null 2>&1 || {
-  echo "ERROR: clasp not found in PATH" >&2
+usage() {
+  sed -n '4,16p' "$0"   # print the header comment above
   exit 1
 }
 
-BASE_DIR="$(pwd)"          # everything is relative to where you run this
-declare -A seen            # dedupe: only process each directory once
-failures=()
+[[ $# -eq 3 ]] || usage
 
-while IFS=',' read -r dir script_id; do
-  # trim whitespace and stray semicolons from both fields
-  dir="$(echo "${dir:-}" | tr -d ';' | xargs)"
-  script_id="$(echo "${script_id:-}" | tr -d ';' | xargs)"
+input_dir="$1"
+ext_list="$2"
+output_zip="$3"
 
-  # skip blank lines and comments
-  [[ -z "$dir" || "$dir" == \#* ]] && continue
-
-  if [[ -z "$script_id" ]]; then
-    echo "!! Skipping '$dir' — no script ID on that line" >&2
-    continue
-  fi
-
-  # only clone each distinct directory once
-  if [[ -n "${seen[$dir]:-}" ]]; then
-    echo "-- Skipping duplicate entry for '$dir'"
-    continue
-  fi
-  seen[$dir]=1
-
-  # safety: refuse absolute paths or anything with '..'
-  if [[ "$dir" == /* || "$dir" == *..* ]]; then
-    echo "!! Skipping suspicious path '$dir'" >&2
-    continue
-  fi
-
-  echo "== Rebuilding $dir =="
-  rm -rf -- "${BASE_DIR:?}/${dir:?}"
-  mkdir -p -- "$BASE_DIR/$dir"
-
-  if ! ( cd "$BASE_DIR/$dir" && clasp clone "$script_id" ); then
-    echo "!! clasp clone failed for '$dir'" >&2
-    failures+=("$dir")
-  fi
-done <<< "$PAIRS"
-
-echo
-if (( ${#failures[@]} )); then
-  echo "Finished with failures: ${failures[*]}" >&2
+command -v zip >/dev/null 2>&1 || {
+  echo "ERROR: zip is not installed (try: apt install zip)" >&2
   exit 1
+}
+
+[[ -d "$input_dir" ]] || {
+  echo "ERROR: input directory '$input_dir' not found" >&2
+  exit 1
+}
+
+# ensure the output name ends in .zip
+[[ "$output_zip" == *.zip ]] || output_zip="${output_zip}.zip"
+
+# create the output directory if needed, then make the path absolute
+# (we cd into input_dir later, so a relative path would break)
+out_dir="$(dirname -- "$output_zip")"
+mkdir -p -- "$out_dir"
+out_dir="$(cd "$out_dir" && pwd)"
+output_zip="$out_dir/$(basename -- "$output_zip")"
+
+# build zip include patterns from the comma-separated extension list
+patterns=()
+IFS=',' read -ra exts <<< "$ext_list"
+for ext in "${exts[@]}"; do
+  ext="$(echo "$ext" | xargs)"   # trim whitespace
+  ext="${ext#.}"                 # accept ".js" or "js"
+  [[ -n "$ext" ]] && patterns+=("*.${ext}")
+done
+
+(( ${#patterns[@]} )) || {
+  echo "ERROR: no valid extensions found in '$ext_list'" >&2
+  exit 1
+}
+
+# zip *adds to* an existing archive by default; remove any old one
+# so every run produces a fresh, deterministic result
+rm -f -- "$output_zip"
+
+# run from inside input_dir so paths in the archive are relative to it
+cd "$input_dir"
+
+set +e
+zip -r "$output_zip" . -i "${patterns[@]}"
+status=$?
+set -e
+
+if [[ $status -eq 12 ]]; then
+  # zip's exit code 12 means "nothing to do" — no files matched
+  echo "No files matching (${patterns[*]}) in '$input_dir'. No zip created." >&2
+  exit 1
+elif [[ $status -ne 0 ]]; then
+  echo "ERROR: zip failed with exit code $status" >&2
+  exit "$status"
 fi
-echo "All directories rebuilt successfully."
+
+echo "Created: $output_zip"
