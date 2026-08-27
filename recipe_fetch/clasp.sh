@@ -2,84 +2,71 @@
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────
-# Zip files of the given type(s) from a directory.
+# Zip many directories, driven by a manifest file.
 #
 # Usage:
-#   zip_by_type.sh <input_dir> <extensions> <output_zip>
+#   zip_many.sh <manifest_file>
 #
-#   input_dir    directory to pull files from (searched recursively)
-#   extensions   comma-separated, dot optional: "js" or "js,sh,html"
-#   output_zip   where to write the zip; parent dirs created as
-#                needed, ".zip" appended if missing
+# Manifest format — one job per line, pipe-separated:
 #
-# Example:
-#   ./zip_by_type.sh ./my-project js,gs /tmp/backups/project-src.zip
+#   input_dir | extensions | output_zip
+#
+#   /c/projects/src      | js,gs   | /c/backups/src.zip
+#   /c/projects/scripts  | sh      | /c/backups/scripts.zip
+#   # comments and blank lines are ignored
+#
+# Fields are pipe-separated (not comma) because the extensions
+# field already uses commas internally.
 # ─────────────────────────────────────────────────────────────
 
-usage() {
-  sed -n '4,16p' "$0"   # print the header comment above
+# find zip_by_type.sh sitting next to this script, regardless of
+# what the current working directory is when we're invoked
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ZIP_ONE="$SCRIPT_DIR/zip_by_type.sh"
+
+manifest="${1:?Usage: $(basename "$0") <manifest_file>}"
+
+[[ -f "$manifest" ]] || {
+  echo "ERROR: manifest '$manifest' not found" >&2
   exit 1
 }
 
-[[ $# -eq 3 ]] || usage
-
-input_dir="$1"
-ext_list="$2"
-output_zip="$3"
-
-command -v zip >/dev/null 2>&1 || {
-  echo "ERROR: zip is not installed (try: apt install zip)" >&2
+[[ -x "$ZIP_ONE" ]] || {
+  echo "ERROR: $ZIP_ONE not found or not executable" >&2
   exit 1
 }
 
-[[ -d "$input_dir" ]] || {
-  echo "ERROR: input directory '$input_dir' not found" >&2
+failures=()
+lineno=0
+
+# the `|| [[ -n "$dir" ]]` clause makes the loop still process a
+# final line that has no trailing newline
+while IFS='|' read -r dir exts out || [[ -n "${dir:-}" ]]; do
+  ((++lineno))
+
+  # trim whitespace around each field
+  dir="$(echo "${dir:-}" | xargs)"
+  exts="$(echo "${exts:-}" | xargs)"
+  out="$(echo "${out:-}" | xargs)"
+
+  # skip blanks and comments
+  [[ -z "$dir" || "$dir" == \#* ]] && continue
+
+  if [[ -z "$exts" || -z "$out" ]]; then
+    echo "!! Line $lineno malformed (need: dir | exts | out.zip) — skipping" >&2
+    failures+=("line $lineno")
+    continue
+  fi
+
+  echo "== Zipping $dir  ->  $out =="
+  if ! "$ZIP_ONE" "$dir" "$exts" "$out"; then
+    failures+=("$dir")
+  fi
+done < "$manifest"
+
+echo
+if (( ${#failures[@]} )); then
+  echo "Completed with failures: ${failures[*]}" >&2
   exit 1
-}
-
-# ensure the output name ends in .zip
-[[ "$output_zip" == *.zip ]] || output_zip="${output_zip}.zip"
-
-# create the output directory if needed, then make the path absolute
-# (we cd into input_dir later, so a relative path would break)
-out_dir="$(dirname -- "$output_zip")"
-mkdir -p -- "$out_dir"
-out_dir="$(cd "$out_dir" && pwd)"
-output_zip="$out_dir/$(basename -- "$output_zip")"
-
-# build zip include patterns from the comma-separated extension list
-patterns=()
-IFS=',' read -ra exts <<< "$ext_list"
-for ext in "${exts[@]}"; do
-  ext="$(echo "$ext" | xargs)"   # trim whitespace
-  ext="${ext#.}"                 # accept ".js" or "js"
-  [[ -n "$ext" ]] && patterns+=("*.${ext}")
-done
-
-(( ${#patterns[@]} )) || {
-  echo "ERROR: no valid extensions found in '$ext_list'" >&2
-  exit 1
-}
-
-# zip *adds to* an existing archive by default; remove any old one
-# so every run produces a fresh, deterministic result
-rm -f -- "$output_zip"
-
-# run from inside input_dir so paths in the archive are relative to it
-cd "$input_dir"
-
-set +e
-zip -r "$output_zip" . -i "${patterns[@]}"
-status=$?
-set -e
-
-if [[ $status -eq 12 ]]; then
-  # zip's exit code 12 means "nothing to do" — no files matched
-  echo "No files matching (${patterns[*]}) in '$input_dir'. No zip created." >&2
-  exit 1
-elif [[ $status -ne 0 ]]; then
-  echo "ERROR: zip failed with exit code $status" >&2
-  exit "$status"
 fi
-
-echo "Created: $output_zip"
+echo "All archives created successfully."
