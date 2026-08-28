@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<!--
+  CorpusWebApp.html — the Corpus Q&A web app (create this in the editor as an HTML file named
+  exactly "CorpusWebApp"; doGet in 14_WebApp serves it at the deployed URL).
+
+  Design intent: CorpusSidebar grown up. Same design system — host-native restraint, provenance as
+  the signature (citation chips, monospace as-of footer, amber refusal as a first-class state) —
+  laid out for a full window: one centered ~720px column, the ask box pinned at top, shared team
+  history below (O4). Two hard-won additions over the sidebar's first draft:
+    - the patience timer: at ~75s the spinner says so out loud (a healthy ask finishes in ~30s);
+    - history errors RENDER (class "history-unavailable") — an error never impersonates an empty
+      log again. The doGet test asserts on that class name.
+
+  Freshness + entity-browser slice: the ambient freshness chip and starter chips (which degrade
+  silently — an absent chip claims nothing) and the collapsible entity browser (whose failures
+  RENDER, class "entities-unavailable" — asserted by the doGet test — because an error must never
+  impersonate an empty estate). Entities load lazily, on first open.
+
+  ***UPDATED*** O12 — entity-browser display evolution: Recipes and Data tables are collapsible
+  sections; inside each, one collapsible group per project ("entproj"), and inside a project one
+  collapsible group per resolved folder path with the project prefix dropped ("entpath" — both
+  class names are the doGet test's paste sentinels). A workspace is projects, and a project is
+  folders, so the two group levels are exactly the two real levels of nesting. Open state survives
+  the filter's re-renders; the filter force-opens whatever holds a match and matches the path too.
+
+  Server contract (all four in 13_Feature_CorpusQa):
+    askCorpus(question)   -> {question, answer, citations:[{ref,kind}], not_in_corpus, as_of:{generated_at, corpus_fp12}}
+    getRecentQa(limit)    -> [{asked_at, who, question, answer, citations, refused, corpus_fp12,
+                               generated_at, duration_ms, status}]
+    getCorpusStatus()     -> {built, generated_at, corpus_fp12, recipes, starters}  (never throws)
+    getCorpusEntities()   -> {recipes:[{id,name,project,folder,path}], tables:[same shape]}  (throws; panel shows the cause)
+-->
+<html>
+
+<head>
+  <base target="_top">
+  <style>
+    :root {
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --accent: #0b57d0;
+      --cite-bg: #eef4ff;
+      --cite-ink: #1e4fae;
+      --refused: #b45309;
+      --refused-bg: #fff7ed;
+      --failed: #b3261e;
+      --code-bg: #f3f4f6;
+      --canvas: #f8f9fa;
+      --card: #ffffff;
+      --radius: 10px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 28px 16px 48px;
+      font: 14px/1.55 "Google Sans", Roboto, system-ui, -apple-system, sans-serif;
+      color: var(--ink);
+      background: var(--canvas);
+    }
+
+    .col {
+      max-width: 720px;
+      margin: 0 auto;
+    }
+
+    header h1 {
+      font-size: 20px;
+      font-weight: 600;
+      margin: 0;
+    }
+
+    header .sub {
+      color: var(--muted);
+      font-size: 13px;
+      margin: 4px 0 20px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 84px;
+      resize: vertical;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font: inherit;
+      color: inherit;
+      background: var(--card);
+    }
+
+    textarea:focus-visible,
+    button:focus-visible,
+    .item:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
+    .askrow {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 10px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 18px;
+      padding: 8px 18px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      background: #9db7e8;
+      cursor: default;
+    }
+
+    button.quiet {
+      background: none;
+      color: var(--accent);
+      font-weight: 500;
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 11.5px;
+    }
+
+    .status {
+      display: none;
+      align-items: baseline;
+      gap: 8px;
+      color: var(--muted);
+      margin-top: 12px;
+    }
+
+    .spin {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      align-self: center;
+      border: 2px solid var(--line);
+      border-top-color: var(--accent);
+      animation: turn .8s linear infinite;
+    }
+
+    @keyframes turn {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .spin {
+        animation: none;
+        display: none;
+      }
+    }
+
+    .patience {
+      display: none;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .answercard {
+      display: none;
+      margin-top: 16px;
+    }
+
+    .answercard.refused {
+      border-left: 3px solid var(--refused);
+      background: var(--refused-bg);
+    }
+
+    .q {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+
+    .answer {
+      overflow-wrap: break-word;
+    }
+
+    .answer code {
+      background: var(--code-bg);
+      border-radius: 3px;
+      padding: 0 4px;
+      font-size: 13px;
+    }
+
+    .cite {
+      background: var(--cite-bg);
+      color: var(--cite-ink);
+      border-radius: 3px;
+      padding: 0 4px;
+      font-family: ui-monospace, "Roboto Mono", Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .refnote {
+      display: none;
+      margin-bottom: 8px;
+      color: var(--refused);
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .asof {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-family: ui-monospace, "Roboto Mono", Consolas, monospace;
+      font-size: 11px;
+    }
+
+    .err {
+      display: none;
+      margin-top: 16px;
+      padding: 12px 14px;
+      border: 1px solid #f3c7c7;
+      border-radius: var(--radius);
+      background: #fdf3f3;
+      color: #8f2d2d;
+    }
+
+    .histhead {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin: 28px 0 6px;
+    }
+
+    .histlabel {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .history-unavailable {
+      display: none;
+      margin: 4px 0 8px;
+      color: var(--failed);
+      font-size: 12.5px;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 13px;
+      padding: 10px 2px;
+    }
+
+    .item {
+      border-top: 1px solid var(--line);
+      padding: 10px 4px;
+      cursor: pointer;
+    }
+
+    .item:first-child {
+      border-top: 0;
+    }
+
+    .item .iq {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .item .meta {
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 2px;
+    }
+
+    .item .meta .rdot {
+      color: var(--refused);
+      font-weight: 600;
+    }
+
+    .item .meta .rfail {
+      color: var(--failed);
+      font-weight: 600;
+    }
+
+    .item .body {
+      display: none;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .item.open .iq {
+      white-space: normal;
+      font-weight: 500;
+    }
+
+    .item.open .body {
+      display: block;
+    }
+
+    /* ***UPDATED*** freshness chip + starter chips + entity browser */
+    .fresh {
+      display: none;
+      margin: -12px 0 20px;
+      color: var(--muted);
+      font-family: ui-monospace, "Roboto Mono", Consolas, monospace;
+      font-size: 11px;
+    }
+
+    .starters {
+      display: none;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .starters button {
+      background: var(--cite-bg);
+      color: var(--cite-ink);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 4px 10px;
+      border-radius: 12px;
+      text-align: left;
+    }
+
+    details.entities {
+      margin-top: 16px;
+      padding: 0;
+    }
+
+    details.entities summary {
+      cursor: pointer;
+      padding: 12px 18px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      list-style: none;
+    }
+
+    details.entities summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.entities summary::before {
+      content: "▸ ";
+    }
+
+    details.entities[open] summary::before {
+      content: "▾ ";
+    }
+
+    .entbody {
+      padding: 0 18px 14px;
+    }
+
+    .entbody input {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font: inherit;
+      color: inherit;
+      margin-bottom: 8px;
+    }
+
+    .entities-unavailable {
+      display: none;
+      color: var(--failed);
+      font-size: 12.5px;
+      margin: 2px 0 8px;
+    }
+
+    /* ***UPDATED*** O12: collapsible sections (Recipes / Data tables) and path-labeled folder
+       groups inside Recipes. Same disclosure grammar as the panel itself: ▸ closed, ▾ open. */
+    details.entsec {
+      margin: 10px 0 0;
+    }
+
+    details.entsec>summary {
+      cursor: pointer;
+      list-style: none;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      padding: 4px 0 2px;
+    }
+
+    details.entproj {
+      margin: 2px 0 2px 4px;
+    }
+
+    details.entproj>summary {
+      cursor: pointer;
+      list-style: none;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 600;
+      padding: 5px 6px;
+      border-radius: 6px;
+    }
+
+    details.entpath {
+      margin: 1px 0 1px 14px;
+    }
+
+    details.entpath>summary {
+      cursor: pointer;
+      list-style: none;
+      color: var(--ink);
+      font-size: 13px;
+      padding: 5px 6px;
+      border-radius: 6px;
+    }
+
+    details.entproj>summary:hover,
+    details.entpath>summary:hover {
+      background: var(--cite-bg);
+    }
+
+    details.entsec>summary::-webkit-details-marker,
+    details.entproj>summary::-webkit-details-marker,
+    details.entpath>summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.entsec>summary::before,
+    details.entproj>summary::before,
+    details.entpath>summary::before {
+      content: "▸ ";
+      color: var(--muted);
+    }
+
+    details.entsec[open]>summary::before,
+    details.entproj[open]>summary::before,
+    details.entpath[open]>summary::before {
+      content: "▾ ";
+    }
+
+    details.entpath .ent {
+      padding-left: 24px;
+    }
+
+    .entcount {
+      color: var(--muted);
+      font-family: ui-monospace, "Roboto Mono", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 400;
+      letter-spacing: 0;
+      margin-left: 6px;
+    }
+
+    .ent {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: none;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 400;
+      padding: 5px 6px;
+      border-radius: 6px;
+    }
+
+    .ent:hover {
+      background: var(--cite-bg);
+    }
+
+    .ent .eid {
+      color: var(--muted);
+      font-family: ui-monospace, "Roboto Mono", Consolas, monospace;
+      font-size: 11px;
+      margin-left: 6px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="col">
+    <header>
+      <h1>SDC Corpus Q&amp;A</h1>
+      <div class="sub">Cited answers from the recipe estate. Anything the corpus can't establish is refused, not
+        guessed.</div>
+      <!-- ***UPDATED*** ambient freshness chip: shown only when there is something true to show -->
+      <div class="fresh" id="fresh"></div>
+    </header>
+
+    <div class="card">
+      <textarea id="q" placeholder="e.g. Which recipes call INV-01?"
+        aria-label="Question about the recipe estate"></textarea>
+      <div class="askrow">
+        <button id="ask">Ask the corpus</button>
+        <span class="hint">Ctrl+Enter</span>
+      </div>
+      <!-- ***UPDATED*** starter chips: rendered from getCorpusStatus().starters; hidden when none -->
+      <div class="starters" id="starters" aria-label="Starter questions"></div>
+      <div class="status" id="status" aria-live="polite">
+        <span class="spin"></span><span>Asking the corpus…</span>
+        <span class="patience" id="patience">Still working — most asks finish in about 30 seconds; this one is taking
+          longer.</span>
+      </div>
+    </div>
+
+    <div class="err" id="err" aria-live="polite"></div>
+
+    <div class="card answercard" id="card">
+      <div class="q" id="cardq"></div>
+      <div class="refnote" id="refnote">Not in corpus — the estate's documentation doesn't establish this.</div>
+      <div class="answer" id="answer"></div>
+      <div class="asof" id="asof"></div>
+    </div>
+
+    <!-- entity browser: the vocabulary problem — users can't ask about recipes they can't name.
+         Collapsed by default; entities load lazily on first open. Failures RENDER.
+         ***UPDATED*** O12: sections and folder groups are rendered by renderEntities(). -->
+    <details class="card entities" id="entcard">
+      <summary>Browse the estate</summary>
+      <div class="entbody">
+        <input id="entfilter" type="text" placeholder="Filter by name, id, or folder…" aria-label="Filter entities">
+        <div class="entities-unavailable" id="enterr" aria-live="polite"></div>
+        <div id="entlist"></div>
+      </div>
+    </details>
+
+    <div class="histhead">
+      <span class="histlabel">Recent questions — the whole team's</span>
+      <button class="quiet" id="refreshHist">Refresh</button>
+    </div>
+    <div class="history-unavailable" id="histerr" aria-live="polite"></div>
+    <div class="card" id="histcard">
+      <div id="hist">
+        <div class="empty">No questions yet. Ask the first one above.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    var qaHistory = [];
+    var patienceTimer = null;
+
+    function esc(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    // Light markdown: escape first, then bold / inline code / [citation] chips / line breaks.
+    function renderMd(s) {
+      return esc(s)
+        .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+        .replace(/\[([^\[\]\n]{1,80})\]/g, '<span class="cite">[$1]</span>')
+        .replace(/\n/g, "<br>");
+    }
+    function shortTime(iso) {
+      return String(iso || "").slice(0, 16).replace("T", " ");
+    }
+    function asOfLine(fp12, generatedAt) {
+      return fp12 ? "corpus " + esc(fp12) + " · generated " + esc(shortTime(generatedAt)) : "";
+    }
+
+    function setBusy(b) {
+      document.getElementById("ask").disabled = b;
+      document.getElementById("status").style.display = b ? "flex" : "none";
+      var p = document.getElementById("patience");
+      if (b) {
+        patienceTimer = setTimeout(function () { p.style.display = "inline"; }, 75000);
+      } else {
+        clearTimeout(patienceTimer);
+        p.style.display = "none";
+      }
+    }
+    function showError(msg) {
+      var e = document.getElementById("err");
+      e.textContent = "The ask failed: " + msg;
+      e.style.display = "block";
+    }
+    function clearError() { document.getElementById("err").style.display = "none"; }
+
+    function showAnswer(r) {
+      var card = document.getElementById("card");
+      card.className = "card answercard" + (r.not_in_corpus ? " refused" : "");
+      card.style.display = "block";
+      document.getElementById("refnote").style.display = r.not_in_corpus ? "block" : "none";
+      document.getElementById("cardq").textContent = r.question;
+      document.getElementById("answer").innerHTML = renderMd(r.answer);
+      document.getElementById("asof").innerHTML =
+        asOfLine(r.as_of && r.as_of.corpus_fp12, r.as_of && r.as_of.generated_at);
+    }
+
+    function itemMeta(h) {
+      var meta = esc(shortTime(h.asked_at));
+      var who = String(h.who || "").split("@")[0];
+      if (who) meta += " · " + esc(who);
+      if (h.duration_ms > 0) meta += " · " + (h.duration_ms / 1000).toFixed(1) + "s";
+      if (h.status === "error") meta += ' · <span class="rfail">failed</span>';
+      else if (h.refused) meta += ' · <span class="rdot">not in corpus</span>';
+      return meta;
+    }
+
+    function renderHistory() {
+      var box = document.getElementById("hist");
+      if (!qaHistory.length) {
+        box.innerHTML = '<div class="empty">No questions yet. Ask the first one above.</div>';
+        return;
+      }
+      box.innerHTML = "";
+      qaHistory.forEach(function (h) {
+        var it = document.createElement("div");
+        it.className = "item";
+        it.tabIndex = 0;
+        it.innerHTML =
+          '<div class="iq">' + esc(h.question) + "</div>" +
+          '<div class="meta">' + itemMeta(h) + "</div>" +
+          '<div class="body">' + renderMd(h.answer) +
+          '<div class="asof">' + asOfLine(h.corpus_fp12, h.generated_at) + "</div></div>";
+        function toggle() { it.classList.toggle("open"); }
+        it.addEventListener("click", toggle);
+        it.addEventListener("keydown", function (ev) {
+          if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); }
+        });
+        box.appendChild(it);
+      });
+    }
+
+    // History from Output_QA_Log — shared across the team (O4). Failures RENDER: an error must
+    // never impersonate an empty log (the lesson the sidebar taught us).
+    function loadHistory() {
+      var el = document.getElementById("histerr");
+      el.style.display = "none";
+      google.script.run
+        .withSuccessHandler(function (rows) { qaHistory = rows || []; renderHistory(); })
+        .withFailureHandler(function (e) {
+          el.textContent = "History unavailable: " + ((e && e.message) ? e.message : String(e)) +
+            " — asking still works; this only affects the list below.";
+          el.style.display = "block";
+        })
+        .getRecentQa(20);
+    }
+
+    function ask() {
+      var q = document.getElementById("q").value.trim();
+      if (!q) return;
+      clearError();
+      setBusy(true);
+      var t0 = Date.now();
+      google.script.run
+        .withSuccessHandler(function (r) {
+          setBusy(false);
+          showAnswer(r);
+          qaHistory.unshift({
+            asked_at: new Date().toISOString(),
+            who: "",
+            question: r.question,
+            answer: r.answer,
+            refused: r.not_in_corpus === true,
+            corpus_fp12: r.as_of && r.as_of.corpus_fp12,
+            generated_at: r.as_of && r.as_of.generated_at,
+            duration_ms: Date.now() - t0,
+            status: "ok"
+          });
+          renderHistory();
+        })
+        .withFailureHandler(function (e) {
+          setBusy(false);
+          showError(e && e.message ? e.message : String(e));
+        })
+        .askCorpus(q);
+    }
+
+    // --- ***UPDATED*** freshness chip + starter chips ------------------------------------
+    // Ambient elements: they render only when there is something true to show. A failed or
+    // not-built status hides them silently — an absent chip claims nothing (the complement
+    // of the loud-history-errors law above).
+    function useQuestion(q) {
+      var box = document.getElementById("q");
+      box.value = q;
+      box.focus();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function renderStatus(s) {
+      if (!s) return;
+      if (s.built && s.corpus_fp12) {
+        var f = document.getElementById("fresh");
+        f.textContent = "corpus " + s.corpus_fp12 + " · generated " + shortTime(s.generated_at) +
+          (s.recipes > 0 ? " · " + s.recipes + " recipes live" : "");
+        f.style.display = "block";
+      }
+      var starters = s.starters || [];
+      if (starters.length) {
+        var row = document.getElementById("starters");
+        row.innerHTML = "";
+        starters.forEach(function (q) {
+          var b = document.createElement("button");
+          b.type = "button";
+          b.textContent = q;
+          b.addEventListener("click", function () { useQuestion(q); });
+          row.appendChild(b);
+        });
+        row.style.display = "flex";
+      }
+    }
+
+    function loadStatus() {
+      google.script.run
+        .withSuccessHandler(renderStatus)
+        .withFailureHandler(function () { /* ambient: degrade silently */ })
+        .getCorpusStatus();
+    }
+
+    // --- entity browser ---------------------------------------------------------------------
+    // Loaded lazily on first open. Failures RENDER ("entities-unavailable") — an error must
+    // never impersonate an empty estate; a genuinely empty estate says so honestly.
+    //
+    // ***UPDATED*** O12: Recipes and Data tables are collapsible sections. Inside each, one group
+    // per project, and inside a project one group per resolved folder path with the project
+    // prefix dropped (a recipe at the project root lands in "(project root)"). Counts beside every
+    // label. Both sections render through the same function — a table entry has the same shape
+    // as a recipe entry, so there is no special case.
+    // Open state is a small map keyed by section/project/group ("sec:recipes",
+    // "proj:recipes:ProjA", "path:recipes:ProjA / Sub"), written ONLY by a user's click on a
+    // summary — never by the renderer — so the filter's per-keystroke re-renders cannot lose it
+    // and its own force-opens cannot pollute it. The click fires before the browser flips the
+    // element, so the new state is !open. While a filter is active, anything holding a match is
+    // force-open and everything else is hidden: a filter must never hide its own hits inside a
+    // collapsed group (the quiet cousin of an error impersonating an empty state). Clearing the
+    // filter restores the remembered state. Sections and projects open by default, folder groups
+    // closed — the browser opens as a project-and-folder listing.
+    var entData = null;
+    var entOpen = {};
+
+    function entTemplate(kind, name, id) {
+      return kind === "table"
+        ? "Which recipes read or write the data table " + name + " (" + id + ")?"
+        : "What does " + name + " (" + id + ") do, and what calls it?";
+    }
+
+    function entButton(kind, e) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "ent";
+      b.innerHTML = esc(e.name) + '<span class="eid">' + esc(e.id) + "</span>";
+      b.addEventListener("click", function () { useQuestion(entTemplate(kind, e.name, e.id)); });
+      return b;
+    }
+
+    function foldEl(cls, key, label, count, defaultOpen, forceOpen) {
+      var d = document.createElement("details");
+      d.className = cls;
+      d.open = forceOpen ? true
+        : (Object.prototype.hasOwnProperty.call(entOpen, key) ? entOpen[key] : defaultOpen);
+      var s = document.createElement("summary");
+      s.innerHTML = esc(label) + '<span class="entcount">' + count + "</span>";
+      s.addEventListener("click", function () { entOpen[key] = !d.open; });
+      d.appendChild(s);
+      return d;
+    }
+
+    function ciSort(a, b) { return a.toLowerCase().localeCompare(b.toLowerCase()); }
+
+    // The folder label inside a project: the path minus the project prefix.
+    function folderLabel(e) {
+      if (!e.path) return "(no folder)";
+      if (e.path === e.project) return "(project root)";
+      var prefix = e.project + " / ";
+      return e.path.indexOf(prefix) === 0 ? e.path.slice(prefix.length) : e.path;
+    }
+
+    // One section: items -> project groups -> folder groups -> buttons. Returns null when
+    // nothing in it matches, so the caller can leave it out entirely.
+    function renderSection(kind, secLabel, items, match, filtering) {
+      var shown = items.filter(match);
+      if (!shown.length) return null;
+      var byProject = {};
+      shown.forEach(function (e) {
+        var p = e.project || "(no project)";
+        var f = folderLabel(e);
+        byProject[p] = byProject[p] || {};
+        (byProject[p][f] = byProject[p][f] || []).push(e);   // server order is by name
+      });
+      var sec = foldEl("entsec", "sec:" + kind, secLabel, shown.length, true, filtering);
+      Object.keys(byProject).sort(ciSort).forEach(function (p) {
+        var folders = byProject[p];
+        var n = Object.keys(folders).reduce(function (t, f) { return t + folders[f].length; }, 0);
+        var pg = foldEl("entproj", "proj:" + kind + ":" + p, p, n, true, filtering);
+        Object.keys(folders).sort(ciSort).forEach(function (f) {
+          var fg = foldEl("entpath", "path:" + kind + ":" + p + " / " + f, f, folders[f].length, false, filtering);
+          folders[f].forEach(function (e) { fg.appendChild(entButton(kind, e)); });
+          pg.appendChild(fg);
+        });
+        sec.appendChild(pg);
+      });
+      return sec;
+    }
+
+    function renderEntities() {
+      var box = document.getElementById("entlist");
+      box.innerHTML = "";
+      if (!entData) return;
+      var needle = document.getElementById("entfilter").value.trim().toLowerCase();
+      var filtering = needle.length > 0;
+      function hit(s) { return String(s || "").toLowerCase().indexOf(needle) !== -1; }
+      function match(e) { return !filtering || hit(e.name) || hit(e.id) || hit(e.path); }
+      var recipes = entData.recipes || [];
+      var tables = entData.tables || [];
+
+      var any = false;
+      [renderSection("recipe", "Recipes", recipes, match, filtering),
+       renderSection("table", "Data tables", tables, match, filtering)]
+        .forEach(function (sec) { if (sec) { any = true; box.appendChild(sec); } });
+
+      if (!any) {
+        box.innerHTML = '<div class="empty">' +
+          (recipes.length || tables.length
+            ? "Nothing matches that filter."
+            : "The inventory is empty — run the sync first.") + "</div>";
+      }
+    }
+
+    function loadEntities() {
+      var el = document.getElementById("enterr");
+      el.style.display = "none";
+      google.script.run
+        .withSuccessHandler(function (data) { entData = data || { recipes: [], tables: [] }; renderEntities(); })
+        .withFailureHandler(function (e) {
+          el.textContent = "Entities unavailable: " + ((e && e.message) ? e.message : String(e)) +
+            " — asking still works; this only affects the browser.";
+          el.style.display = "block";
+        })
+        .getCorpusEntities();
+    }
+
+    document.getElementById("entcard").addEventListener("toggle", function () {
+      if (this.open && !entData) loadEntities();
+    });
+    document.getElementById("entfilter").addEventListener("input", renderEntities);
+
+    document.getElementById("ask").addEventListener("click", ask);
+    document.getElementById("refreshHist").addEventListener("click", loadHistory);
+    document.getElementById("q").addEventListener("keydown", function (ev) {
+      if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") { ev.preventDefault(); ask(); }
+    });
+
+    loadHistory();
+    loadStatus();   // ***UPDATED*** ambient; a failure here changes nothing the user relies on
+  </script>
+</body>
+
+</html>
