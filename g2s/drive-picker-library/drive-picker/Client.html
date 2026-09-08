@@ -1,0 +1,201 @@
+<script>
+/*
+  DrivePicker {{VERSION}} — browser half. Emitted into the host page by DrivePicker.clientHtml().
+
+  window.DrivePicker.mount({
+    button,                 // Element the "Add from Drive" button is appended to            (required)
+    apiKey,                 // API key with the Google Picker API enabled                       (required)
+    clientId,               // OAuth 2.0 Web client id                                          (required)
+    appId,                  // project NUMBER of the project that owns clientId                 (required)
+    onPicked(files, token), // files: [{id, name, mimeType, sizeBytes, url}]; token: the visitor's (required)
+    onError(err),           // optional; default logs to console
+    mimeTypes,              // optional array shown by the picker; default: everything
+    scope,                  // optional; default https://www.googleapis.com/auth/drive.file
+    multiselect,            // optional; default true
+    label, title, className // optional cosmetics
+  }) -> { open(), button }
+
+  How it works, in order:
+    1. Nothing loads until the first click. Then two Google scripts are fetched (unless already present):
+       api.js for the Picker, gsi/client for Google Identity Services.
+    2. GIS asks the visitor for a drive.file token. With drive.file the app can see only files the visitor
+       picks through the dialog — the least-privilege pairing Google recommends for the Picker.
+    3. The Picker opens with that token and the host's appId, so picked files are granted to the app.
+    4. Picks and the token go to onPicked. The host decides what to do (typically: google.script.run to a
+       server shim that calls DrivePicker.fetchPicked). This script never calls the server itself.
+
+  The origin problem, made self-diagnosing: GIS runs inside HtmlService's sandbox iframe, whose origin is a
+  *.googleusercontent.com host, and that origin must be listed under "Authorized JavaScript origins" on the
+  OAuth client. Every sign-in error reported here includes window.location.origin so the first failure on a
+  new host tells you exactly which string to add.
+*/
+(function () {
+  'use strict';
+  if (window.DrivePicker) return;                              // idempotent if included twice
+
+  var GAPI_SRC = 'https://apis.google.com/js/api.js';
+  var GIS_SRC = 'https://accounts.google.com/gsi/client';
+  var DEFAULT_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+
+  var loading = {};                                            // src -> Promise, so each script loads once
+
+  function loadScript(src, ready) {
+    if (ready()) return Promise.resolve();
+    if (loading[src]) return loading[src];
+    loading[src] = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.async = true;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { delete loading[src]; reject(new Error('Could not load ' + src)); };
+      document.head.appendChild(s);
+    });
+    return loading[src];
+  }
+
+  function loadGis() {
+    return loadScript(GIS_SRC, function () {
+      return !!(window.google && google.accounts && google.accounts.oauth2);
+    });
+  }
+
+  function loadPicker() {
+    return loadScript(GAPI_SRC, function () { return !!(window.gapi && gapi.load); }).then(function () {
+      if (window.google && google.picker && google.picker.PickerBuilder) return;
+      return new Promise(function (resolve, reject) {
+        gapi.load('picker', { callback: resolve, onerror: function () { reject(new Error('Could not load the Picker module.')); } });
+      });
+    });
+  }
+
+  function hostOrigin() {
+    // Inside HtmlService the page is an iframe; the Picker must be told the TOP window's origin or it refuses to
+    // post back. google.script.host.origin is the documented source; fall back to our own origin elsewhere.
+    try {
+      if (window.google && google.script && google.script.host && google.script.host.origin) return google.script.host.origin;
+    } catch (e) { /* not in Apps Script */ }
+    return window.location.protocol + '//' + window.location.host;
+  }
+
+  function describeSignInError(e, clientId) {
+    var what = (e && (e.type || e.error)) || 'sign-in failed';
+    var detail = (e && (e.message || e.error_description)) ? ': ' + (e.message || e.error_description) : '';
+    return 'Drive sign-in ' + what + detail + '. If this is a configuration problem: this page\'s origin is ' +
+      window.location.origin + ' and it must be listed under "Authorized JavaScript origins" on OAuth client ' +
+      clientId + '.';
+  }
+
+  function required(opts, keys) {
+    keys.forEach(function (k) {
+      if (opts[k] == null || opts[k] === '') throw new Error('DrivePicker.mount: "' + k + '" is required.');
+    });
+  }
+
+  function mount(opts) {
+    opts = opts || {};
+    required(opts, ['button', 'apiKey', 'clientId', 'appId', 'onPicked']);
+    var onError = opts.onError || function (err) { console.error('[DrivePicker]', err); };
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = opts.className || 'drivepicker-btn';
+    btn.textContent = opts.label || 'Add from Drive';
+    opts.button.appendChild(btn);
+
+    var token = null;
+    var tokenExpiresAt = 0;
+    var tokenClient = null;
+    var pending = null;                                        // resolver for the in-flight token request
+
+    function ensureToken() {
+      if (token && Date.now() < tokenExpiresAt - 60000) return Promise.resolve(token);
+      return loadGis().then(function () {
+        return new Promise(function (resolve, reject) {
+          pending = { resolve: resolve, reject: reject };
+          if (!tokenClient) {
+            // One token client, one callback: initTokenClient's callback is fixed at creation, so it hands the
+            // result to whichever request is pending rather than closing over a single promise.
+            tokenClient = google.accounts.oauth2.initTokenClient({
+              client_id: opts.clientId,
+              scope: opts.scope || DEFAULT_SCOPE,
+              callback: function (resp) {
+                var p = pending; pending = null;
+                if (!p) return;
+                if (resp && resp.error) return p.reject(new Error(describeSignInError(resp, opts.clientId)));
+                token = resp.access_token;
+                tokenExpiresAt = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
+                p.resolve(token);
+              },
+              error_callback: function (err) {
+                var p = pending; pending = null;
+                if (p) p.reject(new Error(describeSignInError(err, opts.clientId)));
+              }
+            });
+          }
+          tokenClient.requestAccessToken({ prompt: '' });
+        });
+      });
+    }
+
+    function toFiles(data) {
+      var docs = data[google.picker.Response.DOCUMENTS] || [];
+      return docs.map(function (d) {
+        return {
+          id: d[google.picker.Document.ID],
+          name: d[google.picker.Document.NAME],
+          mimeType: d[google.picker.Document.MIME_TYPE],
+          sizeBytes: d.sizeBytes != null ? Number(d.sizeBytes) : null,
+          url: d[google.picker.Document.URL] || null
+        };
+      });
+    }
+
+    function open() {
+      btn.disabled = true;
+      Promise.all([ensureToken(), loadPicker()]).then(function (r) {
+        var tok = r[0];
+
+        var view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+          .setIncludeFolders(false)
+          .setSelectFolderEnabled(false)
+          .setEnableDrives(true);
+        if (opts.mimeTypes && opts.mimeTypes.length) view.setMimeTypes(opts.mimeTypes.join(','));
+
+        var builder = new google.picker.PickerBuilder()
+          .setOAuthToken(tok)
+          .setDeveloperKey(opts.apiKey)
+          .setAppId(String(opts.appId))
+          .setOrigin(hostOrigin())
+          .addView(view)
+          .enableFeature(google.picker.Feature.SUPPORT_DRIVES)
+          .setCallback(function (data) {
+            var action = data[google.picker.Response.ACTION];
+            if (action === google.picker.Action.PICKED) {
+              btn.disabled = false;
+              try { opts.onPicked(toFiles(data), tok); } catch (e) { onError(e); }
+            } else if (action === google.picker.Action.CANCEL) {
+              btn.disabled = false;
+            }
+          });
+        if (opts.multiselect !== false) builder.enableFeature(google.picker.Feature.MULTISELECT_ENABLED);
+        if (opts.title) builder.setTitle(opts.title);
+
+        builder.build().setVisible(true);
+      }).catch(function (err) {
+        btn.disabled = false;
+        onError(err);
+      });
+    }
+
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();                                     // a host drop zone may also listen for clicks
+      open();
+    });
+
+    return { open: open, button: btn };
+  }
+
+  window.DrivePicker = { version: '{{VERSION}}', mount: mount };
+})();
+</script>

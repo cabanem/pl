@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Contract Intake</title>
+  <base target="_top">
+
+  <!--
+    Dashboard.html — the home base page served by doGet() in WebApp.gs.
+
+    The page asks the server for one snapshot (getDashboardData), renders it, and asks again every
+    minute and whenever the tab regains focus.
+
+    The drop zone is the only thing on this page that writes. It hands a file to uploadContract(),
+    which creates it in the Intake folder and nothing more; from there the file enters the pipeline
+    exactly as if it had been dropped into the folder in Drive.
+
+    Every string that comes from the sheets (contract names, error messages, log details) passes
+    through esc() before it touches the DOM, or is set with textContent. Those strings are typed by
+    humans or produced by a model, so they are untrusted.
+
+    Status colors are never the only signal: each carries a dot AND a word (OK / Stale / Error / Waiting).
+  -->
+
+  <style>
+    /* ---- tokens -------------------------------------------------------------- */
+
+    :root {
+      color-scheme: light;
+
+      --page:     #f9f9f7;
+      --surface:  #fcfcfb;
+      --ink:      #0b0b0b;
+      --ink-2:    #52514e;
+      --muted:    #898781;
+      --hairline: #e1e0d9;
+      --ring:     rgba(11, 11, 11, 0.10);
+
+      --good:     #0ca30c;
+      --warning:  #fab219;
+      --serious:  #ec835a;
+      --critical: #d03b3b;
+
+      --link:     #1c5cab;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+
+        --page:     #0d0d0d;
+        --surface:  #1a1a19;
+        --ink:      #ffffff;
+        --ink-2:    #c3c2b7;
+        --muted:    #898781;
+        --hairline: #2c2c2a;
+        --ring:     rgba(255, 255, 255, 0.10);
+
+        --link:     #86b6ef;
+      }
+    }
+
+    /* ---- base ---------------------------------------------------------------- */
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: var(--page);
+      color: var(--ink);
+      font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a {
+      color: var(--link);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    .wrap {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 24px 20px 40px;
+    }
+
+    /* ---- header -------------------------------------------------------------- */
+
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12px 24px;
+      margin-bottom: 20px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .sub {
+      margin-top: 2px;
+      font-size: 13px;
+      color: var(--ink-2);
+    }
+
+    .sub .path {
+      color: var(--muted);
+    }
+
+    .pulse {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: var(--surface);
+      box-shadow: inset 0 0 0 1px var(--ring);
+      font-size: 13px;
+      color: var(--ink-2);
+      white-space: nowrap;
+    }
+
+    .pill b {
+      color: var(--ink);
+      font-weight: 600;
+    }
+
+    .dot {
+      flex: none;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+
+    .dot.good     { background: var(--good); }
+    .dot.warning  { background: var(--warning); }
+    .dot.serious  { background: var(--serious); }
+    .dot.critical { background: var(--critical); }
+
+    button.refresh {
+      padding: 6px 12px;
+      border: 0;
+      border-radius: 999px;
+      background: var(--surface);
+      box-shadow: inset 0 0 0 1px var(--ring);
+      font: inherit;
+      font-size: 13px;
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    button.refresh:hover {
+      box-shadow: inset 0 0 0 1px var(--muted);
+    }
+
+    button.refresh[disabled] {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    /* ---- drop zone ----------------------------------------------------------- */
+
+    .drop {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 16px;
+      margin-bottom: 20px;
+      padding: 16px 20px;
+      border: 1.5px dashed var(--muted);
+      border-radius: 12px;
+      background: var(--surface);
+      cursor: pointer;
+      transition: border-color 0.12s, box-shadow 0.12s;
+    }
+
+    .drop:hover,
+    .drop:focus-visible {
+      border-color: var(--ink-2);
+      outline: none;
+    }
+
+    .drop.over {
+      border-color: var(--link);
+      box-shadow: inset 0 0 0 1px var(--link);
+    }
+
+    .drop.busy {
+      cursor: progress;
+    }
+
+    .drop .glyph {
+      font-size: 20px;
+      line-height: 1;
+      color: var(--muted);
+    }
+
+    .drop .txt {
+      flex: 1 1 260px;
+    }
+
+    .drop .txt b {
+      font-weight: 600;
+    }
+
+    .drop .hint {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .drop input[type="file"] {
+      display: none;
+    }
+
+    .drop .actions {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .uploads {
+      flex-basis: 100%;
+      margin: 6px 0 0;
+      padding: 0;
+      list-style: none;
+      font-size: 14px;
+    }
+
+    .uploads li {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 4px 10px;
+      padding: 5px 0;
+      border-top: 1px solid var(--hairline);
+    }
+
+    .uploads .fname {
+      font-weight: 500;
+      overflow-wrap: anywhere;
+    }
+
+    .uploads .st {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--ink-2);
+    }
+
+    /* ---- KPI row ------------------------------------------------------------- */
+
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    .tile {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 104px;
+      padding: 16px 18px 14px;
+      border-radius: 12px;
+      background: var(--surface);
+      box-shadow: inset 0 0 0 1px var(--ring);
+    }
+
+    .tile .label {
+      font-size: 13px;
+      color: var(--ink-2);
+    }
+
+    .tile .value {
+      margin-top: 6px;
+      font-size: 32px;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+
+    .tile .foot {
+      min-height: 1em;
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .tile.hero {
+      grid-column: span 2;
+    }
+
+    .tile.hero .value {
+      font-size: 56px;
+    }
+
+    @media (max-width: 520px) {
+      .tile.hero {
+        grid-column: span 1;
+      }
+
+      .tile.hero .value {
+        font-size: 44px;
+      }
+    }
+
+    /* ---- panels & tables ----------------------------------------------------- */
+
+    .panel {
+      margin-bottom: 16px;
+      border-radius: 12px;
+      background: var(--surface);
+      box-shadow: inset 0 0 0 1px var(--ring);
+      overflow: hidden;
+    }
+
+    .panel h2 {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin: 0;
+      padding: 14px 18px 12px;
+      border-bottom: 1px solid var(--hairline);
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .panel h2 .count {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--muted);
+    }
+
+    /* Wide tables scroll inside their panel, never the page. */
+    .scroll {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      min-width: 720px;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th {
+      padding: 10px 18px 8px;
+      border-bottom: 1px solid var(--hairline);
+      text-align: left;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    td {
+      padding: 10px 18px;
+      border-bottom: 1px solid var(--hairline);
+      vertical-align: top;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    td.time {
+      color: var(--ink-2);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+
+    td.muted,
+    .muted {
+      color: var(--muted);
+    }
+
+    td.detail {
+      max-width: 520px;
+      color: var(--ink-2);
+      overflow-wrap: anywhere;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      white-space: nowrap;
+    }
+
+    .empty {
+      padding: 22px 18px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .name {
+      min-width: 220px;
+      font-weight: 500;
+      overflow-wrap: break-word;
+    }
+
+    /* ---- states -------------------------------------------------------------- */
+
+    .banner {
+      display: none;
+      margin-bottom: 16px;
+      padding: 12px 16px;
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: inset 0 0 0 1px var(--critical);
+      font-size: 14px;
+      color: var(--ink);
+    }
+
+    .banner.show {
+      display: block;
+    }
+
+    .loading td,
+    .loading .value {
+      color: var(--muted);
+    }
+
+    footer {
+      margin-top: 8px;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    footer code {
+      font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+
+    <header>
+      <div>
+        <h1>Contract Intake</h1>
+        <div class="sub">
+          <span class="path">Drive → Gemini → review sheet → Workato → Salesforce</span>
+          &nbsp;·&nbsp;
+          <span id="updated">Loading…</span>
+        </div>
+      </div>
+
+      <div class="pulse" id="pulse">
+        <span class="pill"><span class="dot"></span><b>Ingestion</b><span>—</span></span>
+        <span class="pill"><span class="dot"></span><b>Approvals</b><span>—</span></span>
+        <button class="refresh" id="refreshBtn" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <div class="banner" id="banner" role="alert"></div>
+
+    <!-- Drop zone: the page's only write. It creates the file in the Intake folder and nothing else. -->
+    <section class="drop" id="drop" tabindex="0" role="button" aria-label="Upload a contract">
+      <span class="glyph" aria-hidden="true">⇪</span>
+
+      <div class="txt">
+        <b>Drop a contract here</b> or click to choose one.
+        <div class="hint" id="dropHint">
+          PDF or Word. It joins the queue exactly as if you had put it in the Intake folder.
+        </div>
+      </div>
+
+      <span class="hint" id="intakeWaiting"></span>
+      <span class="actions" id="intakeActions"></span>
+
+      <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx">
+      <ul class="uploads" id="uploads" hidden></ul>
+    </section>
+
+    <section class="kpis loading" id="kpis">
+      <div class="tile hero">
+        <div class="label">Awaiting review</div>
+        <div class="value">–</div>
+        <div class="foot"></div>
+      </div>
+      <div class="tile">
+        <div class="label">Staged today</div>
+        <div class="value">–</div>
+        <div class="foot"></div>
+      </div>
+      <div class="tile">
+        <div class="label">Pushed today</div>
+        <div class="value">–</div>
+        <div class="foot"></div>
+      </div>
+      <div class="tile">
+        <div class="label">Errors today</div>
+        <div class="value">–</div>
+        <div class="foot"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>In the queue <span class="count" id="queueCount"></span></h2>
+      <div id="queue" class="scroll">
+        <div class="empty">Loading…</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Errors <span class="count" id="errorsCount">last 2 days</span></h2>
+      <div id="errors" class="scroll">
+        <div class="empty">Loading…</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Today <span class="count" id="activityCount"></span></h2>
+      <div id="activity" class="scroll">
+        <div class="empty">Loading…</div>
+      </div>
+    </section>
+
+    <footer>
+      A snapshot. "In the queue" and the heartbeats come from the <code>_queue</code> tab, rewritten by the
+      approvals poller each run; "Today" and "Errors" are computed from <code>_logs</code>. The drop zone is the
+      only thing here that writes: it puts the file in the Intake folder, nothing more. The page refreshes every
+      minute.
+    </footer>
+
+  </div>
+
+  <? if (picker) { ?><?!= DrivePicker.clientHtml() ?><? } ?>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var REFRESH_MS = 60 * 1000;
+      var STALE_MULTIPLIER = 3;   // a heartbeat older than 3 polls is stale
+
+      var state = {
+        data: null,
+        timer: null,
+        inFlight: false,
+        maxUploadBytes: 15 * 1048576,   // replaced by the server's value on first load
+        pollMinutes: 5,                 // likewise
+        pickerMounted: false
+      };
+
+      var $ = function (id) { return document.getElementById(id); };
+
+      // ---- formatting ------------------------------------------------------------------------
+
+      function esc(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function ago(iso, now) {
+        if (!iso) return null;
+        var ms = now - new Date(iso).getTime();
+        if (isNaN(ms)) return null;
+
+        var m = Math.round(ms / 60000);
+        if (m < 1) return 'just now';
+        if (m < 60) return m + ' min ago';
+
+        var h = Math.round(m / 60);
+        if (h < 48) return h + ' h ago';
+
+        return Math.round(h / 24) + ' d ago';
+      }
+
+      function clock(iso) {
+        var d = new Date(iso);
+        return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      }
+
+      function stamp(iso) {
+        var d = new Date(iso);
+        return isNaN(d) ? '' : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      }
+
+      function isUrl(s) {
+        return /^https?:\/\/\S+$/.test(String(s || ''));
+      }
+
+      function plural(n, one, many) {
+        return n + ' ' + (n === 1 ? one : many);
+      }
+
+      // Review sheets are named "Contract Review: <original file>"; the column is already headed "Contract".
+      function shortName(s) {
+        return String(s || '').replace(/^Contract Review:\s*/i, '');
+      }
+
+      // ---- render ----------------------------------------------------------------------------
+
+      function render(data) {
+        state.data = data;
+        var now = Date.now();
+        $('banner').className = 'banner';
+
+        // Drop zone: take the server's numbers so the page and the pipeline agree from one constant.
+        if (data.maxUploadBytes) state.maxUploadBytes = data.maxUploadBytes;
+        if (data.pollMinutes) state.pollMinutes = data.pollMinutes;
+
+        $('dropHint').textContent =
+          'PDF or Word, up to ' + Math.round(state.maxUploadBytes / 1048576) +
+          ' MB. It joins the queue exactly as if you had put it in the Intake folder.';
+
+        $('intakeWaiting').textContent = data.intakeWaiting
+          ? plural(data.intakeWaiting, 'file waiting to be read', 'files waiting to be read')
+          : '';
+
+        if (data.intake) {
+          if (data.intake.folderUrl) {
+            $('dropHint').innerHTML = esc($('dropHint').textContent) +
+              ' Or <a href="' + esc(data.intake.folderUrl) + '" target="_blank" rel="noopener">open the Intake folder</a> to move a Drive file in.';
+          }
+          mountPicker(data.intake.picker);
+        }
+
+        // Header.
+        $('updated').textContent = 'Snapshot ' +
+          new Date(data.generatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+
+        var staleMs = (data.pollMinutes || 5) * STALE_MULTIPLIER * 60000;
+
+        $('pulse').innerHTML =
+          pill('Ingestion', data.heartbeats && data.heartbeats.ingestion, now, staleMs) +
+          pill('Approvals', data.heartbeats && data.heartbeats.approvals, now, staleMs) +
+          '<button class="refresh" id="refreshBtn" type="button">Refresh</button>';
+
+        $('refreshBtn').addEventListener('click', load);
+
+        // KPIs.
+        var queue = data.queue || [];
+
+        var errored = queue.filter(function (q) {
+          return q.status === 'Error' || q.status === 'Unreadable';
+        }).length;
+
+        var oldest = queue.reduce(function (acc, q) {
+          var t = q.extractedAt ? new Date(q.extractedAt).getTime() : NaN;
+          return (isNaN(t) || t > acc) ? acc : t;
+        }, Infinity);
+
+        var heroFoot;
+        if (queue.length === 0) {
+          heroFoot = 'Nothing waiting';
+        } else if (errored) {
+          heroFoot = plural(errored, 'needs attention', 'need attention');
+        } else if (isFinite(oldest)) {
+          heroFoot = 'Oldest waiting ' + ago(new Date(oldest).toISOString(), now);
+        } else {
+          heroFoot = '';
+        }
+
+        $('kpis').className = 'kpis';
+        $('kpis').innerHTML =
+          tile('Awaiting review', queue.length, heroFoot, true) +
+          tile('Staged today', data.today.staged, 'Extracted and sent for review') +
+          tile('Pushed today', data.today.pushed, 'Approved and sent to Salesforce') +
+          tile('Errors today', data.today.errors, data.today.errors ? 'See the errors list below' : 'All clear so far');
+
+        // Queue table: errors first, then oldest first.
+        $('queueCount').textContent = queue.length ? '· ' + plural(queue.length, 'sheet', 'sheets') : '';
+
+        if (!queue.length) {
+          $('queue').innerHTML = '<div class="empty">Nothing is waiting for review.</div>';
+        } else {
+          var sorted = queue.slice().sort(function (a, b) {
+            var ea = a.status === 'Pending Review' ? 1 : 0;
+            var eb = b.status === 'Pending Review' ? 1 : 0;
+            if (ea !== eb) return ea - eb;
+            return String(a.extractedAt || '') < String(b.extractedAt || '') ? -1 : 1;
+          });
+
+          $('queue').innerHTML =
+            '<table>' +
+              '<thead><tr><th>Contract</th><th>Status</th><th>Waiting</th><th>Last error</th></tr></thead>' +
+              '<tbody>' +
+                sorted.map(function (q) {
+                  var label = shortName(q.name) || q.name;
+                  var name = q.url
+                    ? '<a href="' + esc(q.url) + '" target="_blank" rel="noopener" title="' + esc(q.name) + '">' + esc(label) + '</a>'
+                    : esc(label);
+
+                  return '<tr>' +
+                    '<td class="name">' + name + '</td>' +
+                    '<td>' + queueStatus(q) + '</td>' +
+                    '<td class="time">' + esc(ago(q.extractedAt, now) || '—') + '</td>' +
+                    '<td class="detail">' + (q.lastError ? esc(q.lastError) : '<span class="muted">—</span>') + '</td>' +
+                  '</tr>';
+                }).join('') +
+              '</tbody>' +
+            '</table>';
+        }
+
+        // Errors table.
+        var errors = data.errors || [];
+
+        $('errorsCount').textContent = errors.length
+          ? '· ' + errors.length + ' in the last 2 days'
+          : 'last 2 days';
+
+        if (!errors.length) {
+          $('errors').innerHTML = '<div class="empty">No errors in the last 2 days.</div>';
+        } else {
+          $('errors').innerHTML =
+            '<table>' +
+              '<thead><tr><th>When</th><th>Where</th><th>What</th><th>Detail</th></tr></thead>' +
+              '<tbody>' +
+                errors.map(function (e) {
+                  return '<tr>' +
+                    '<td class="time">' + esc(stamp(e.ts)) + '</td>' +
+                    '<td class="muted">' + esc(e.context) + '</td>' +
+                    '<td>' + esc(e.message) + '</td>' +
+                    '<td class="detail">' + esc(e.details) + '</td>' +
+                  '</tr>';
+                }).join('') +
+              '</tbody>' +
+            '</table>';
+        }
+
+        // Today's activity.
+        var activity = data.activity || [];
+
+        $('activityCount').textContent = activity.length ? '· ' + plural(activity.length, 'event', 'events') : '';
+
+        if (!activity.length) {
+          $('activity').innerHTML = '<div class="empty">Nothing yet today.</div>';
+        } else {
+          $('activity').innerHTML =
+            '<table>' +
+              '<thead><tr><th>Time</th><th>What happened</th><th>Detail</th></tr></thead>' +
+              '<tbody>' +
+                activity.map(function (a) {
+                  var dot = a.level === 'ERROR' ? 'critical' : (a.level === 'WARN' ? 'warning' : 'good');
+                  var msg = '<span class="status"><span class="dot ' + dot + '"></span>' + esc(a.message) + '</span>';
+                  var linkText = (a.context === 'intake' || a.message.indexOf('Uploaded ') === 0) ? 'Open file' : 'Open review sheet';
+
+                  var detail;
+                  if (isUrl(a.details)) {
+                    detail = '<a href="' + esc(a.details) + '" target="_blank" rel="noopener">' + linkText + '</a>';
+                  } else if (a.details) {
+                    detail = esc(a.details);
+                  } else {
+                    detail = '<span class="muted">—</span>';
+                  }
+
+                  return '<tr>' +
+                    '<td class="time">' + esc(clock(a.ts)) + '</td>' +
+                    '<td>' + msg + '</td>' +
+                    '<td class="detail">' + detail + '</td>' +
+                  '</tr>';
+                }).join('') +
+              '</tbody>' +
+            '</table>';
+        }
+      }
+
+      function pill(label, iso, now, staleMs) {
+        var cls, word, when;
+
+        if (!iso) {
+          cls = 'critical';
+          word = 'Never run';
+          when = '';
+        } else if (now - new Date(iso).getTime() > staleMs) {
+          cls = 'critical';
+          word = 'Stale';
+          when = ago(iso, now);
+        } else {
+          cls = 'good';
+          word = 'OK';
+          when = ago(iso, now);
+        }
+
+        var title = iso ? 'Last checked ' + stamp(iso) : 'No heartbeat recorded';
+
+        return '<span class="pill" title="' + esc(title) + '">' +
+          '<span class="dot ' + cls + '"></span>' +
+          '<b>' + esc(label) + '</b>' +
+          '<span>' + esc(word) + (when ? ' · ' + esc(when) : '') + '</span>' +
+        '</span>';
+      }
+
+      function tile(label, value, foot, hero) {
+        return '<div class="tile' + (hero ? ' hero' : '') + '">' +
+          '<div class="label">' + esc(label) + '</div>' +
+          '<div class="value">' + esc(value) + '</div>' +
+          '<div class="foot">' + esc(foot || '') + '</div>' +
+        '</div>';
+      }
+
+      function queueStatus(q) {
+        var cls = 'muted';
+        var word = q.status || 'Pending Review';
+
+        if (word === 'Error') {
+          cls = 'critical';
+        } else if (word === 'Unreadable') {
+          cls = 'serious';
+        } else if (word === 'Pending Review') {
+          word = 'Waiting for review';
+          cls = '';
+        }
+
+        return '<span class="status"><span class="dot ' + cls + '"></span>' + esc(word) + '</span>';
+      }
+
+      // ---- loading ---------------------------------------------------------------------------
+
+      function showError(err) {
+        var b = $('banner');
+        b.textContent = 'Could not load the snapshot: ' +
+          (err && err.message ? err.message : String(err)) + '. Retrying in a minute.';
+        b.className = 'banner show';
+
+        var btn = $('refreshBtn');
+        if (btn) btn.disabled = false;
+
+        state.inFlight = false;
+      }
+
+      function load() {
+        if (state.inFlight) return;
+        state.inFlight = true;
+
+        var btn = $('refreshBtn');
+        if (btn) btn.disabled = true;
+
+        google.script.run
+          .withSuccessHandler(function (data) {
+            state.inFlight = false;
+            render(data);
+          })
+          .withFailureHandler(showError)
+          .getDashboardData();
+      }
+
+      // ---- upload ----------------------------------------------------------------------------
+      //
+      // Mechanics, in order:
+      //   1. The browser's default for a dropped file is to NAVIGATE to it, so default is cancelled on the
+      //      whole document. A drop that misses the zone by a few pixels must not open the PDF in the tab.
+      //   2. dragover must also be cancelled or the drop event never fires.
+      //   3. FileReader turns the File into a data: URL; its base64 tail is what crosses to the server.
+      //   4. The hidden <input type="file"> gives click and keyboard users the same path.
+      //
+      // Every status line is built with textContent, never innerHTML.
+
+      var drop = $('drop');
+      var input = $('fileInput');
+      var list = $('uploads');
+      var ACCEPT = ['pdf', 'doc', 'docx'];
+
+      ['dragover', 'drop'].forEach(function (ev) {
+        document.addEventListener(ev, function (e) { e.preventDefault(); });
+      });
+
+      drop.addEventListener('dragover', function (e) {
+        e.preventDefault();
+        drop.classList.add('over');
+      });
+
+      drop.addEventListener('dragleave', function (e) {
+        if (!drop.contains(e.relatedTarget)) drop.classList.remove('over');
+      });
+
+      drop.addEventListener('drop', function (e) {
+        e.preventDefault();
+        drop.classList.remove('over');
+        sendAll(e.dataTransfer.files);
+      });
+
+      drop.addEventListener('click', function (e) {
+        if (!e.target.closest('a') && !e.target.closest('.uploads')) input.click();
+      });
+
+      drop.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          input.click();
+        }
+      });
+
+      input.addEventListener('change', function () {
+        sendAll(input.files);
+        input.value = '';
+      });
+
+      function sendAll(files) {
+        Array.prototype.slice.call(files || []).forEach(sendOne);
+      }
+
+      // A status row in the uploads list. Shared by every intake source (local drop, Drive picker, ...).
+      function intakeRow(name) {
+        var li = document.createElement('li');
+        var fname = document.createElement('span');
+        fname.className = 'fname';
+        fname.textContent = name;
+        var st = document.createElement('span');
+        st.className = 'st';
+        li.appendChild(fname);
+        li.appendChild(st);
+        list.appendChild(li);
+        list.hidden = false;
+
+        return {
+          status: function (text, dotClass) {
+            st.textContent = '';
+            if (dotClass) {
+              var d = document.createElement('span');
+              d.className = 'dot ' + dotClass;
+              st.appendChild(d);
+            }
+            st.appendChild(document.createTextNode(text));
+          },
+          link: function (url, label) {
+            var a = document.createElement('a');
+            a.href = url; a.target = '_blank'; a.rel = 'noopener';
+            a.textContent = label || name;
+            fname.textContent = '';
+            fname.appendChild(a);
+          }
+        };
+      }
+
+      window.Intake = { row: intakeRow, refresh: load };   // the seam other modules plug into
+
+      function sendOne(file) {
+        var row = intakeRow(file.name);
+        var status = row.status;
+
+        // Cheap client-side checks first, so an obviously wrong file never leaves the browser.
+        var dotAt = file.name.lastIndexOf('.');
+        var ext = (dotAt > 0 ? file.name.slice(dotAt + 1) : '').toLowerCase();
+
+        if (ACCEPT.indexOf(ext) === -1) {
+          return status('Only PDF and Word (.docx, .doc) files can be uploaded here.', 'critical');
+        }
+
+        if (file.size > state.maxUploadBytes) {
+          return status(
+            'Too large: ' + (file.size / 1048576).toFixed(1) + ' MB (limit ' +
+            Math.round(state.maxUploadBytes / 1048576) + ' MB).',
+            'critical'
+          );
+        }
+
+        status('Reading…');
+
+        var reader = new FileReader();
+
+        reader.onerror = function () {
+          status('Could not read the file.', 'critical');
+        };
+
+        reader.onload = function () {
+          var base64 = String(reader.result).split(',')[1];   // strip the "data:<mime>;base64," prefix
+
+          status('Uploading…');
+          drop.classList.add('busy');
+
+          google.script.run
+            .withSuccessHandler(function (r) {
+              drop.classList.remove('busy');
+
+              row.link(r.url, r.name);
+              status(
+                'Uploaded. It will be read within about ' + state.pollMinutes +
+                ' minutes; the review sheet then appears in the queue and in Chat.',
+                'good'
+              );
+
+              load();   // the "Uploaded …" row shows in Today right away
+            })
+            .withFailureHandler(function (err) {
+              drop.classList.remove('busy');
+              status('Not uploaded: ' + (err && err.message ? err.message : String(err)), 'critical');
+            })
+            .uploadContract({ name: file.name, size: file.size, base64: base64 });
+        };
+
+        reader.readAsDataURL(file);
+      }
+
+      // Drive picker: present only when the server sent picker settings AND the library script was included.
+      function mountPicker(p) {
+        if (state.pickerMounted || !p || !window.DrivePicker) return;
+        state.pickerMounted = true;
+
+        DrivePicker.mount({
+          button: $('intakeActions'),
+          className: 'refresh',                 // reuse the pill-button style
+          label: 'Add from Drive',
+          apiKey: p.apiKey, clientId: p.clientId, appId: p.appId,
+          mimeTypes: p.mimeTypes,
+          onPicked: function (files, token) {
+            files.forEach(function (f) {
+              var row = intakeRow(f.name);
+              if (f.sizeBytes && f.sizeBytes > state.maxUploadBytes) {
+                return row.status('Too large: ' + (f.sizeBytes / 1048576).toFixed(1) + ' MB (limit ' +
+                  Math.round(state.maxUploadBytes / 1048576) + ' MB).', 'critical');
+              }
+              row.status('Importing from Drive…');
+              google.script.run
+                .withSuccessHandler(function (r) {
+                  row.link(r.url, r.name);
+                  row.status('Imported. It will be read within about ' + state.pollMinutes +
+                    ' minutes; the review sheet then appears in the queue and in Chat.', 'good');
+                  load();
+                })
+                .withFailureHandler(function (err) {
+                  row.status('Not imported: ' + (err && err.message ? err.message : String(err)), 'critical');
+                })
+                .importPicked({ pick: { id: f.id, name: f.name, mimeType: f.mimeType }, token: token });
+            });
+          },
+          onError: function (err) {
+            intakeRow('Add from Drive').status(err && err.message ? err.message : String(err), 'critical');
+          }
+        });
+      }
+
+      // ---- start -----------------------------------------------------------------------------
+
+      $('refreshBtn').addEventListener('click', load);
+
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) load();
+      });
+
+      load();
+      state.timer = setInterval(load, REFRESH_MS);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,680 @@
+diff -ruN a/gemini-2-sf/ContractIntake.js hostcheck/gemini-2-sf/ContractIntake.js
+--- a/gemini-2-sf/ContractIntake.js	2026-09-08 19:22:57.603886057 +0000
++++ b/gemini-2-sf/ContractIntake.js	2026-09-08 21:18:53.679874390 +0000
+@@ -67,6 +67,9 @@
+  * @property {string}  workato_shared_secret Optional webhook auth secret.
+  * @property {string}  chat_webhook_url      Optional Google Chat webhook.
+  * @property {string[]} upload_allowed_emails Lower-cased emails allowed to upload from the dashboard; [] = anyone who can open it.
++ * @property {string}  picker_api_key      Optional. Google Picker API key. All three picker_* keys present = picker on.
++ * @property {string}  picker_client_id    Optional. OAuth 2.0 Web client id.
++ * @property {string}  picker_app_id       Optional. Project NUMBER of the project that owns the client id.
+  */
+ 
+ /**
+@@ -706,7 +709,11 @@
+     workato_shared_secret:  str_(raw.workato_shared_secret),
+     chat_webhook_url:       str_(raw.chat_webhook_url),
+ 
+-    upload_allowed_emails:  parseList_(raw.upload_allowed_emails).map(function (e) { return e.toLowerCase(); })
++    upload_allowed_emails:  parseList_(raw.upload_allowed_emails).map(function (e) { return e.toLowerCase(); }),
++
++    picker_api_key:         str_(raw.picker_api_key),
++    picker_client_id:       str_(raw.picker_client_id),
++    picker_app_id:          str_(raw.picker_app_id)
+   };
+ 
+   const required = [
+diff -ruN a/gemini-2-sf/Dashboard.html hostcheck/gemini-2-sf/Dashboard.html
+--- a/gemini-2-sf/Dashboard.html	2026-09-08 19:44:31.316449121 +0000
++++ b/gemini-2-sf/Dashboard.html	2026-09-08 21:19:26.292876798 +0000
+@@ -235,6 +235,12 @@
+       display: none;
+     }
+ 
++    .drop .actions {
++      display: inline-flex;
++      gap: 8px;
++      align-items: center;
++    }
++
+     .uploads {
+       flex-basis: 100%;
+       margin: 6px 0 0;
+@@ -485,6 +491,7 @@
+       </div>
+ 
+       <span class="hint" id="intakeWaiting"></span>
++      <span class="actions" id="intakeActions"></span>
+ 
+       <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx">
+       <ul class="uploads" id="uploads" hidden></ul>
+@@ -543,6 +550,8 @@
+ 
+   </div>
+ 
++  <? if (picker) { ?><?!= DrivePicker.clientHtml() ?><? } ?>
++
+   <script>
+     (function () {
+       'use strict';
+@@ -555,7 +564,8 @@
+         timer: null,
+         inFlight: false,
+         maxUploadBytes: 15 * 1048576,   // replaced by the server's value on first load
+-        pollMinutes: 5                  // likewise
++        pollMinutes: 5,                 // likewise
++        pickerMounted: false
+       };
+ 
+       var $ = function (id) { return document.getElementById(id); };
+@@ -628,6 +638,14 @@
+           ? plural(data.intakeWaiting, 'file waiting to be read', 'files waiting to be read')
+           : '';
+ 
++        if (data.intake) {
++          if (data.intake.folderUrl) {
++            $('dropHint').innerHTML = esc($('dropHint').textContent) +
++              ' Or <a href="' + esc(data.intake.folderUrl) + '" target="_blank" rel="noopener">open the Intake folder</a> to move a Drive file in.';
++          }
++          mountPicker(data.intake.picker);
++        }
++
+         // Header.
+         $('updated').textContent = 'Snapshot ' +
+           new Date(data.generatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+@@ -746,7 +764,7 @@
+                 activity.map(function (a) {
+                   var dot = a.level === 'ERROR' ? 'critical' : (a.level === 'WARN' ? 'warning' : 'good');
+                   var msg = '<span class="status"><span class="dot ' + dot + '"></span>' + esc(a.message) + '</span>';
+-                  var linkText = a.message.indexOf('Uploaded ') === 0 ? 'Open file' : 'Open review sheet';
++                  var linkText = (a.context === 'intake' || a.message.indexOf('Uploaded ') === 0) ? 'Open file' : 'Open review sheet';
+ 
+                   var detail;
+                   if (isUrl(a.details)) {
+@@ -903,30 +921,44 @@
+         Array.prototype.slice.call(files || []).forEach(sendOne);
+       }
+ 
+-      function sendOne(file) {
++      // A status row in the uploads list. Shared by every intake source (local drop, Drive picker, ...).
++      function intakeRow(name) {
+         var li = document.createElement('li');
+-
+         var fname = document.createElement('span');
+         fname.className = 'fname';
+-        fname.textContent = file.name;
+-
++        fname.textContent = name;
+         var st = document.createElement('span');
+         st.className = 'st';
+-
+         li.appendChild(fname);
+         li.appendChild(st);
+         list.appendChild(li);
+         list.hidden = false;
+ 
+-        function status(text, dotClass) {
+-          st.textContent = '';
+-          if (dotClass) {
+-            var d = document.createElement('span');
+-            d.className = 'dot ' + dotClass;
+-            st.appendChild(d);
++        return {
++          status: function (text, dotClass) {
++            st.textContent = '';
++            if (dotClass) {
++              var d = document.createElement('span');
++              d.className = 'dot ' + dotClass;
++              st.appendChild(d);
++            }
++            st.appendChild(document.createTextNode(text));
++          },
++          link: function (url, label) {
++            var a = document.createElement('a');
++            a.href = url; a.target = '_blank'; a.rel = 'noopener';
++            a.textContent = label || name;
++            fname.textContent = '';
++            fname.appendChild(a);
+           }
+-          st.appendChild(document.createTextNode(text));
+-        }
++        };
++      }
++
++      window.Intake = { row: intakeRow, refresh: load };   // the seam other modules plug into
++
++      function sendOne(file) {
++        var row = intakeRow(file.name);
++        var status = row.status;
+ 
+         // Cheap client-side checks first, so an obviously wrong file never leaves the browser.
+         var dotAt = file.name.lastIndexOf('.');
+@@ -962,15 +994,7 @@
+             .withSuccessHandler(function (r) {
+               drop.classList.remove('busy');
+ 
+-              var a = document.createElement('a');
+-              a.href = r.url;
+-              a.target = '_blank';
+-              a.rel = 'noopener';
+-              a.textContent = r.name;
+-
+-              fname.textContent = '';
+-              fname.appendChild(a);
+-
++              row.link(r.url, r.name);
+               status(
+                 'Uploaded. It will be read within about ' + state.pollMinutes +
+                 ' minutes; the review sheet then appears in the queue and in Chat.',
+@@ -989,6 +1013,44 @@
+         reader.readAsDataURL(file);
+       }
+ 
++      // Drive picker: present only when the server sent picker settings AND the library script was included.
++      function mountPicker(p) {
++        if (state.pickerMounted || !p || !window.DrivePicker) return;
++        state.pickerMounted = true;
++
++        DrivePicker.mount({
++          button: $('intakeActions'),
++          className: 'refresh',                 // reuse the pill-button style
++          label: 'Add from Drive',
++          apiKey: p.apiKey, clientId: p.clientId, appId: p.appId,
++          mimeTypes: p.mimeTypes,
++          onPicked: function (files, token) {
++            files.forEach(function (f) {
++              var row = intakeRow(f.name);
++              if (f.sizeBytes && f.sizeBytes > state.maxUploadBytes) {
++                return row.status('Too large: ' + (f.sizeBytes / 1048576).toFixed(1) + ' MB (limit ' +
++                  Math.round(state.maxUploadBytes / 1048576) + ' MB).', 'critical');
++              }
++              row.status('Importing from Drive…');
++              google.script.run
++                .withSuccessHandler(function (r) {
++                  row.link(r.url, r.name);
++                  row.status('Imported. It will be read within about ' + state.pollMinutes +
++                    ' minutes; the review sheet then appears in the queue and in Chat.', 'good');
++                  load();
++                })
++                .withFailureHandler(function (err) {
++                  row.status('Not imported: ' + (err && err.message ? err.message : String(err)), 'critical');
++                })
++                .importPicked({ pick: { id: f.id, name: f.name, mimeType: f.mimeType }, token: token });
++            });
++          },
++          onError: function (err) {
++            intakeRow('Add from Drive').status(err && err.message ? err.message : String(err), 'critical');
++          }
++        });
++      }
++
+       // ---- start -----------------------------------------------------------------------------
+ 
+       $('refreshBtn').addEventListener('click', load);
+diff -ruN a/gemini-2-sf/Intake.js hostcheck/gemini-2-sf/Intake.js
+--- a/gemini-2-sf/Intake.js	1970-01-01 00:00:00.000000000 +0000
++++ b/gemini-2-sf/Intake.js	2026-09-08 21:18:53.627603214 +0000
+@@ -0,0 +1,208 @@
++/**
++ * @file Intake.gs — every way a contract can enter the pipeline from the dashboard. Replaces Upload.gs.
++ *
++ * @summary One landing, many adapters. Each source (local drop, Drive picker, ...) is a thin adapter that turns
++ * its input into a Blob and calls stageBlob_(), which creates the file in the Intake folder and records where it
++ * came from. From there the file is indistinguishable from one dropped into the folder in Drive: same poller,
++ * same review sheet, same Chat card, same log.
++ *
++ * ADAPTERS (called from the page via google.script.run — these MUST live in this project, not a library)
++ *   uploadContract(file)   local drop: {name, size, base64}                     -> stageBlob_
++ *   importPicked(p)        DrivePicker library: {pick:{id,name,mimeType}, token}  -> DrivePicker.fetchPicked -> stageBlob_
++ *
++ * LANDING
++ *   stageBlob_(blob, prov)     size check, create in Intake, then recordIntake_
++ *   recordIntake_(file, prov)  Drive description + one log row (context 'intake'), returns {name, url}
++ *
++ * The log context is always 'intake' so the dashboard can label the link "Open file" without knowing the source.
++ *
++ * Identity: the web app executes as the deployer, so files are created as the deployer; the visitor's email comes
++ * from Session.getActiveUser() (same Workspace domain; needs the userinfo.email scope) and rides in the log and the
++ * file description. Access: Config key upload_allowed_emails (comma/newline list) restricts who may submit; empty
++ * means anyone who can open the dashboard.
++ */
++
++/** @typedef {{source:string, who:string, from:string}} Provenance  source: 'upload' | 'picker'; from: a URL or ''. */
++
++/** @const {Object.<string,string>} Accepted extensions -> Drive MIME type, for local uploads. */
++const UPLOAD_TYPES = {
++  pdf:  'application/pdf',
++  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
++  doc:  'application/msword'
++};
++
++/** @const {string[]} MIME types the Drive picker offers. Native Docs are exported to PDF by the library. */
++const PICKER_MIME_TYPES = [
++  'application/pdf',
++  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
++  'application/msword',
++  'application/vnd.google-apps.document'
++];
++
++// --- ADAPTERS -------------------------------------------------------------------------------
++
++/**
++ * Local drop / file chooser. The browser sends the file as base64.
++ * @param {{name:string, size:number, base64:string}} file
++ * @return {{name:string, url:string}}
++ * @throws {Error} Plain-language reason, shown verbatim on the page.
++ */
++function uploadContract(file) {
++  const cfg = readConfig_();
++  const who = uploaderEmail_();
++  assertUploadAllowed_(who, cfg.upload_allowed_emails);
++
++  const v = validateUpload_(file, INLINE_PDF_MAX_BYTES);
++  if (!v.ok) throw new Error(v.reason);
++
++  const blob = Utilities.newBlob(Utilities.base64Decode(file.base64), v.mimeType, v.name);
++  return stageBlob_(blob, cfg, { source: 'upload', who: who, from: '' });
++}
++
++/**
++ * Drive picker (DrivePicker library). The page passes the pick and the VISITOR's token; the library downloads
++ * (or exports) the file with that token; we land it exactly like an upload.
++ * @param {{pick:{id:string, name:string, mimeType:string}, token:string}} p
++ * @return {{name:string, url:string}}
++ * @throws {Error}
++ */
++function importPicked(p) {
++  const cfg = readConfig_();
++  const who = uploaderEmail_();
++  assertUploadAllowed_(who, cfg.upload_allowed_emails);
++  if (!p || !p.pick || !p.token) throw new Error('Nothing was picked.');
++
++  const blob = DrivePicker.fetchPicked(p.pick, p.token);           // throws its own readable errors
++  return stageBlob_(blob, cfg, { source: 'picker', who: who, from: driveUrl_(p.pick.id) });
++}
++
++// --- LANDING --------------------------------------------------------------------------------
++
++/**
++ * Create the blob as a file in the Intake folder and record its provenance.
++ * @param {GoogleAppsScript.Base.Blob} blob Named, typed.
++ * @param {Config} cfg
++ * @param {Provenance} prov
++ * @return {{name:string, url:string}}
++ * @throws {Error} If the blob exceeds the extraction cap.
++ * @private
++ */
++function stageBlob_(blob, cfg, prov) {
++  const size = blob.getBytes().length;
++  if (size > INLINE_PDF_MAX_BYTES) {
++    throw new Error('"' + blob.getName() + '" is ' + mb_(size) + ' MB; the limit is ' + mb_(INLINE_PDF_MAX_BYTES) + ' MB.');
++  }
++  const created = DriveApp.getFolderById(cfg.folder_id_ingestion).createFile(blob);
++  return recordIntake_(created, prov);
++}
++
++/**
++ * Stamp provenance on the file and in the log. The log Details column stays a bare URL so the dashboard links it.
++ * @param {GoogleAppsScript.Drive.File} file
++ * @param {Provenance} prov
++ * @return {{name:string, url:string}}
++ * @private
++ */
++function recordIntake_(file, prov) {
++  const desc = intakeDescription_(prov, new Date());
++  file.setDescription(desc);
++  logInfo_('intake', intakeMessage_(file.getName(), prov), '', file.getUrl());
++  return { name: file.getName(), url: file.getUrl() };
++}
++
++/**
++ * "Via dashboard upload by ann@corp.com at 2026-09-08T19:00:00.000Z" / "... from Drive picker ... (source: <url>)". Pure.
++ * @param {Provenance} prov
++ * @param {Date} when
++ * @return {string}
++ * @private
++ */
++function intakeDescription_(prov, when) {
++  const via = prov.source === 'picker' ? 'Via dashboard (Drive picker)' : 'Via dashboard upload';
++  return via + (prov.who ? ' by ' + prov.who : '') + ' at ' + when.toISOString() + (prov.from ? ' (source: ' + prov.from + ')' : '');
++}
++
++/**
++ * Log message: "Uploaded <name> (who)" or "Imported <name> (who)". Pure.
++ * @param {string} name
++ * @param {Provenance} prov
++ * @return {string}
++ * @private
++ */
++function intakeMessage_(name, prov) {
++  return (prov.source === 'picker' ? 'Imported ' : 'Uploaded ') + name + (prov.who ? ' (' + prov.who + ')' : '');
++}
++
++// --- CHECKS (pure) --------------------------------------------------------------------------
++
++/**
++ * Validate a local upload before touching Drive. MIME comes from the extension, not the browser.
++ * @param {{name:string, size:number, base64:string}} file
++ * @param {number} maxBytes
++ * @return {{ok:true, name:string, mimeType:string}|{ok:false, reason:string}}
++ * @private
++ */
++function validateUpload_(file, maxBytes) {
++  if (!file || typeof file.base64 !== 'string' || !file.base64) return { ok: false, reason: 'No file content received.' };
++  const raw = String(file.name || '').replace(/[\\/]/g, '_').trim();
++  if (!raw) return { ok: false, reason: 'The file has no name.' };
++  const dot = raw.lastIndexOf('.');
++  const ext = dot > 0 ? raw.slice(dot + 1).toLowerCase() : '';
++  const stem = dot > 0 ? raw.slice(0, dot) : raw;
++  const name = stem.slice(0, 180) + (ext ? '.' + ext : '');   // cap the stem, never the extension
++  const mimeType = UPLOAD_TYPES[ext];
++  if (!mimeType) {
++    return { ok: false, reason: 'Only PDF and Word (.docx, .doc) files can be uploaded here. Use "Add from Drive" for a Google Doc.' };
++  }
++  if (Number(file.size) > maxBytes) {
++    return { ok: false, reason: '"' + name + '" is ' + mb_(file.size) + ' MB; the limit is ' + mb_(maxBytes) + ' MB.' };
++  }
++  return { ok: true, name: name, mimeType: mimeType };
++}
++
++/**
++ * @param {string} who Lower-cased visitor email ('' if unknown).
++ * @param {string[]} allowed Lower-cased emails; empty = anyone who can open the page.
++ * @throws {Error}
++ * @private
++ */
++function assertUploadAllowed_(who, allowed) {
++  if (!allowed || !allowed.length) return;
++  if (!who || allowed.indexOf(who) === -1) {
++    throw new Error('Your account is not on the upload list for this tool.' + (who ? ' (' + who + ')' : ''));
++  }
++}
++
++/**
++ * Visitor's email, lower-cased, or '' when withheld. Never throws.
++ * @return {string}
++ * @private
++ */
++function uploaderEmail_() {
++  try { return String(Session.getActiveUser().getEmail() || '').trim().toLowerCase(); }
++  catch (e) { return ''; }
++}
++
++/**
++ * Bytes -> MB with one decimal, trailing .0 dropped. Pure.
++ * @param {number} bytes
++ * @return {string}
++ * @private
++ */
++function mb_(bytes) { return (Number(bytes) / 1048576).toFixed(1).replace(/\.0$/, ''); }
++
++/**
++ * Files in the Intake folder right now (submitted, not yet read). One listing; null on any problem.
++ * @return {?number}
++ * @private
++ */
++function countIntakeFiles_() {
++  try {
++    const it = DriveApp.getFolderById(readConfig_().folder_id_ingestion).getFiles();
++    let n = 0;
++    while (it.hasNext()) { it.next(); n++; }
++    return n;
++  } catch (e) {
++    return null;
++  }
++}
+diff -ruN a/gemini-2-sf/Tests.js hostcheck/gemini-2-sf/Tests.js
+--- a/gemini-2-sf/Tests.js	2026-09-08 19:24:20.370946643 +0000
++++ b/gemini-2-sf/Tests.js	2026-09-08 21:18:53.680274301 +0000
+@@ -513,6 +513,15 @@
+     assertThrows_(function () { assertUploadAllowed_('cy@corp.com', ['ann@corp.com']); }, 'upload list');
+     assertThrows_(function () { assertUploadAllowed_('', ['ann@corp.com']); }, 'upload list');
+   });
++  t('intakeDescription_ / intakeMessage_: provenance reads correctly for both sources', function () {
++    var when = new Date('2026-09-08T19:00:00.000Z');
++    assertEq_(intakeDescription_({ source: 'upload', who: 'ann@corp.com', from: '' }, when),
++      'Via dashboard upload by ann@corp.com at 2026-09-08T19:00:00.000Z');
++    assertEq_(intakeDescription_({ source: 'picker', who: '', from: 'https://drive.google.com/file/d/X/view' }, when),
++      'Via dashboard (Drive picker) at 2026-09-08T19:00:00.000Z (source: https://drive.google.com/file/d/X/view)');
++    assertEq_(intakeMessage_('a.pdf', { source: 'upload', who: 'ann@corp.com' }), 'Uploaded a.pdf (ann@corp.com)');
++    assertEq_(intakeMessage_('b.pdf', { source: 'picker', who: '' }), 'Imported b.pdf');
++  });
+   t('mb_: one decimal, trailing .0 dropped', function () {
+     assertEq_(mb_(15 * 1024 * 1024), '15');
+     assertEq_(mb_(16 * 1024 * 1024 + 512 * 1024), '16.5');
+diff -ruN a/gemini-2-sf/Upload.js hostcheck/gemini-2-sf/Upload.js
+--- a/gemini-2-sf/Upload.js	2026-09-08 19:24:35.252850086 +0000
++++ b/gemini-2-sf/Upload.js	1970-01-01 00:00:00.000000000 +0000
+@@ -1,134 +0,0 @@
+-/**
+- * @file Upload.gs
+- * @summary Drag-and-drop intake from the dashboard. The browser reads the dropped file, sends it as base64 through
+- * google.script.run, and uploadContract() decodes it and creates it in the Intake folder. That is ALL it does. From
+- * there the file enters the pipeline exactly as if someone had dropped it into the folder in Drive: same poller,
+- * same review sheet, same Chat card, same log. No new path, no new state.
+- *
+- * @description Why it is built this way:
+- *   1. The page has no Drive credentials. It runs in the visitor's browser inside HtmlService's iframe, with no OAuth
+- *      token of its own. google.script.run is the only authenticated channel back to the project, and it carries
+- *      JSON-serializable values only — so the file crosses as a base64 string and becomes a Blob again here, where
+- *      the deployer's authority creates it in Drive.
+- *   2. Base64 costs a third more bytes. The cap is INLINE_PDF_MAX_BYTES, the same limit callGemini_ enforces, so
+- *      nothing is accepted here that extraction would reject five minutes later.
+- *   3. The MIME type comes from the file EXTENSION, not the browser. Browsers report '' or application/octet-stream
+- *      for .docx on some machines, and buildExtractionParts_ switches on the Drive MIME we set here.
+- *   4. Identity. The web app executes as the deployer, so the file is created by (and owned as) the deployer. The
+- *      visitor's email is available via Session.getActiveUser() because visitor and deployer share a Workspace
+- *      domain; it is recorded in the log row and the file's Drive description so provenance survives. This needs
+- *      the userinfo.email scope in appsscript.json.
+- *   5. Access. Anyone who can open the dashboard can call uploadContract. If that is wider than "people who may
+- *      submit contracts", set Config key upload_allowed_emails (comma/newline list); empty means everyone.
+- */
+-
+-/** @const {Object.<string,string>} Accepted extensions -> Drive MIME type. Google Docs are not files and cannot be uploaded. */
+-const UPLOAD_TYPES = {
+-  pdf:  'application/pdf',
+-  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+-  doc:  'application/msword'
+-};
+-
+-/**
+- * Receive one file from the dashboard and create it in the Intake folder.
+- * @param {{name:string, size:number, base64:string}} file What the browser sent.
+- * @return {{name:string, url:string}} Shown on the page as a link.
+- * @throws {Error} With a plain-language reason; the page shows err.message verbatim.
+- */
+-function uploadContract(file) {
+-  const cfg = readConfig_();
+-  const who = uploaderEmail_();
+-  assertUploadAllowed_(who, cfg.upload_allowed_emails);
+-
+-  const v = validateUpload_(file, INLINE_PDF_MAX_BYTES);
+-  if (!v.ok) throw new Error(v.reason);
+-
+-  const bytes = Utilities.base64Decode(file.base64);
+-  if (bytes.length > INLINE_PDF_MAX_BYTES) {                 // client size is advisory; this is the real check
+-    throw new Error('File is larger than ' + mb_(INLINE_PDF_MAX_BYTES) + ' MB.');
+-  }
+-
+-  const blob = Utilities.newBlob(bytes, v.mimeType, v.name);
+-  const created = DriveApp.getFolderById(cfg.folder_id_ingestion).createFile(blob);
+-  created.setDescription('Uploaded via dashboard' + (who ? ' by ' + who : '') + ' at ' + new Date().toISOString());
+-
+-  // Message carries the uploader; Details stays a bare URL so the dashboard renders it as a link.
+-  logInfo_('uploadContract', 'Uploaded ' + v.name + (who ? ' (' + who + ')' : ''), '', created.getUrl());
+-  return { name: v.name, url: created.getUrl() };
+-}
+-
+-/**
+- * Check the upload before touching Drive. Pure.
+- * @param {{name:string, size:number, base64:string}} file
+- * @param {number} maxBytes
+- * @return {{ok:true, name:string, mimeType:string}|{ok:false, reason:string}}
+- * @private
+- */
+-function validateUpload_(file, maxBytes) {
+-  if (!file || typeof file.base64 !== 'string' || !file.base64) return { ok: false, reason: 'No file content received.' };
+-  const raw = String(file.name || '').replace(/[\\/]/g, '_').trim();
+-  if (!raw) return { ok: false, reason: 'The file has no name.' };
+-  const dot = raw.lastIndexOf('.');
+-  const ext = dot > 0 ? raw.slice(dot + 1).toLowerCase() : '';
+-  const stem = dot > 0 ? raw.slice(0, dot) : raw;
+-  const name = stem.slice(0, 180) + (ext ? '.' + ext : '');   // cap the stem, never the extension
+-  const mimeType = UPLOAD_TYPES[ext];
+-  if (!mimeType) {
+-    return { ok: false, reason: 'Only PDF and Word (.docx, .doc) files can be uploaded here. A Google Doc can be moved into the Intake folder in Drive instead.' };
+-  }
+-  if (Number(file.size) > maxBytes) {
+-    return { ok: false, reason: '"' + name + '" is ' + mb_(file.size) + ' MB; the limit is ' + mb_(maxBytes) + ' MB.' };
+-  }
+-  return { ok: true, name: name, mimeType: mimeType };
+-}
+-
+-/**
+- * Enforce the optional upload allow-list. Pure.
+- * @param {string} who Lower-cased visitor email ('' if unknown).
+- * @param {string[]} allowed Lower-cased emails; empty list = anyone who can open the page.
+- * @throws {Error} If a list is set and `who` is not on it.
+- * @private
+- */
+-function assertUploadAllowed_(who, allowed) {
+-  if (!allowed || !allowed.length) return;
+-  if (!who || allowed.indexOf(who) === -1) {
+-    throw new Error('Your account is not on the upload list for this tool.' + (who ? ' (' + who + ')' : ''));
+-  }
+-}
+-
+-/**
+- * The visitor's email, lower-cased, or '' when the platform withholds it (visitor outside the domain, or the
+- * userinfo.email scope missing). Never throws: an unknown uploader is logged as unknown, not refused.
+- * @return {string}
+- * @private
+- */
+-function uploaderEmail_() {
+-  try { return String(Session.getActiveUser().getEmail() || '').trim().toLowerCase(); }
+-  catch (e) { return ''; }
+-}
+-
+-/**
+- * Bytes -> megabytes with one decimal, for messages. Pure.
+- * @param {number} bytes
+- * @return {string}
+- * @private
+- */
+-function mb_(bytes) { return (Number(bytes) / 1048576).toFixed(1).replace(/\.0$/, ''); }
+-
+-/**
+- * How many files sit in the Intake folder right now, i.e. uploaded/dropped but not yet read by processIngestion.
+- * One folder listing; never opens a file. Returns null rather than throwing so a config problem cannot take the
+- * dashboard down with it.
+- * @return {?number}
+- * @private
+- */
+-function countIntakeFiles_() {
+-  try {
+-    const it = DriveApp.getFolderById(readConfig_().folder_id_ingestion).getFiles();
+-    let n = 0;
+-    while (it.hasNext()) { it.next(); n++; }
+-    return n;
+-  } catch (e) {
+-    return null;
+-  }
+-}
+diff -ruN a/gemini-2-sf/WebApp.js hostcheck/gemini-2-sf/WebApp.js
+--- a/gemini-2-sf/WebApp.js	2026-09-08 19:22:57.604283784 +0000
++++ b/gemini-2-sf/WebApp.js	2026-09-08 21:18:53.680015786 +0000
+@@ -38,17 +38,34 @@
+ const DASHBOARD_LIST_CAP = 100;
+ 
+ /**
+- * Web app entry point. Serves the dashboard page.
++ * Web app entry point. Dashboard.html is a TEMPLATE now (not a static file) so the DrivePicker script can be
++ * included only when configured — `<?!= DrivePicker.clientHtml() ?>` is evaluated here, server-side.
+  * @param {GoogleAppsScript.Events.DoGet} e
+  * @return {GoogleAppsScript.HTML.HtmlOutput}
+  */
+ function doGet(e) {
+-  return HtmlService.createHtmlOutputFromFile('Dashboard')
++  let picker = null;
++  try { picker = pickerConfig_(readConfig_()); } catch (err) { /* a config problem must not take the page down */ }
++
++  const t = HtmlService.createTemplateFromFile('Dashboard');
++  t.picker = picker !== null;
++  return t.evaluate()
+     .setTitle('Contract Intake')
+     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+ }
+ 
+ /**
++ * Picker settings for the page, or null when any of the three Config keys is blank. Presence is the switch.
++ * @param {Config} cfg
++ * @return {?{apiKey:string, clientId:string, appId:string, mimeTypes:string[]}}
++ * @private
++ */
++function pickerConfig_(cfg) {
++  if (!cfg.picker_api_key || !cfg.picker_client_id || !cfg.picker_app_id) return null;
++  return { apiKey: cfg.picker_api_key, clientId: cfg.picker_client_id, appId: cfg.picker_app_id, mimeTypes: PICKER_MIME_TYPES };
++}
++
++/**
+  * One snapshot for the page, called from the browser via google.script.run.
+  * @return {{
+  *   generatedAt:string, pollMinutes:number, maxUploadBytes:number, intakeWaiting:?number,
+@@ -60,13 +77,20 @@
+  */
+ function getDashboardData() {
+   const now = new Date();
++  let cfg = null;
++  try { cfg = readConfig_(); } catch (err) { /* page still renders; intake block degrades */ }
++
+   const queueSheet = getQueueSheet_();
+   const summary = summarizeLogs_(readRecentLogRows_(DASHBOARD_LOG_TAIL), now, DASHBOARD_ERROR_DAYS, DASHBOARD_LIST_CAP);
+   return {
+     generatedAt: now.toISOString(),
+     pollMinutes: POLL_MINUTES,
+-    maxUploadBytes: INLINE_PDF_MAX_BYTES,        // the drop zone enforces the same cap as extraction
+-    intakeWaiting: countIntakeFiles_(),          // dropped/uploaded, not yet read (null if unknown)
++    maxUploadBytes: INLINE_PDF_MAX_BYTES,
++    intakeWaiting: countIntakeFiles_(),
++    intake: {
++      picker: cfg ? pickerConfig_(cfg) : null,
++      folderUrl: cfg ? DriveApp.getFolderById(cfg.folder_id_ingestion).getUrl() : ''
++    },
+     heartbeats: readHeartbeats_(queueSheet),
+     queue: readQueueRows_(queueSheet),
+     today: summary.today,
+diff -ruN a/gemini-2-sf/appsscript.json hostcheck/gemini-2-sf/appsscript.json
+--- a/gemini-2-sf/appsscript.json	2026-09-08 19:22:57.604351685 +0000
++++ b/gemini-2-sf/appsscript.json	2026-09-08 21:18:53.679496967 +0000
+@@ -9,6 +9,14 @@
+         "serviceId": "drive",
+         "version": "v3"
+       }
++    ],
++    "libraries": [
++      {
++        "userSymbol": "DrivePicker",
++        "libraryId": "<DrivePicker library script id>",
++        "version": "1",
++        "developmentMode": false
++      }
+     ]
+   },
+   "oauthScopes": [
+--- a/run-tests-node.js	2026-09-08 19:24:20.371169368 +0000
++++ b/run-tests-node.js	2026-09-08 21:18:53.680130395 +0000
+@@ -8,12 +8,12 @@
+ const fs = require('fs');
+ const path = require('path');
+ const dir = path.join(__dirname, 'gemini-2-sf');
+-const files = ['ContractIntake.js', 'Logging.js', 'WorkatoPush.js', 'Snapshot.js', 'WebApp.js', 'Upload.js', 'Tests.js', 'WorkatoTests.js'];
++const files = ['ContractIntake.js', 'Logging.js', 'WorkatoPush.js', 'Snapshot.js', 'WebApp.js', 'Intake.js', 'Tests.js', 'WorkatoTests.js'];
+ const src = files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n;\n');
+ 
+ globalThis.Logger = { log: s => console.log(s) };
+ for (const svc of ['SpreadsheetApp', 'DriveApp', 'UrlFetchApp', 'PropertiesService', 'ScriptApp', 'LockService',
+-                   'HtmlService', 'Session', 'Utilities', 'DocumentApp', 'Drive', 'MimeType']) {
++                   'HtmlService', 'Session', 'DrivePicker', 'Utilities', 'DocumentApp', 'Drive', 'MimeType']) {
+   globalThis[svc] = new Proxy({}, { get(_, p) { throw new Error(`hermetic test touched ${svc}.${String(p)}`); } });
+ }
+ new Function(src + '\n;globalThis.__runTests = runTests;')();
