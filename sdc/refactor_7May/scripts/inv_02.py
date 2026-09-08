@@ -1,32 +1,31 @@
-"""UTL-06 -- Fetch requests by task condition (v4).
+"""WFA-002b -- Fetch supplier users to a dropdown component.
 
-One pass over every WFA request, joined to SUP_Supplier and to the supplier's
-primary active contact, classified by the state of its task:
+Feeds the "assign to" dropdown on the analyst page's manage-tasks section.
+One item per supplier user (value = email, label = "Supplier -- Name <email>"),
+across ALL suppliers, searchable. No page-side filtering is needed: INV-02's
+kernel refuses a target that is not a user of the request's supplier, so a
+wrong pick is a clear message, not a silent misassignment.
 
-    expired   task present, task_status == "expired"
-    active    task present, any other status
-    stranded  no task, but request status is task-bearing
-              (sent | supplier_action_required | pending_review)
-    (skipped) no task and status is task-less by design
-              (pending | pending_validation | approved | cancelled)
+Inputs (schema-defined; no UUID keys cross the boundary):
+    suppliers        list  sup_supplier_id, supplier_name, sup_status
+    supplier_users   list  user_supplier_id, user_email, contact_name, primary, user_status
+    search           str   optional -- the dropdown's typed search term (search_enabled: true)
+    supplier_id      str   optional -- restrict to one supplier (dependent-dropdown variant)
 
-Input `condition` selects which rows come back: expired (default, so the
-existing WFA-002 / WFA-002a callers are unchanged), stranded, active, or all.
+Output:
+    items   list of {label, value}   -- what the dropdown component consumes
+    count   int
+    log     str
 
-Joins are pinned: the WFA request's supplier_id references SUP_Supplier's
-business supplier_id, and SUP_SupplierUser's user_supplier_id holds the same
-key (INV-01 and INV-02 filter on exactly these in production). The v3
-dual-index discovery build and its census logging are gone; a miss is now a
-plain log line, not a research question.
-
-Output keys `expired_tasks_count` / `expired_task_detail` are kept for pill
-stability in step 15 and the two callers; the rows inside are wider.
-Removed from the output: tasks_renewed, renewal_calls, expired_task_renewal
-(dead -- both callers passed renew_expired_tasks=false; renewal lives in INV-02).
+Rules:
+    - user_status must be blank or "active" (invited-but-unregistered users
+      still appear: the task action accepts them, INV-01 assigns to them at kickoff).
+    - supplier join is on the business supplier_id (pinned, same as UTL-06).
+    - value is the email, lower-cased and de-duplicated; if one email belongs
+      to more than one supplier the label lists every supplier.
+    - primary users are marked "(primary)" in the label.
+    - sorted by supplier name, then contact name.
 """
-
-TASK_BEARING = ("sent", "supplier_action_required", "pending_review")
-CONDITIONS = ("expired", "stranded", "active", "all")
 
 
 def _clean(value):
@@ -39,128 +38,70 @@ def _as_bool(value):
     return _clean(str(value)).lower() == "true"
 
 
-def _classify(task_id, task_status, request_status):
-    if task_status == "expired":
-        return "expired"
-    if task_id:
-        return "active"
-    if request_status in TASK_BEARING:
-        return "stranded"
-    return ""
-
-
 def main(input):
-    requests = input.get("requests") or []
     suppliers = input.get("suppliers") or []
     supplier_users = input.get("supplier_users") or []
-    condition = _clean(input.get("condition")).lower() or "expired"
+    search = _clean(input.get("search")).lower()
+    only_supplier = _clean(input.get("supplier_id"))
 
-    log = []
-    if condition not in CONDITIONS:
-        log.append("condition '%s' not recognised; using 'expired'." % condition)
-        condition = "expired"
-    log.append("arrivals: requests=%d suppliers=%d supplier_users=%d condition=%s"
-               % (len(requests), len(suppliers), len(supplier_users), condition))
+    log = ["arrivals: suppliers=%d supplier_users=%d search=%r supplier_id=%r"
+           % (len(suppliers), len(supplier_users), search, only_supplier)]
 
     # ---- Boundary assertions: schema-name drift is loud, never silent ----
     if suppliers and not any(_clean(s.get("sup_supplier_id")) for s in suppliers):
-        log.append("BOUNDARY| suppliers arrived (%d rows) but 'sup_supplier_id' is blank on "
-                   "all rows -- first row keys: %s" % (len(suppliers), sorted(suppliers[0].keys())))
-    if supplier_users and not any(_clean(u.get("user_supplier_id")) for u in supplier_users):
-        log.append("BOUNDARY| supplier_users arrived (%d rows) but 'user_supplier_id' is blank "
-                   "on all rows -- first row keys: %s" % (len(supplier_users), sorted(supplier_users[0].keys())))
+        log.append("BOUNDARY| suppliers arrived (%d rows) but 'sup_supplier_id' is blank on all rows -- "
+                   "first row keys: %s" % (len(suppliers), sorted(suppliers[0].keys())))
+    if supplier_users and not any(_clean(u.get("user_email")) for u in supplier_users):
+        log.append("BOUNDARY| supplier_users arrived (%d rows) but 'user_email' is blank on all rows -- "
+                   "first row keys: %s" % (len(supplier_users), sorted(supplier_users[0].keys())))
 
-    # ---- Suppliers by business supplier_id ----
-    supplier_by_id = {}
+    supplier_name_by_id = {}
     for s in suppliers:
         sid = _clean(s.get("sup_supplier_id"))
         if sid:
-            supplier_by_id[sid] = s
+            supplier_name_by_id[sid] = _clean(s.get("supplier_name")) or sid
 
-    # ---- Primary active contact per supplier ----
-    primary_by_supplier = {}
+    # ---- Collapse users by email ----
+    by_email = {}
+    skipped_status = 0
+    skipped_no_supplier = 0
     for u in supplier_users:
+        email = _clean(u.get("user_email")).lower()
         sid = _clean(u.get("user_supplier_id"))
-        if not sid or not _as_bool(u.get("primary")):
+        if not email:
+            continue
+        if only_supplier and sid != only_supplier:
             continue
         status = _clean(u.get("user_status")).lower()
         if status not in ("", "active"):
+            skipped_status += 1
             continue
-        if sid in primary_by_supplier:
-            log.append("Supplier %s has multiple primary active users; keeping %s."
-                       % (sid, primary_by_supplier[sid].get("user_email")))
+        supplier_name = supplier_name_by_id.get(sid)
+        if supplier_name is None:
+            skipped_no_supplier += 1
+            log.append("User %s: supplier_id '%s' not found in SUP_Supplier; listed under the raw id." % (email, sid))
+            supplier_name = sid or "(no supplier)"
+        entry = by_email.setdefault(email, {"suppliers": set(), "name": "", "primary": False})
+        entry["suppliers"].add(supplier_name)
+        if not entry["name"]:
+            entry["name"] = _clean(u.get("contact_name"))
+        entry["primary"] = entry["primary"] or _as_bool(u.get("primary"))
+
+    # ---- Build, filter, sort ----
+    items = []
+    for email, e in by_email.items():
+        supplier_label = ", ".join(sorted(e["suppliers"]))
+        name = e["name"] or email
+        label = "%s -- %s <%s>%s" % (supplier_label, name, email, " (primary)" if e["primary"] else "")
+        if search and search not in label.lower():
             continue
-        primary_by_supplier[sid] = u
+        items.append({"label": label, "value": email, "_sort": (supplier_label.lower(), name.lower())})
 
-    # ---- Main pass ----
-    counts = {"expired": 0, "stranded": 0, "active": 0}
-    detail = []
-    supplier_misses = 0
+    items.sort(key=lambda x: x["_sort"])
+    for it in items:
+        del it["_sort"]
 
-    for r in requests:
-        task_id = _clean(r.get("task_id"))
-        task_status = _clean(r.get("task_status")).lower()
-        request_status = _clean(r.get("status")).lower()
+    log.append("emitted %d items | skipped: status=%d, unknown supplier=%d"
+               % (len(items), skipped_status, skipped_no_supplier))
 
-        cond = _classify(task_id, task_status, request_status)
-        if not cond:
-            continue
-        counts[cond] += 1
-        if condition != "all" and cond != condition:
-            continue
-
-        req_id = _clean(r.get("supplier_request_id"))
-        sid = _clean(r.get("supplier_id"))
-        supplier = supplier_by_id.get(sid)
-        contact = primary_by_supplier.get(sid)
-
-        if supplier is None:
-            supplier_misses += 1
-            log.append("Request %s: supplier_id '%s' not found in SUP_Supplier." % (req_id, sid))
-
-        holder_status = _clean(r.get("assigned_user_status")).lower()
-        never_registered = holder_status == "invited"
-
-        detail.append({
-            "supplier_request_id": r.get("supplier_request_id"),
-            "supplier_id": r.get("supplier_id"),
-            "supplier_name": (supplier or {}).get("supplier_name"),
-            "assignee_email": r.get("assignee_email"),
-            "primary_contact_name": (contact or {}).get("contact_name"),
-            "primary_contact_email": (contact or {}).get("user_email"),
-            "status": r.get("status"),
-            "request_status": request_status,
-            "condition": cond,
-            "task_status": task_status,
-            "task_holder_email": r.get("assigned_user_email"),
-            "task_holder_status": holder_status,
-            "current_state_entered_at": r.get("current_state_entered_at"),
-            "stage_id": r.get("stage_id"),
-            "stage_name": r.get("stage_name"),
-            "note": ("User never completed portal registration." if never_registered
-                     else "No task on a task-bearing request." if cond == "stranded"
-                     else "Active user"),
-            "active_task": {
-                "active_task_id": r.get("task_id"),
-                "active_task_name": r.get("task_name"),
-                "active_task_due_date": r.get("task_expires_at"),
-                "active_task_url": r.get("task_link"),
-                "active_task_status": r.get("task_status"),
-                "assigned_user": {
-                    "assigned_user_id": r.get("assigned_user_id"),
-                    "assigned_user_name": r.get("assigned_user_name"),
-                    "assigned_user_email": r.get("assigned_user_email"),
-                },
-            },
-        })
-
-    log.append("classified: expired=%d stranded=%d active=%d | returned=%d (%s) | supplier misses=%d"
-               % (counts["expired"], counts["stranded"], counts["active"], len(detail), condition,
-                  supplier_misses))
-
-    return {
-        "expired_tasks_count": len(detail),
-        "counts": counts,
-        "expired_task_detail": detail,
-        "log": "\n".join(log),
-    }
+    return {"items": items, "count": len(items), "log": "\n".join(log)}
