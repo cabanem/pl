@@ -1,147 +1,145 @@
-"""INV-02 DECISION KERNEL -- "ensure task on request" (renew | reassign | recover).
+import json
+import uuid
+from datetime import datetime, timezone
 
-Same portability rule as INV-04: no UUID keys cross the Python boundary. Scalars
-arrive as datapills; `users` is a schema-defined list (user_email, contact_name,
-primary, user_status) mapped from the SUP_SupplierUser read filtered on the
-request's supplier_id.
+# -----------------------------------------------------------------------------
+# INV-04 DECISION KERNEL  (v2 — task handling delegated to INV-02 v2)
+#
+# Portability rule: no UUID keys cross the Python boundary. Scalars arrive as
+# datapills; the users list arrives via a schema-defined list input whose
+# property names are declared in the action config (record_id,
+# supplier_user_id, user_email, primary) and whose values are pill-mapped —
+# both remapped by the platform on package import. Output names are defined
+# here, so downstream pills are stable across workspaces by construction.
+#
+# What this kernel decides: who becomes primary, who gets demoted, and whether
+# a user row must be created and invited. What it no longer decides: anything
+# about the WFA task. If the task should follow the new primary, the recipe
+# calls INV-02 v2 (ensure task on request) with assignee_email = new primary,
+# and INV-02 works out renew / reassign / recover / noop / refuse from the
+# request's actual state. Consequently:
+#   - stage_name and current_assignee_email are accepted but optional; the
+#     old "no currently assigned user" guard is gone (it read the request-level
+#     assignee_email column, which is never blank, so it never fired).
+#   - wfa_count is optional; enforce it only if the recipe still does the read.
+#   - old_primary_email comes from the users list (the rows being demoted),
+#     falling back to current_assignee_email only when no primary row exists.
+#
+# Output keys are unchanged so existing downstream pills keep resolving.
+# `reassign` now means "call INV-02 v2"; `task_action` / `skip_reason` describe
+# that decision, and the recipe should overwrite task_action with INV-02's
+# returned `mode` for the OBS event.
+# -----------------------------------------------------------------------------
 
-The kernel never trusts the button the analyst pressed. It reads what the WFA
-request actually looks like and picks the mode:
-
-    no task, status task-bearing  -> recover   (INV-01a fresh branch)
-    task present, target == holder, task expired -> renew  (reassignment branch)
-    task present, target != holder -> reassign            (reassignment branch)
-    task present, target == holder, task live    -> noop
-    status task-less (pending / pending_validation / approved / cancelled) -> refuse
-
-Stage comes from status, mirroring STS-01's STATUS_TO_WFA_STAGE, expressed in
-INV-01a's own tokens. Never from a literal, never from the request's current
-stage.name (that is what we are repairing).
-"""
-
-# status -> INV-01a stage token. Task-less statuses are deliberately absent.
-STATUS_TO_STAGE_TOKEN = {
-    "sent":                     "awaiting_data_submission",
-    "supplier_action_required": "awaiting_data_submission",
-    "pending_review":           "under_review",
-}
-
-# status -> expected WFA display stage (from STS-01), for drift detection only.
-STATUS_TO_WFA_STAGE = {
-    "sent":                     "Awaiting data submission",
-    "supplier_action_required": "Awaiting data submission",
-    "pending_review":           "Under review",
-}
-
-
-def _norm(v):
-    return (v or "").strip().lower()
+TERMINAL = {"approved", "cancelled"}
 
 
-def _truthy(v):
-    if isinstance(v, bool):
-        return v
-    return _norm(str(v)) in ("true", "1", "yes", "y", "t")
+def _norm(s):
+    return (s or "").strip().lower()
 
 
-def _n(v, default):
+def _n(v):
     try:
-        return int(str(v).strip()) if str(v).strip() else default
+        return int(str(v).strip() or "0")
     except ValueError:
+        return 0
+
+
+def _present(v):
+    return str(v if v is not None else "").strip() != ""
+
+
+def _truthy(v, default=False):
+    s = str(v if v is not None else "").strip().lower()
+    if s == "":
         return default
+    return s in ("true", "1", "yes", "y", "t")
 
 
-def _refuse(error_type, message):
-    return {"ok": False, "mode": "refuse", "reason": message,
-            "error_type": error_type, "plan": {}}
+def _fail(error_type, message):
+    return {"ok": False, "noop": False, "phase": "recipe_failed",
+            "error_type": error_type, "error_message": message}
 
 
 def main(input):
+    # ---- users list: tolerate list-of-dicts or a JSON string ------------------
+    users = input.get("users") or []
+    if isinstance(users, str):
+        try:
+            users = json.loads(users or "[]")
+        except (ValueError, TypeError) as e:
+            return _fail("unexpected_error", "users parse error: {}".format(str(e)))
+
+    new_email_raw = (input.get("new_primary_email") or "").strip()
+    new_email     = _norm(new_email_raw)
+    contact_name  = (input.get("contact_name") or "").strip()
     status        = _norm(input.get("request_status"))
-    stage_name    = (input.get("stage_name") or "").strip()
-    task_id       = (input.get("task_id") or "").strip()
-    task_status   = _norm(input.get("task_status"))
-    task_name     = (input.get("task_name") or "").strip()
-    holder        = _norm(input.get("task_holder_email"))
-    requested     = _norm(input.get("requested_assignee_email"))
-    supplier_name = (input.get("supplier_name") or "").strip()
-    client_name   = (input.get("client_name") or "").strip()
-    analyst_email = (input.get("analyst_email") or "").strip()
-    days          = _n(input.get("days_param"), _n(input.get("project_default_days"), 7))
-    users         = input.get("users") or []
+    move_task     = _truthy(input.get("move_task"), default=True)
 
-    # ---- verdicts ------------------------------------------------------------
-    token = STATUS_TO_STAGE_TOKEN.get(status)
-    if not token:
-        return _refuse("recipe_invariant",
-                       "Status '{0}' carries no task; nothing to assign.".format(status or "blank"))
+    # Optional context (kept for compatibility; not used for decisions)
+    request_assignee = _norm(input.get("current_assignee_email"))
+    wfa_count_in     = input.get("wfa_count")
+    project_count    = _n(input.get("project_count"))
+    supplier_count   = _n(input.get("supplier_count"))
 
-    # ---- who should hold it ----------------------------------------------------
-    if token == "under_review":
-        # Analyst tasks go to the Implementation team group inside INV-01a;
-        # assignee_email is required by its contract but not used for routing.
-        target = _norm(analyst_email)
-        if not target:
-            return _refuse("state_inconsistent", "Project has no analyst_email.")
-        contact_name = "Implementation team"
-    else:
-        by_email = {_norm(u.get("user_email")): u for u in users if _norm(u.get("user_email"))}
-        primary  = next((u for u in users
-                         if _truthy(u.get("primary")) and _norm(u.get("user_status")) in ("", "active")), None)
-        target = requested or holder or _norm((primary or {}).get("user_email"))
-        if not target:
-            return _refuse("state_inconsistent",
-                           "No assignee: none requested, no task holder, no primary active user.")
-        if target not in by_email:
-            return _refuse("recipe_invariant",
-                           "{0} is not a user of {1}; add them first via 'add a user' on this page."
-                           .format(target, supplier_name or "this supplier"))
-        contact_name = (by_email[target].get("contact_name") or target).strip()
+    # ---- verdicts (request existence is guarded upstream at step 3) ----------
+    if not new_email or "@" not in new_email:
+        return _fail("recipe_invariant", "A valid new_primary_email is required.")
+    if status in TERMINAL:
+        return _fail("recipe_invariant",
+                     "Request has invariant status ({}). Cannot change primary.".format(status))
+    if _present(wfa_count_in) and _n(wfa_count_in) == 0:
+        return _fail("state_inconsistent", "Request not found in the Workflow App.")
+    if project_count == 0:
+        return _fail("state_inconsistent", "Project context is absent from the 'Project' table.")
+    if supplier_count == 0:
+        return _fail("state_inconsistent", "Supplier not found in SUP_Supplier.")
+    # NOTE: an empty users list is NOT an error — it resolves to create-mode
+    # with nothing to demote, which is the correct outcome.
 
-    # ---- mode ------------------------------------------------------------------
-    # Analyst tasks are group-held (no individual holder), so only presence and
-    # expiry matter for them; supplier tasks also compare holder vs target.
-    if not task_id:
-        mode = "recover"
-    elif token != "under_review" and target != holder:
-        mode = "reassign"
-    elif task_status == "expired":
-        mode = "renew"
-    else:
-        return {"ok": True, "mode": "noop", "error_type": "",
-                "reason": "Task already held by {0} and not expired."
-                          .format(holder or "the Implementation team"), "plan": {}}
+    # ---- locate target and primaries (case-insensitive) ------------------------
+    target    = next((u for u in users if _norm(u.get("user_email")) == new_email), None)
+    primaries = [u for u in users if _truthy(u.get("primary"))]
+    others    = [u for u in primaries if _norm(u.get("user_email")) != new_email]
+    demote    = [{"record_id": (u.get("record_id") or "")} for u in others]
 
-    if not task_name:
-        task_name = ("Review submission for {0}".format(supplier_name)          # TODO: copy UPL-01's string
-                     if token == "under_review" else
-                     "Supplier data collection request for {0} on behalf of {1}".format(supplier_name, client_name))
+    # ---- idempotency: already the one and only primary -------------------------
+    target_is_primary = target is not None and _truthy(target.get("primary"))
+    if target_is_primary and not others:
+        return {"ok": True, "noop": True, "disposition": "already_primary"}
 
-    expected_stage = STATUS_TO_WFA_STAGE.get(status, "")
-    drift = bool(stage_name) and stage_name != expected_stage
+    mode = "promote" if target else "create"
 
-    return {
-        "ok": True,
+    old_primary = ", ".join((u.get("user_email") or "").strip() for u in others if u.get("user_email"))
+    if not old_primary:
+        old_primary = request_assignee  # fallback: request-level column, if the recipe still maps it
+
+    plan = {
+        "ok": True, "noop": False,
         "mode": mode,
-        "error_type": "",
-        "reason": {
-            "recover":  "No active task on a '{0}' request; creating one for {1}.",
-            "reassign": "Moving task from {2} to {1}.",
-            "renew":    "Renewing expired task for {1}.",
-        }[mode].format(status, target, holder or "(unassigned)"),
-        "drift_detected": drift,
-        "drift_note": ("WFA stage is '{0}', expected '{1}' for status '{2}'."
-                       .format(stage_name, expected_stage, status) if drift else ""),
-        "plan": {
-            "assignee_email": target,
-            "contact_name": contact_name,
-            "workflow_app_stage": token,
-            "is_reassignment": mode != "recover",
-            # INV-01a only checks this is non-blank (unshare was removed); an
-            # expired analyst task has no individual holder, so fall back.
-            "currently_assigned_user_email": holder or _norm(analyst_email),
-            "task_name": task_name,
-            "days_to_complete_task": days,
-            "send_email": True,
-        },
+        "disposition": "promoted_existing" if mode == "promote" else "invited_new",
+        # Task handling is delegated: True => recipe calls INV-02 v2 with
+        # assignee_email = new_primary_email and lets it decide the mode.
+        "reassign": move_task,
+        "task_action": "delegated_to_inv02" if move_task else "left_in_place",
+        "skip_reason": ("" if move_task else "move_task is false; primary flag changed only."),
+        "target_record_id": (target or {}).get("record_id") or "",
+        "supplier_user_id": (target or {}).get("supplier_user_id") or "",
+        "demote_rows": demote,
+        "demote_count": len(demote),
+        "drift_detected": len(primaries) > 1,
+        "drift_note": ("Found {} primary rows for this supplier; repaired by demotion."
+                       .format(len(primaries)) if len(primaries) > 1 else ""),
+        "old_primary_email": old_primary,
+        "new_primary_email": new_email_raw,
+        "contact_name": contact_name or new_email_raw,
+        "new_user_supplier_user_id": "",
+        "new_user_created_at": "",
     }
+
+    if mode == "create":
+        plan["new_user_supplier_user_id"] = str(uuid.uuid4())
+        plan["supplier_user_id"] = plan["new_user_supplier_user_id"]
+        plan["new_user_created_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return plan
