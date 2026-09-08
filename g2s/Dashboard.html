@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Contract Intake</title>
+<base target="_top">
+<!--
+  Dashboard.html — the home base page served by doGet() in WebApp.gs.
+
+  Read-only. It asks the server for one snapshot (getDashboardData), renders it, and asks again every minute
+  and whenever the tab regains focus. Nothing on this page writes anything anywhere.
+
+  Every string from the sheets (contract names, error messages, log details) passes through esc() before it
+  touches the DOM: those strings are typed by humans or produced by a model, so they are untrusted.
+
+  Status colors are never the only signal — each carries a dot AND a word (OK / Stale / Error / Waiting).
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --hairline: #e1e0d9;
+    --ring: rgba(11, 11, 11, 0.10);
+    --good: #0ca30c;
+    --warning: #fab219;
+    --serious: #ec835a;
+    --critical: #d03b3b;
+    --link: #1c5cab;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --ink: #ffffff;
+      --ink-2: #c3c2b7;
+      --muted: #898781;
+      --hairline: #2c2c2a;
+      --ring: rgba(255, 255, 255, 0.10);
+      --link: #86b6ef;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 20px 40px; }
+
+  /* ---- header ---------------------------------------------------------- */
+  header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-end; justify-content: space-between; margin-bottom: 20px; }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
+  .sub { color: var(--ink-2); font-size: 13px; margin-top: 2px; }
+  .sub .path { color: var(--muted); }
+  .pulse { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 12px; border-radius: 999px;
+    background: var(--surface); box-shadow: inset 0 0 0 1px var(--ring);
+    font-size: 13px; color: var(--ink-2); white-space: nowrap;
+  }
+  .pill b { color: var(--ink); font-weight: 600; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
+  .dot.good { background: var(--good); }
+  .dot.warning { background: var(--warning); }
+  .dot.serious { background: var(--serious); }
+  .dot.critical { background: var(--critical); }
+  button.refresh {
+    font: inherit; font-size: 13px; color: var(--ink); background: var(--surface);
+    border: 0; box-shadow: inset 0 0 0 1px var(--ring); border-radius: 999px; padding: 6px 12px; cursor: pointer;
+  }
+  button.refresh:hover { box-shadow: inset 0 0 0 1px var(--muted); }
+  button.refresh[disabled] { opacity: 0.6; cursor: default; }
+
+  /* ---- KPI row ----------------------------------------------------------- */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .tile {
+    background: var(--surface); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--ring);
+    padding: 16px 18px 14px; min-height: 104px; display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .tile .label { font-size: 13px; color: var(--ink-2); }
+  .tile .value { font-size: 32px; font-weight: 600; line-height: 1.1; margin-top: 6px; }
+  .tile .foot { font-size: 12px; color: var(--muted); margin-top: 6px; min-height: 1em; }
+  .tile.hero { grid-column: span 2; }
+  .tile.hero .value { font-size: 56px; }
+  @media (max-width: 520px) { .tile.hero { grid-column: span 1; } .tile.hero .value { font-size: 44px; } }
+
+  /* ---- panels & tables --------------------------------------------------- */
+  .panel { background: var(--surface); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--ring); margin-bottom: 16px; overflow: hidden; }
+  .panel h2 { font-size: 15px; font-weight: 600; margin: 0; padding: 14px 18px 12px; border-bottom: 1px solid var(--hairline); display: flex; align-items: baseline; gap: 10px; }
+  .panel h2 .count { color: var(--muted); font-weight: 500; font-size: 13px; }
+  .scroll { overflow-x: auto; }                 /* wide tables scroll inside their panel, never the page */
+  table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-weight: 500; font-size: 12px; color: var(--muted); padding: 10px 18px 8px; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+  td { padding: 10px 18px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.time { white-space: nowrap; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  td.muted, .muted { color: var(--muted); }
+  td.detail { color: var(--ink-2); max-width: 520px; overflow-wrap: anywhere; }
+  .status { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .empty { padding: 22px 18px; color: var(--muted); font-size: 14px; }
+  .name { font-weight: 500; overflow-wrap: break-word; min-width: 220px; }
+
+  /* ---- states ------------------------------------------------------------ */
+  .banner { display: none; margin-bottom: 16px; padding: 12px 16px; border-radius: 10px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--critical); color: var(--ink); font-size: 14px; }
+  .banner.show { display: block; }
+  .loading td, .loading .value { color: var(--muted); }
+  footer { color: var(--muted); font-size: 12px; margin-top: 8px; line-height: 1.6; }
+  footer code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>Contract Intake</h1>
+      <div class="sub">
+        <span class="path">Drive → Gemini → review sheet → Workato → Salesforce</span>
+        &nbsp;·&nbsp; <span id="updated">Loading…</span>
+      </div>
+    </div>
+    <div class="pulse" id="pulse">
+      <span class="pill"><span class="dot"></span><b>Ingestion</b><span>—</span></span>
+      <span class="pill"><span class="dot"></span><b>Approvals</b><span>—</span></span>
+      <button class="refresh" id="refreshBtn" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <div class="banner" id="banner" role="alert"></div>
+
+  <section class="kpis loading" id="kpis">
+    <div class="tile hero"><div class="label">Awaiting review</div><div class="value">–</div><div class="foot"></div></div>
+    <div class="tile"><div class="label">Staged today</div><div class="value">–</div><div class="foot"></div></div>
+    <div class="tile"><div class="label">Pushed today</div><div class="value">–</div><div class="foot"></div></div>
+    <div class="tile"><div class="label">Errors today</div><div class="value">–</div><div class="foot"></div></div>
+  </section>
+
+  <section class="panel">
+    <h2>In the queue <span class="count" id="queueCount"></span></h2>
+    <div id="queue" class="scroll"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Errors <span class="count" id="errorsCount">last 2 days</span></h2>
+    <div id="errors" class="scroll"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Today <span class="count" id="activityCount"></span></h2>
+    <div id="activity" class="scroll"><div class="empty">Loading…</div></div>
+  </section>
+
+  <footer>
+    A read-only snapshot. "In the queue" and the heartbeats come from the <code>_queue</code> tab, rewritten by the approvals poller
+    each run; "Today" and "Errors" are computed from <code>_logs</code>. The page refreshes every minute.
+  </footer>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var REFRESH_MS = 60 * 1000;
+  var STALE_MULTIPLIER = 3;        // heartbeat older than 3 polls = stale
+  var state = { data: null, timer: null, inFlight: false };
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ---- formatting ------------------------------------------------------------------------------
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function ago(iso, now) {
+    if (!iso) return null;
+    var ms = now - new Date(iso).getTime();
+    if (isNaN(ms)) return null;
+    var m = Math.round(ms / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return m + ' min ago';
+    var h = Math.round(m / 60);
+    if (h < 48) return h + ' h ago';
+    return Math.round(h / 24) + ' d ago';
+  }
+  function clock(iso) {
+    var d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+  function stamp(iso) {
+    var d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+  function isUrl(s) { return /^https?:\/\/\S+$/.test(String(s || '')); }
+  function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+  // Review sheets are named "Contract Review: <original file>"; the column is already headed "Contract".
+  function shortName(s) { return String(s || '').replace(/^Contract Review:\s*/i, ''); }
+
+  // ---- render ----------------------------------------------------------------------------------
+  function render(data) {
+    state.data = data;
+    var now = Date.now();
+    $('banner').className = 'banner';
+
+    // header
+    $('updated').textContent = 'Snapshot ' + new Date(data.generatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    var staleMs = (data.pollMinutes || 5) * STALE_MULTIPLIER * 60000;
+    $('pulse').innerHTML =
+      pill('Ingestion', data.heartbeats && data.heartbeats.ingestion, now, staleMs) +
+      pill('Approvals', data.heartbeats && data.heartbeats.approvals, now, staleMs) +
+      '<button class="refresh" id="refreshBtn" type="button">Refresh</button>';
+    $('refreshBtn').addEventListener('click', load);
+
+    // KPIs
+    var queue = data.queue || [];
+    var errored = queue.filter(function (q) { return q.status === 'Error' || q.status === 'Unreadable'; }).length;
+    var oldest = queue.reduce(function (acc, q) {
+      var t = q.extractedAt ? new Date(q.extractedAt).getTime() : NaN;
+      return (isNaN(t) || t > acc) ? acc : t;
+    }, Infinity);
+    $('kpis').className = 'kpis';
+    $('kpis').innerHTML =
+      tile('Awaiting review', queue.length, queue.length === 0 ? 'Nothing waiting' :
+        (errored ? plural(errored, 'needs attention', 'need attention') : (isFinite(oldest) ? 'Oldest waiting ' + ago(new Date(oldest).toISOString(), now) : '')), true) +
+      tile('Staged today', data.today.staged, 'Extracted and sent for review') +
+      tile('Pushed today', data.today.pushed, 'Approved and sent to Salesforce') +
+      tile('Errors today', data.today.errors, data.today.errors ? 'See the errors list below' : 'All clear so far');
+
+    // queue table
+    $('queueCount').textContent = queue.length ? '· ' + plural(queue.length, 'sheet', 'sheets') : '';
+    if (!queue.length) {
+      $('queue').innerHTML = '<div class="empty">Nothing is waiting for review.</div>';
+    } else {
+      var sorted = queue.slice().sort(function (a, b) {          // errors first, then oldest first
+        var ea = a.status === 'Pending Review' ? 1 : 0, eb = b.status === 'Pending Review' ? 1 : 0;
+        if (ea !== eb) return ea - eb;
+        return String(a.extractedAt || '') < String(b.extractedAt || '') ? -1 : 1;
+      });
+      $('queue').innerHTML = '<table><thead><tr><th>Contract</th><th>Status</th><th>Waiting</th><th>Last error</th></tr></thead><tbody>' +
+        sorted.map(function (q) {
+          var label = shortName(q.name) || q.name;
+          var name = q.url ? '<a href="' + esc(q.url) + '" target="_blank" rel="noopener" title="' + esc(q.name) + '">' + esc(label) + '</a>' : esc(label);
+          return '<tr>' +
+            '<td class="name">' + name + '</td>' +
+            '<td>' + queueStatus(q) + '</td>' +
+            '<td class="time">' + esc(ago(q.extractedAt, now) || '—') + '</td>' +
+            '<td class="detail">' + (q.lastError ? esc(q.lastError) : '<span class="muted">—</span>') + '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    // errors table
+    var errors = data.errors || [];
+    $('errorsCount').textContent = errors.length ? '· ' + plural(errors.length, 'in the last 2 days', 'in the last 2 days') : 'last 2 days';
+    if (!errors.length) {
+      $('errors').innerHTML = '<div class="empty">No errors in the last 2 days.</div>';
+    } else {
+      $('errors').innerHTML = '<table><thead><tr><th>When</th><th>Where</th><th>What</th><th>Detail</th></tr></thead><tbody>' +
+        errors.map(function (e) {
+          return '<tr>' +
+            '<td class="time">' + esc(stamp(e.ts)) + '</td>' +
+            '<td class="muted">' + esc(e.context) + '</td>' +
+            '<td>' + esc(e.message) + '</td>' +
+            '<td class="detail">' + esc(e.details) + '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    // today's activity
+    var activity = data.activity || [];
+    $('activityCount').textContent = activity.length ? '· ' + plural(activity.length, 'event', 'events') : '';
+    if (!activity.length) {
+      $('activity').innerHTML = '<div class="empty">Nothing yet today.</div>';
+    } else {
+      $('activity').innerHTML = '<table><thead><tr><th>Time</th><th>What happened</th><th>Detail</th></tr></thead><tbody>' +
+        activity.map(function (a) {
+          var dot = a.level === 'ERROR' ? 'critical' : (a.level === 'WARN' ? 'warning' : 'good');
+          var msg = '<span class="status"><span class="dot ' + dot + '"></span>' + esc(a.message) + '</span>';
+          var detail = isUrl(a.details)
+            ? '<a href="' + esc(a.details) + '" target="_blank" rel="noopener">Open review sheet</a>'
+            : (a.details ? esc(a.details) : '<span class="muted">—</span>');
+          return '<tr><td class="time">' + esc(clock(a.ts)) + '</td><td>' + msg + '</td><td class="detail">' + detail + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+  }
+
+  function pill(label, iso, now, staleMs) {
+    var cls, word, when;
+    if (!iso) { cls = 'critical'; word = 'Never run'; when = ''; }
+    else if (now - new Date(iso).getTime() > staleMs) { cls = 'critical'; word = 'Stale'; when = ago(iso, now); }
+    else { cls = 'good'; word = 'OK'; when = ago(iso, now); }
+    return '<span class="pill" title="' + esc(iso ? 'Last checked ' + stamp(iso) : 'No heartbeat recorded') + '">' +
+      '<span class="dot ' + cls + '"></span><b>' + esc(label) + '</b><span>' + esc(word) + (when ? ' · ' + esc(when) : '') + '</span></span>';
+  }
+  function tile(label, value, foot, hero) {
+    return '<div class="tile' + (hero ? ' hero' : '') + '"><div class="label">' + esc(label) + '</div>' +
+      '<div class="value">' + esc(value) + '</div><div class="foot">' + esc(foot || '') + '</div></div>';
+  }
+  function queueStatus(q) {
+    var cls = 'muted', word = q.status || 'Pending Review';
+    if (word === 'Error') cls = 'critical';
+    else if (word === 'Unreadable') cls = 'serious';
+    else if (word === 'Pending Review') { word = 'Waiting for review'; cls = ''; }
+    return '<span class="status"><span class="dot ' + cls + '"></span>' + esc(word) + '</span>';
+  }
+
+  // ---- loading ---------------------------------------------------------------------------------
+  function showError(err) {
+    var b = $('banner');
+    b.textContent = 'Could not load the snapshot: ' + (err && err.message ? err.message : String(err)) + '. Retrying in a minute.';
+    b.className = 'banner show';
+    var btn = $('refreshBtn'); if (btn) btn.disabled = false;
+    state.inFlight = false;
+  }
+  function load() {
+    if (state.inFlight) return;
+    state.inFlight = true;
+    var btn = $('refreshBtn'); if (btn) btn.disabled = true;
+    google.script.run
+      .withSuccessHandler(function (data) { state.inFlight = false; render(data); })
+      .withFailureHandler(showError)
+      .getDashboardData();
+  }
+
+  $('refreshBtn').addEventListener('click', load);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) load(); });
+  load();
+  state.timer = setInterval(load, REFRESH_MS);
+})();
+</script>
+</body>
+</html>
