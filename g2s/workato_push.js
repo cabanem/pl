@@ -1,41 +1,28 @@
 /**
- * @fileoverview WorkatoPush.gs — HMAC-signed push to the Workato API endpoint.
+ * @fileoverview WorkatoPush.gs — push to the Workato API endpoint using
+ * Workato's native Auth Token method.
  *
- * REPLACES pushToWorkato_ in ContractIntake.gs. Delete the old one there: Apps
- * Script concatenates files and lets the last-loaded duplicate win silently, so
- * two definitions is a trap, not an error.
+ * Auth model: the access-profile token is sent in the `api-token` header, and
+ * Workato's API gate matches it to the access profile BEFORE the recipe runs.
+ * No HMAC, no timestamps, no signing. The platform owns authentication, and
+ * rotation is the Refresh button on the Clients page plus one Script Property
+ * update — no dual-accept window, no recipe formula.
  *
- * Scheme: HMAC-SHA256 over the canonical string "<correlation_id>.<timestamp>",
- * sent as lowercase hex in X-Signature with the timestamp in X-Timestamp. The
- * secret never travels. Workato verifies with
- *     (correlation_id + "." + timestamp).hmac_sha256(secret).encode_hex
- * and compares to X-Signature. Both ends MUST use hex — don't mix in base64.
+ * The token lives in Script Property WORKATO_WEBHOOK_SECRET. The property NAME
+ * is kept for continuity; its VALUE is now the Workato Auth Token shown once
+ * when the access profile was created — not an openssl-generated HMAC secret.
  *
- * The secret lives in Script Property WORKATO_WEBHOOK_SECRET, never the Config
- * sheet. The X-Webhook-Secret header and the workato_shared_secret config key
- * are retired.
+ * Retired from the previous version: signPush_, the X-Timestamp and X-Signature
+ * headers, and the HMAC verification branch inside the recipe.
  */
 
-/** @const {string} Script Property holding the shared HMAC secret. */
+/** @const {string} Script Property holding the Workato Auth Token. */
 const WORKATO_SECRET_PROP = 'WORKATO_WEBHOOK_SECRET';
+/** @const {string} The header Workato's Auth Token method reads. */
+const WORKATO_TOKEN_HEADER = 'api-token';
 
 /**
- * Lowercase-hex HMAC-SHA256 of "<correlationId>.<timestamp>".
- * @param {string} secret Shared secret.
- * @param {string} correlationId
- * @param {string} timestamp Epoch milliseconds as a string.
- * @return {string} 64-character lowercase hex.
- * @private
- */
-function signPush_(secret, correlationId, timestamp) {
-  const canonical = correlationId + '.' + timestamp;
-  const raw = Utilities.computeHmacSha256Signature(canonical, secret);
-  // The bytes are SIGNED — mask each one or negative values corrupt the hex.
-  return raw.map(function (b) { return ('0' + (b & 0xFF).toString(16)).slice(-2); }).join('');
-}
-
-/**
- * The HMAC secret from Script Properties.
+ * The Workato Auth Token from Script Properties.
  * @return {string}
  * @throws {Error} If the property is unset.
  * @private
@@ -47,18 +34,16 @@ function workatoSecret_() {
 }
 
 /**
- * Signed request headers for one push.
+ * Request headers for one push: the auth token plus a correlation id for
+ * Workato job search. The body's correlation_id remains authoritative.
  * @param {string} correlationId
- * @param {string} timestamp Epoch ms string.
  * @return {Object.<string,string>}
  * @private
  */
-function workatoHeaders_(correlationId, timestamp) {
-  return {
-    'X-Correlation-Id': correlationId,
-    'X-Timestamp': timestamp,
-    'X-Signature': signPush_(workatoSecret_(), correlationId, timestamp)
-  };
+function workatoHeaders_(correlationId) {
+  const h = { 'X-Correlation-Id': correlationId };
+  h[WORKATO_TOKEN_HEADER] = workatoSecret_();
+  return h;
 }
 
 /**
@@ -79,16 +64,15 @@ function sendToWorkato_(url, payload, headers) {
 }
 
 /**
- * Production push: sign, send, throw on non-2xx so the sheet stays in pending.
+ * Production push: send, throw on non-2xx so the sheet stays in pending.
  * @param {Approval} approval
  * @param {Config} cfg
  * @throws {Error} On any non-2xx response.
  * @private
  */
 function pushToWorkato_(approval, cfg) {
-  const ts = String(Date.now());
-  const r  = sendToWorkato_(cfg.workato_webhook_url, buildPayload_(approval, cfg),
-                            workatoHeaders_(approval.correlationId, ts));
+  const r = sendToWorkato_(cfg.workato_webhook_url, buildPayload_(approval, cfg),
+                           workatoHeaders_(approval.correlationId));
   if (r.code < 200 || r.code >= 300) {
     throw new Error('Workato ' + r.code + ': ' + r.body.slice(0, 300));
   }
