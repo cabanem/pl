@@ -1,0 +1,146 @@
+
+--- a/gemini-2-sf-2/Dashboard.html	2026-09-09 22:29:25.056855661 +0000
++++ b/gemini-2-sf-2/Dashboard.html	2026-09-09 22:29:36.094820039 +0000
+@@ -409,6 +409,10 @@
+       color: var(--muted);
+     }
+ 
++    td.links {
++      white-space: nowrap;
++    }
++
+     td.detail {
+       max-width: 520px;
+       color: var(--ink-2);
+@@ -718,16 +722,17 @@
+ 
+           $('queue').innerHTML =
+             '<table>' +
+-            '<thead><tr><th>Contract</th><th>Status</th><th>Waiting</th><th>Last error</th></tr></thead>' +
++            '<thead><tr><th>Contract</th><th>Open</th><th>Status</th><th>Waiting</th><th>Last error</th></tr></thead>' +
+             '<tbody>' +
+             sorted.map(function (q) {
+               var label = shortName(q.name) || q.name;
+-              var name = q.url
+-                ? '<a href="' + esc(q.url) + '" target="_blank" rel="noopener" title="' + esc(q.name) + '">' + esc(label) + '</a>'
+-                : esc(label);
++              var links = [];
++              if (q.url)       links.push('<a href="' + esc(q.url) + '" target="_blank" rel="noopener">Review sheet</a>');
++              if (q.sourceUrl) links.push('<a href="' + esc(q.sourceUrl) + '" target="_blank" rel="noopener">Original</a>');
+ 
+               return '<tr>' +
+-                '<td class="name">' + name + '</td>' +
++                '<td class="name" title="' + esc(q.name) + '">' + esc(label) + '</td>' +
++                '<td class="links">' + (links.join(' · ') || '<span class="muted">—</span>') + '</td>' +
+                 '<td>' + queueStatus(q) + '</td>' +
+                 '<td class="time">' + esc(ago(q.extractedAt, now) || '—') + '</td>' +
+                 '<td class="detail">' + (q.lastError ? esc(q.lastError) : '<span class="muted">—</span>') + '</td>' +
+
+--- a/gemini-2-sf-2/Snapshot.js	2026-09-09 22:29:25.044853381 +0000
++++ b/gemini-2-sf-2/Snapshot.js	2026-09-09 22:29:36.080749646 +0000
+@@ -48,7 +48,7 @@
+  * @private
+  */
+ function queueRow_(name, url, approval, errMsg) {
+-  if (!approval) return [name, 'Unreadable', '', '', errMsg || '', url, ''];
++  if (!approval) return [name, 'Unreadable', '', '', errMsg || '', url, '', ''];
+   const status = errMsg ? 'Error' : (approval.status || 'Pending Review');
+   return [
+     name,
+
+--- a/gemini-2-sf-2/Tests.js	2026-09-09 22:29:25.046849072 +0000
++++ b/gemini-2-sf-2/Tests.js	2026-09-09 22:29:36.082799867 +0000
+@@ -388,7 +388,7 @@
+ 
+   t('queueRow_: unticked sheet -> Pending Review row in header order', function () {
+     var r = queueRow_('Contract Review: msa.pdf', 'http://sheet', approval);
+-    assertEq_(r, ['Contract Review: msa.pdf', 'Pending Review', false, '2026-09-08T13:00:00.000Z', '', 'http://sheet', 'corr-7', 'http://drive.google.com/file/d/F/view']);
++    assertEq_(r, ['Contract Review: msa.pdf', 'Pending Review', false, '2026-09-08T13:00:00.000Z', '', 'http://sheet', 'corr-7', 'https://drive.google.com/file/d/F/view']);
+     assertEq_(r.length, QUEUE_HEADERS.length, 'row width matches header');
+   });
+ 
+
+--- a/gemini-2-sf-2/WebApp.js	2026-09-09 22:29:25.050827112 +0000
++++ b/gemini-2-sf-2/WebApp.js	2026-09-09 22:29:36.084849662 +0000
+@@ -38,20 +38,39 @@
+ const DASHBOARD_LIST_CAP = 100;
+ 
+ /**
+- * Web app entry point. Serves the dashboard page.
++ * Web app entry point. Dashboard.html is a TEMPLATE (not a static file) so the DrivePicker script can be included
++ * only when configured — `<?!= DrivePicker.clientHtml() ?>` is evaluated here, server-side. Served as a static file,
++ * the scriptlets would be emitted as text and silently ignored by the browser.
+  * @param {GoogleAppsScript.Events.DoGet} e
+  * @return {GoogleAppsScript.HTML.HtmlOutput}
+  */
+ function doGet(e) {
+-  return HtmlService.createHtmlOutputFromFile('Dashboard')
++  let picker = null;
++  try { picker = pickerConfig_(readConfig_()); } catch (err) { /* a config problem must not take the page down */ }
++
++  const t = HtmlService.createTemplateFromFile('Dashboard');
++  t.picker = picker !== null;
++  return t.evaluate()
+     .setTitle('Contract Intake')
+     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+ }
+ 
+ /**
++ * Picker settings for the page, or null when any of the three Config keys is blank. Presence is the switch.
++ * @param {Config} cfg
++ * @return {?{apiKey:string, clientId:string, appId:string, mimeTypes:string[]}}
++ * @private
++ */
++function pickerConfig_(cfg) {
++  if (!cfg.picker_api_key || !cfg.picker_client_id || !cfg.picker_app_id) return null;
++  return { apiKey: cfg.picker_api_key, clientId: cfg.picker_client_id, appId: cfg.picker_app_id, mimeTypes: PICKER_MIME_TYPES };
++}
++
++/**
+  * One snapshot for the page, called from the browser via google.script.run.
+  * @return {{
+- *   generatedAt:string, pollMinutes:number,
++ *   generatedAt:string, pollMinutes:number, maxUploadBytes:number, intakeWaiting:?number,
++ *   intake:{picker:?Object, folderUrl:string},
+  *   heartbeats:{ingestion:?string, approvals:?string},
+  *   queue:Array<Object>,
+  *   today:{staged:number, pushed:number, errors:number},
+@@ -60,11 +79,20 @@
+  */
+ function getDashboardData() {
+   const now = new Date();
++  let cfg = null;
++  try { cfg = readConfig_(); } catch (err) { /* page still renders; the intake block degrades */ }
++
+   const queueSheet = getQueueSheet_();
+   const summary = summarizeLogs_(readRecentLogRows_(DASHBOARD_LOG_TAIL), now, DASHBOARD_ERROR_DAYS, DASHBOARD_LIST_CAP);
+   return {
+     generatedAt: now.toISOString(),
+     pollMinutes: POLL_MINUTES,
++    maxUploadBytes: INLINE_PDF_MAX_BYTES,        // the drop zone enforces the same cap as extraction
++    intakeWaiting: countIntakeFiles_(),          // submitted, not yet read (null if unknown)
++    intake: {
++      picker: cfg ? pickerConfig_(cfg) : null,
++      folderUrl: cfg ? DriveApp.getFolderById(cfg.folder_id_ingestion).getUrl() : ''
++    },
+     heartbeats: readHeartbeats_(queueSheet),
+     queue: readQueueRows_(queueSheet),
+     today: summary.today,
+
+--- a/gemini-2-sf-2/appsscript.json	2026-09-09 22:29:25.038511679 +0000
++++ b/gemini-2-sf-2/appsscript.json	2026-09-09 22:28:46.751486462 +0000
+@@ -24,10 +24,11 @@
+     "https://www.googleapis.com/auth/spreadsheets",
+     "https://www.googleapis.com/auth/drive",
+     "https://www.googleapis.com/auth/documents",
+-    "https://www.googleapis.com/auth/script.external_request"
++    "https://www.googleapis.com/auth/script.external_request",
++    "https://www.googleapis.com/auth/userinfo.email"
+   ],
+   "webapp": {
+     "executeAs": "USER_DEPLOYING",
+     "access": "DOMAIN"
+   }
+-}
+\ No newline at end of file
++}
