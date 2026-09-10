@@ -1,0 +1,320 @@
+--- src/app_workatoworkspaceinv_DataBridge/app_workato-workspace-inv_DataBridge/00_CoreContext.js	2026-09-10 17:15:32.000000000 +0000
++++ deliverables/app_workato-workspace-inv_DataBridge/00_CoreContext.js	2026-09-10 18:04:24.217485654 +0000
+@@ -99,6 +99,13 @@
+       return new SystemDocRunner().run(ctx, ids);
+     });
+ 
++    // ---- Python step inventory -------------------------------------------
++    this.register("python.extract", (ctx, args) => {
++      const ids = Array.isArray(args?.ids) ? args.ids : null;
++      const options = args?.options && typeof args.options === "object" ? args.options : {};
++      return new PythonStepsRunner().run(ctx, ids, options);
++    });
++
+     // ---- Corpus Q&A ------------------------------------------------------
+     this.register("corpus.ask", (ctx, args) => {
+       return CorpusQaService.ask(String(args?.question || ""), ctx);
+--- src/app_workatoworkspaceinv_DataBridge/app_workato-workspace-inv_DataBridge/01_CoreConfig.js	2026-09-10 17:15:32.000000000 +0000
++++ deliverables/app_workato-workspace-inv_DataBridge/01_CoreConfig.js	2026-09-10 18:04:09.269484765 +0000
+@@ -47,6 +47,7 @@
+       LOOKUP_TABLES: "Inventory_Lookup_Tables",
+       DEPENDENCIES: "Analysis_Dependencies",
+       CALL_EDGES: "Analysis_Call_Edges",
++      PYTHON_STEPS: "Analysis_Python_Steps",
+       LOGIC: "Debug_Recipe_Logic",
+       DEBUG: "System_Logs",
+ 
+@@ -103,6 +104,12 @@
+       // AnalyzerService -> DataMapper via parseLogicRows
+       LOGIC: ["Recipe ID", "Recipe Name", "Step #", "Indentation", "Provider", "Action", "Description", "Details/Code"],
+ 
++      // PythonStepsRunner -> DataMapper.mapPythonStepsToRows. One row per py_eval step. Error rows put "ERROR" in
++      // Step Name and the message in Comment (positions 10 and 11 — keep those two fixed if columns are appended).
++      PYTHON_STEPS: ["Recipe ID", "Recipe Name", "Kind", "Project", "Folder", "Status", "Step #", "Step Path", "Branch Context",
++        "Alias (as)", "Step Name", "Comment", "Code FP", "Lines", "Imports", "Functions", "Classes", "Declared Inputs",
++        "Declared Outputs", "Upstream (provider:step)", "Consumers (step#:name)", "Payload", "Link: .py", "Timestamp"],
++
+       // SheetService.readRequests uses index 0 of this array for validation
+       LOGIC_INPUT: ["Recipe ID (Input List)"],
+ 
+@@ -208,6 +215,11 @@
+         // Corpus Q&A: Drive folder of ADR .md files — the digest's DECISIONS why-layer. Empty = block degrades gracefully.
+         DECISIONS_FOLDER_ID: ConfigStore.get('DECISIONS_FOLDER_ID', { preferUser: false, defaultValue: "" })
+       },
++      // Python step inventory. The manifest.json always goes to Drive (when LOG_TO_DRIVE is on); the per-step .py files
++      // are for humans reading in Drive and can be switched off to keep the debug folder quiet.
++      PYTHON_STEPS: {
++        SAVE_PY_TO_DRIVE: true
++      },
+       // Corpus Q&A knobs. Runtime state (digest file id / fp / generated_at) lives in ConfigStore, not here.
+       QA: {
+         RECENT_CHANGES_DAYS: 14,   // CHANGE_LOG window folded into the digest
+--- src/app_workatoworkspaceinv_DataBridge/app_workato-workspace-inv_DataBridge/03_WorkatoServices.js	2026-09-10 17:15:32.000000000 +0000
++++ deliverables/app_workato-workspace-inv_DataBridge/03_WorkatoServices.js	2026-09-10 18:04:13.029484989 +0000
+@@ -277,4 +277,12 @@
+   buildGraphPack(rootId, options) {
+     return this.engine.buildGraphPack(rootId, options);
+   }
++  /** Raw steps matching a predicate, with step_path / branch_context. Requires WorkatoGraphLib >= 1.1.0. */
++  collectSteps(recipeId, predicate) {
++    return this.engine.collectSteps(recipeId, predicate);
++  }
++  /** Every datapill reference inside a value (string / array / object). Requires WorkatoGraphLib >= 1.1.0. */
++  extractPillRefs(value) {
++    return this.engine.extractPillRefs(value);
++  }
+ }
+--- src/app_workatoworkspaceinv_DataBridge/app_workato-workspace-inv_DataBridge/05_DataMapper.js	2026-09-10 17:15:32.000000000 +0000
++++ deliverables/app_workato-workspace-inv_DataBridge/05_DataMapper.js	2026-09-10 18:04:21.277485479 +0000
+@@ -221,6 +221,52 @@
+     });
+   }
+   /**
++   * Transforms Python step records (PythonStepAnalyzer.describe) into sheet rows.
++   * ORDER MATTERS: must match SchemaDef.HEADERS.PYTHON_STEPS.
++   * @param {Array<Object>} records
++   * @param {string} [timestamp] - ISO timestamp stamped on every row (one per run, so rows of a run sort together).
++   * @returns {Array<Array<string>>}
++   */
++  static mapPythonStepsToRows(records, timestamp = "") {
++    const ts = timestamp || new Date().toISOString();
++    return (records || []).map(r => {
++      const s = r.step || {};
++      const upstream = (r.upstream_refs || [])
++        .map(u => `${u.provider}:${u.step_name || u.line}`)
++        .filter((v, i, a) => a.indexOf(v) === i)
++        .join("\n");
++      const consumers = (r.consumers || [])
++        .map(c => `${c.number !== "" ? c.number : c.step_path}:${c.name}`)
++        .join("\n");
++      return [
++        String(r.recipe_id || ""),
++        String(r.recipe_name || ""),
++        String(r.recipe_kind || ""),
++        String(r.project || "-"),
++        String(r.folder || "-"),
++        r.recipe_running ? "ACTIVE" : "STOPPED",
++        String(s.number ?? ""),
++        String(s.step_path || ""),
++        String(s.branch_context || ""),
++        String(s.as || ""),
++        String(s.name || ""),
++        String(s.comment || ""),
++        String(r.code_fp || ""),
++        String(r.line_count ?? ""),
++        (r.imports || []).join(", "),
++        (r.functions || []).join(", "),
++        (r.classes || []).join(", "),
++        (r.declared_inputs || []).join(", "),
++        (r.declared_outputs || []).join(", "),
++        upstream,
++        consumers,
++        String(s.payload_asset_type || ""),
++        r.drive_url ? `=HYPERLINK("${r.drive_url}", "View .py")` : "",
++        ts
++      ];
++    });
++  }
++  /**
+    * Transforms a process graph's nodes into sheet rows.
+    * @param {string|number} rootId
+    * @param {string} rootName
+--- src/app_workatoworkspaceinv_DataBridge/app_workato-workspace-inv_DataBridge/21_UIMenu.js	2026-09-10 17:15:32.000000000 +0000
++++ deliverables/app_workato-workspace-inv_DataBridge/21_UIMenu.js	2026-09-10 18:04:56.405487567 +0000
+@@ -81,6 +81,11 @@
+           .addItem("From selection", "generateSystemDocSelected")
+           .addItem("From Input_Requests", "generateSystemDocRequest")
+       );
++      root.addSubMenu(
++        this.ui.createMenu("Python step inventory -> sheet + Drive")
++          .addItem("Whole workspace", "extractPythonSteps")
++          .addItem("From selection", "extractPythonStepsSelected")
++      );
+       root.addSubMenu( // ***UPDATED*** Corpus Q&A: interim ask surface + manual digest rebuild
+         this.ui.createMenu("Corpus Q&A")
+           .addItem("Open web app", "openCorpusWebApp")        // ***UPDATED*** WEBAPP_PLAN §3 / O6
+--- src/app_workatoworkspaceinv_DataBridge/app_workato-workspace-inv_DataBridge/30_DashboardService.js	2026-09-10 17:15:32.000000000 +0000
++++ deliverables/app_workato-workspace-inv_DataBridge/30_DashboardService.js	2026-09-10 18:05:01.521487871 +0000
+@@ -439,7 +439,7 @@
+       DASHBOARD_HOME: C.primary, VIEW_RECIPES: C.primary, SEAMS: C.primary, UNUSED: C.primary,
+       PROJECTS: C.inventory, FOLDERS: C.inventory, RECIPES: C.inventory,
+       PROPERTIES: C.inventory, TABLES: C.inventory, LOOKUP_TABLES: C.inventory,
+-      DEPENDENCIES: C.analysis, CALL_EDGES: C.analysis,
++      DEPENDENCIES: C.analysis, CALL_EDGES: C.analysis, PYTHON_STEPS: C.analysis,
+       AI_ANALYSIS: C.output, PROCESS_MAPS: C.output,
+       LOGIC_INPUT: C.input,
+       LOGIC: C.system, DEBUG: C.system
+--- src/app_workatoworkspaceinv_DataBridge/app_workato-workspace-inv_DataBridge/99_EntryPoints.js	2026-09-10 17:15:32.000000000 +0000
++++ deliverables/app_workato-workspace-inv_DataBridge/99_EntryPoints.js	2026-09-10 18:04:41.849486702 +0000
+@@ -62,6 +62,21 @@
+   Commands.run("docs.system");
+ }
+ 
++// --- Python step inventory ----------------------------------------------------------------------------
++/** Every py_eval step in the workspace -> Analysis_Python_Steps + .py files + manifest.json in Drive. */
++function extractPythonSteps() {
++  Commands.run("python.extract");
++}
++/** Same, for the selected recipe rows only. */
++function extractPythonStepsSelected() {
++  const ids = SelectionUtils.getSelectedRecipeIds();
++  if (!ids.length) {
++    AppLog.notify("Select rows (or ID cells) in a sheet with recipe IDs first.", true);
++    return;
++  }
++  Commands.run("python.extract", { ids });
++}
++
+ // --- Corpus Q&A ---------------------------------------------------------------------------------------
+ /** Interim ask box (O2) until the web-app UI lands. */
+ function askCorpusPrompt() {
+--- src/lib_workatograph_2/lib_workato-graph/Code.js	2026-09-10 17:12:32.000000000 +0000
++++ deliverables/lib_workato-graph/Code.js	2026-09-10 18:02:38.381479363 +0000
+@@ -3,8 +3,8 @@
+  * @description Parses Workato recipe code into traversable graphs, logic summaries, and Mermaid diagrams.
+  * 
+  * @author emily.cabaniss@randstadsourceright.com
+- * @version 1.0.0
+- * 
++ * @version 1.1.0  (adds collectSteps + extractPillRefs — generic step access for consumers that need step bodies)
++ *
+  * For internal technical documentation, see the file linked below:
+  * @link{https://docs.google.com/document/d/10_5Dqr4r5CiK-0aCdDXFFcKqeKcJanzT8NqlQMAJv9g/edit?tab=t.0#heading=h.av2sef6b7pef}
+  */
+@@ -156,6 +156,92 @@
+     return rows;
+   }
+   /**
++   * Collects the raw step OBJECTS of a recipe that satisfy a predicate, each with its location.
++   *
++   * This is the first generic walker: the other four each summarise steps for one purpose (dependencies, call edges,
++   * logic rows, process graph). Anything that needs a step's body — code, schemas, input mappings — is a filter on top
++   * of this rather than a fifth private recursion. Same tree rules as the others: block / else_block / error_block.
++   *
++   * Location conventions (match the process-graph walker, which is the unambiguous one):
++   *   step_path      "1/0"  = index 1 at root, then index 0 inside its block
++   *                  "1/else/0", "1/error/0" for the else and error branches
++   *   branch_context "TRY / IF x = y / ELSE" — the enclosing keywords, outermost first
++   *
++   * The trigger (the root of recipe.code) is not a step in this walk; read it from getRecipeDetails(id).code directly.
++   *
++   * @param {string|number} recipeId
++   * @param {Function} [predicate] - (step, location) => boolean. Omit to collect every step.
++   * @returns {Array<{step:Object, step_path:string, branch_context:string, depth:number}>}
++   */
++  collectSteps(recipeId, predicate) {
++    const recipe = this.getRecipeDetails(recipeId);
++    if (!recipe || !recipe.code) {
++      if (this.CONSTANTS.STRICT) {
++        throw new Error(`GraphLib[strict]: recipe ${recipeId} has no retrievable code.`);
++      }
++      return [];
++    }
++    const keep = (typeof predicate === "function") ? predicate : (() => true);
++    const out = [];
++    try {
++      const codeObj = (typeof recipe.code === "string") ? JSON.parse(recipe.code) : recipe.code;
++      const rootBlock = codeObj.block || codeObj.line || [];
++      this._walkSteps(rootBlock, { stepPathPrefix: "", branchStack: [], depth: 0 }, (step, loc) => {
++        if (keep(step, loc)) out.push({ step, ...loc });
++      });
++    } catch (e) {
++      if (this.CONSTANTS.STRICT) {
++        throw new Error(`GraphLib[strict]: code parse failed for recipe ${recipeId}: ${e.message}`);
++      }
++      console.warn(`GraphLib: Error collecting steps for ${recipeId}: ${e.message}`);
++    }
++    return out;
++  }
++  /**
++   * Finds every datapill reference inside a value. Strings are scanned; arrays and objects are searched recursively,
++   * so passing a step's whole `input` finds everything it reads.
++   *
++   * Handles both encodings Workato uses for the same pill:
++   *   template form   #{_dp('{"pill_type":"output","provider":"py_eval","line":"07c380e4","path":["output","status"]}')}
++   *   formula form    =_dp('{…}').present? ? _dp('{…}') : "error"
++   * `line` is the `as` alias of the producing step — that is the join key for step-level data flow.
++   *
++   * @param {*} value
++   * @returns {Array<{pill_type:string, provider:string, line:string, path:Array<string>}>} unique refs, in order found
++   */
++  extractPillRefs(value) {
++    const refs = [];
++    const seen = new Set();
++    const visit = (v) => {
++      if (typeof v === "string") {
++        const re = /_dp\('(.*?)'\)/g;
++        let m;
++        while ((m = re.exec(v)) !== null) {
++          let ref = null;
++          try { ref = JSON.parse(m[1]); }
++          catch (e1) {
++            try { ref = JSON.parse(m[1].replace(/\\"/g, '"')); } catch (e2) { ref = null; }
++          }
++          if (!ref || typeof ref !== "object") continue;
++          const norm = {
++            pill_type: String(ref.pill_type || ""),
++            provider: String(ref.provider || ""),
++            line: String(ref.line || ""),
++            path: Array.isArray(ref.path) ? ref.path.map(String) : []
++          };
++          const sig = `${norm.provider}|${norm.line}|${norm.path.join(".")}`;
++          if (!seen.has(sig)) { seen.add(sig); refs.push(norm); }
++        }
++      } else if (Array.isArray(v)) {
++        v.forEach(visit);
++      } else if (v && typeof v === "object") {
++        Object.values(v).forEach(visit);
++      }
++    };
++    visit(value);
++    return refs;
++  }
++  /**
+    * Pre-populates the recipe detail cache from list-endpoint results,
+    * so subsequent getCallEdges/getRecipeDetails calls are cache hits.
+    * @param {Array<Object>} recipes - e.g. client.fetchPaginated('recipes?folder_id=...')
+@@ -382,6 +468,43 @@
+   }
+ 
+   // ----- Logic parsing internals ------------------------------------------
++  /**
++   * @private Generic recursive walker behind collectSteps. Visits every step in document order and calls
++   * visit(step, location). Branch labels: IF/ELSIF carry their condition summary; every other keyword that opens a
++   * block (TRY, FOREACH, REPEAT, …) contributes its upper-cased keyword; else_block adds ELSE; error_block adds ON_ERROR.
++   */
++  _walkSteps(steps, ctx, visit) {
++    if (!Array.isArray(steps)) return;
++    steps.forEach((step, index) => {
++      const stepPath = ctx.stepPathPrefix ? `${ctx.stepPathPrefix}/${index}` : `${index}`;
++      visit(step, {
++        step_path: stepPath,
++        branch_context: (ctx.branchStack || []).join(" / "),
++        depth: ctx.depth || 0
++      });
++
++      const keyword = String(step?.keyword || "").toLowerCase();
++      let label = "";
++      if (keyword === "if" || keyword === "elsif") {
++        label = `${keyword.toUpperCase()} ${this._formatConditionSummary(step)}`.trim();
++      } else if (keyword && keyword !== "action" && keyword !== "trigger") {
++        label = keyword.toUpperCase();
++      }
++
++      if (Array.isArray(step.block) && step.block.length) {
++        const next = label ? ctx.branchStack.concat([label]) : ctx.branchStack.slice();
++        this._walkSteps(step.block, { stepPathPrefix: stepPath, branchStack: next, depth: (ctx.depth || 0) + 1 }, visit);
++      }
++      if (Array.isArray(step.else_block) && step.else_block.length) {
++        const next = ctx.branchStack.concat(["ELSE"]);
++        this._walkSteps(step.else_block, { stepPathPrefix: `${stepPath}/else`, branchStack: next, depth: (ctx.depth || 0) + 1 }, visit);
++      }
++      if (Array.isArray(step.error_block) && step.error_block.length) {
++        const next = ctx.branchStack.concat(["ON_ERROR"]);
++        this._walkSteps(step.error_block, { stepPathPrefix: `${stepPath}/error`, branchStack: next, depth: (ctx.depth || 0) + 1 }, visit);
++      }
++    });
++  }
+   /** @private Recursive walker for Dependencies */
+   _scanBlockForCalls(steps, resultsArray) {
+     if (!Array.isArray(steps)) return;
