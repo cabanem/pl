@@ -1,0 +1,280 @@
+{
+  "plan_primary_user_change": [
+    {
+      "name": "promote_existing",
+      "input": {
+        "new_primary_email": "Bea@Acme.example", "contact_name": "Bea", "request_status": "sent",
+        "current_assignee_email": "al@acme.example", "wfa_count": 1, "project_count": 1, "supplier_count": 1, "move_task": true,
+        "users": [
+          {"record_id": "r1", "supplier_user_id": "su-1", "user_email": "al@acme.example", "primary": true},
+          {"record_id": "r2", "supplier_user_id": "su-2", "user_email": "bea@acme.example", "primary": false},
+          {"record_id": "r3", "supplier_user_id": "su-3", "user_email": "cy@acme.example", "primary": "false"}
+        ]
+      }
+    },
+    {
+      "name": "create_new_user",
+      "input": {
+        "new_primary_email": "dee@acme.example", "contact_name": "", "request_status": "supplier_action_required",
+        "current_assignee_email": "", "wfa_count": "", "project_count": "1", "supplier_count": "2",
+        "users": [{"record_id": "r1", "supplier_user_id": "su-1", "user_email": "al@acme.example", "primary": "true"}]
+      }
+    },
+    {
+      "name": "already_primary_noop",
+      "input": {
+        "new_primary_email": "al@acme.example", "request_status": "sent", "project_count": 1, "supplier_count": 1,
+        "users": [{"record_id": "r1", "supplier_user_id": "su-1", "user_email": "AL@acme.example", "primary": true}]
+      }
+    },
+    {
+      "name": "drift_two_primaries",
+      "input": {
+        "new_primary_email": "cy@acme.example", "contact_name": "Cy", "request_status": "sent", "project_count": 1, "supplier_count": 1,
+        "users": [
+          {"record_id": "r1", "supplier_user_id": "su-1", "user_email": "al@acme.example", "primary": "yes"},
+          {"record_id": "r2", "supplier_user_id": "su-2", "user_email": "bea@acme.example", "primary": "1"},
+          {"record_id": "r3", "supplier_user_id": "su-3", "user_email": "cy@acme.example", "primary": ""}
+        ]
+      }
+    },
+    {
+      "name": "move_task_false",
+      "input": {
+        "new_primary_email": "bea@acme.example", "request_status": "sent", "project_count": 1, "supplier_count": 1, "move_task": "false",
+        "users": [
+          {"record_id": "r1", "supplier_user_id": "su-1", "user_email": "al@acme.example", "primary": true},
+          {"record_id": "r2", "supplier_user_id": "su-2", "user_email": "bea@acme.example", "primary": false}
+        ]
+      }
+    },
+    {
+      "name": "users_as_json_string",
+      "input": {
+        "new_primary_email": "bea@acme.example", "request_status": "sent", "project_count": 1, "supplier_count": 1,
+        "users": "[{\"record_id\":\"r1\",\"supplier_user_id\":\"su-1\",\"user_email\":\"al@acme.example\",\"primary\":true},{\"record_id\":\"r2\",\"supplier_user_id\":\"su-2\",\"user_email\":\"bea@acme.example\",\"primary\":false}]"
+      }
+    },
+    {"name": "fail_invalid_email", "input": {"new_primary_email": "nope", "request_status": "sent", "project_count": 1, "supplier_count": 1, "users": []}},
+    {"name": "fail_terminal_status", "input": {"new_primary_email": "bea@acme.example", "request_status": "Approved", "project_count": 1, "supplier_count": 1, "users": []}},
+    {"name": "fail_wfa_missing", "input": {"new_primary_email": "bea@acme.example", "request_status": "sent", "wfa_count": "0", "project_count": 1, "supplier_count": 1, "users": []}},
+    {"name": "fail_project_missing", "input": {"new_primary_email": "bea@acme.example", "request_status": "sent", "project_count": 0, "supplier_count": 1, "users": []}},
+    {"name": "fail_supplier_missing", "input": {"new_primary_email": "bea@acme.example", "request_status": "sent", "project_count": 1, "supplier_count": "", "users": []}}
+  ],
+
+  "plan_task_ensure": [
+    {
+      "name": "recover_supplier_task",
+      "input": {
+        "request_status": "sent", "stage_name": "Awaiting data submission", "task_id": "", "task_name": "", "task_status": "", "task_holder_email": "",
+        "requested_assignee_email": "", "supplier_name": "Acme", "client_name": "Client Co", "analyst_email": "ana@client.example",
+        "days_param": "", "project_default_days": "10",
+        "users": [
+          {"user_email": "al@acme.example", "contact_name": "Al", "primary": true, "status": "active"},
+          {"user_email": "bea@acme.example", "contact_name": "Bea", "primary": false, "status": "active"}
+        ]
+      }
+    },
+    {
+      "name": "reassign_to_requested",
+      "input": {
+        "request_status": "supplier_action_required", "stage_name": "Awaiting data submission", "task_id": "t-9", "task_name": "Existing task", "task_status": "active",
+        "task_holder_email": "al@acme.example", "requested_assignee_email": "Bea@acme.example", "supplier_name": "Acme", "client_name": "Client Co",
+        "analyst_email": "", "days_param": "5", "project_default_days": "10",
+        "users": [
+          {"user_email": "al@acme.example", "contact_name": "Al", "primary": true, "status": "active"},
+          {"user_email": "bea@acme.example", "contact_name": "", "primary": false, "status": "active"}
+        ]
+      }
+    },
+    {
+      "name": "renew_expired",
+      "input": {
+        "request_status": "sent", "stage_name": "Under review", "task_id": "t-9", "task_name": "Existing task", "task_status": "Expired",
+        "task_holder_email": "al@acme.example", "requested_assignee_email": "", "supplier_name": "Acme", "client_name": "Client Co",
+        "analyst_email": "", "days_param": "", "project_default_days": "",
+        "users": [{"user_email": "al@acme.example", "contact_name": "Al", "primary": true, "status": ""}]
+      }
+    },
+    {
+      "name": "noop_live_task",
+      "input": {
+        "request_status": "sent", "stage_name": "", "task_id": "t-9", "task_name": "Existing task", "task_status": "active",
+        "task_holder_email": "al@acme.example", "requested_assignee_email": "", "supplier_name": "Acme", "client_name": "Client Co", "analyst_email": "",
+        "users": [{"user_email": "al@acme.example", "contact_name": "Al", "primary": true, "status": "active"}]
+      }
+    },
+    {
+      "name": "under_review_recover",
+      "input": {
+        "request_status": "pending_review", "stage_name": "Under review", "task_id": "", "task_name": "", "task_status": "", "task_holder_email": "",
+        "requested_assignee_email": "", "supplier_name": "Acme", "client_name": "Client Co", "analyst_email": "Ana@client.example", "users": []
+      }
+    },
+    {
+      "name": "under_review_renew_group_held",
+      "input": {
+        "request_status": "pending_review", "stage_name": "Under review", "task_id": "t-3", "task_name": "", "task_status": "expired", "task_holder_email": "",
+        "requested_assignee_email": "", "supplier_name": "Acme", "client_name": "Client Co", "analyst_email": "ana@client.example", "users": []
+      }
+    },
+    {"name": "refuse_taskless_status", "input": {"request_status": "pending", "task_id": "", "users": []}},
+    {"name": "refuse_blank_status", "input": {"request_status": "", "task_id": "", "users": []}},
+    {"name": "refuse_no_analyst", "input": {"request_status": "pending_review", "task_id": "", "analyst_email": "", "users": []}},
+    {
+      "name": "refuse_no_assignee",
+      "input": {"request_status": "sent", "task_id": "", "requested_assignee_email": "", "task_holder_email": "", "supplier_name": "Acme",
+                "users": [{"user_email": "al@acme.example", "contact_name": "Al", "primary": false, "status": "active"}]}
+    },
+    {
+      "name": "refuse_not_a_user",
+      "input": {"request_status": "sent", "task_id": "t-1", "requested_assignee_email": "zed@else.example", "task_holder_email": "al@acme.example", "supplier_name": "Acme",
+                "users": [{"user_email": "al@acme.example", "contact_name": "Al", "primary": true, "status": "active"}]}
+    },
+    {
+      "name": "primary_inactive_skipped",
+      "input": {"request_status": "sent", "task_id": "", "requested_assignee_email": "", "task_holder_email": "", "supplier_name": "Acme", "client_name": "Client Co",
+                "users": [
+                  {"user_email": "old@acme.example", "contact_name": "Old", "primary": true, "status": "inactive"},
+                  {"user_email": "new@acme.example", "contact_name": "New", "primary": "t", "status": "active"}
+                ]}
+    }
+  ],
+
+  "classify_requests_by_task": [
+    {
+      "name": "default_expired",
+      "input": {
+        "condition": "",
+        "requests": [
+          {"supplier_request_id": "req-1", "supplier_id": "sup-1", "assignee_email": "al@acme.example", "status": "sent", "current_state_entered_at": "2026-09-01T10:00:00Z", "stage_id": "s1", "stage_name": "Awaiting data submission", "task_id": "t-1", "task_name": "Collect", "task_status": "Expired", "task_expires_at": "2026-09-08", "task_link": "https://wfa/t-1", "assigned_user_id": "u-1", "assigned_user_name": "Al", "assigned_user_email": "al@acme.example", "assigned_user_status": "active"},
+          {"supplier_request_id": "req-2", "supplier_id": "sup-2", "assignee_email": "bo@bolt.example", "status": "sent", "current_state_entered_at": "2026-09-02T10:00:00Z", "stage_id": "s1", "stage_name": "Awaiting data submission", "task_id": "t-2", "task_name": "Collect", "task_status": "active", "task_expires_at": "2026-09-20", "task_link": "https://wfa/t-2", "assigned_user_id": "u-2", "assigned_user_name": "Bo", "assigned_user_email": "bo@bolt.example", "assigned_user_status": "invited"},
+          {"supplier_request_id": "req-3", "supplier_id": "sup-3", "assignee_email": "", "status": "supplier_action_required", "current_state_entered_at": "2026-09-03T10:00:00Z", "stage_id": "s1", "stage_name": "Awaiting data submission", "task_id": "", "task_name": "", "task_status": "", "task_expires_at": "", "task_link": "", "assigned_user_id": "", "assigned_user_name": "", "assigned_user_email": "", "assigned_user_status": ""},
+          {"supplier_request_id": "req-4", "supplier_id": "sup-1", "assignee_email": "al@acme.example", "status": "approved", "task_id": "", "task_status": ""},
+          {"supplier_request_id": "req-5", "supplier_id": "sup-1", "assignee_email": "al@acme.example", "status": "pending_review", "task_id": "t-5", "task_status": "expired", "assigned_user_email": "", "assigned_user_status": "invited"}
+        ],
+        "suppliers": [
+          {"supplier_id": "sup-1", "supplier_name": "Acme", "status": "active"},
+          {"supplier_id": "sup-2", "supplier_name": "Bolt", "status": "active"}
+        ],
+        "supplier_users": [
+          {"supplier_id": "sup-1", "user_email": "al@acme.example", "contact_name": "Al", "primary": true, "status": "active"},
+          {"supplier_id": "sup-1", "user_email": "al2@acme.example", "contact_name": "Al Two", "primary": "true", "status": "active"},
+          {"supplier_id": "sup-2", "user_email": "bo@bolt.example", "contact_name": "Bo", "primary": true, "status": "inactive"},
+          {"supplier_id": "sup-2", "user_email": "bea@bolt.example", "contact_name": "Bea", "primary": false, "status": "active"}
+        ]
+      }
+    },
+    {"name": "stranded", "input": {"condition": "Stranded", "requests": [{"supplier_request_id": "req-3", "supplier_id": "sup-3", "status": "sent", "task_id": ""}, {"supplier_request_id": "req-6", "supplier_id": "sup-3", "status": "pending_validation", "task_id": ""}], "suppliers": [], "supplier_users": []}},
+    {"name": "all_with_bogus_condition", "input": {"condition": "everything", "requests": [{"supplier_request_id": "req-1", "supplier_id": "sup-1", "status": "sent", "task_id": "t-1", "task_status": "active"}, {"supplier_request_id": "req-2", "supplier_id": "sup-1", "status": "sent", "task_id": ""}], "suppliers": [{"supplier_id": "sup-1", "supplier_name": "Acme"}], "supplier_users": []}},
+    {"name": "all", "input": {"condition": "all", "requests": [{"supplier_request_id": "req-1", "supplier_id": "sup-1", "status": "sent", "task_id": "t-1", "task_status": "active"}, {"supplier_request_id": "req-2", "supplier_id": "sup-1", "status": "sent", "task_id": ""}, {"supplier_request_id": "req-7", "supplier_id": "sup-1", "status": "cancelled", "task_id": ""}], "suppliers": [{"supplier_id": "sup-1", "supplier_name": "Acme"}], "supplier_users": []}},
+    {"name": "empty", "input": {"condition": "", "requests": [], "suppliers": [], "supplier_users": []}}
+  ],
+
+  "compute_reminders": [
+    {
+      "name": "mixed_portfolio",
+      "input": {
+        "current_time": "2026-09-10T12:00:00Z", "reminder_cadence_days": "3", "max_reminders": 3,
+        "requests": [
+          {"supplier_request_id": "req-1", "supplier_id": "sup-1", "supplier_name": "Acme", "status": "sent", "submission_attempt": 1, "reminder_count": 0, "current_state_entered_at": "2026-09-01T10:00:00Z", "last_reminder_sent_at": "", "reminders_enabled": true},
+          {"supplier_request_id": "req-2", "supplier_id": "sup-2", "supplier_name": "Bolt", "status": "sent", "submission_attempt": 0, "reminder_count": 1, "current_state_entered_at": "2026-08-20T10:00:00", "last_reminder_sent_at": "2026-09-09T09:00:00Z", "reminders_enabled": "true"},
+          {"supplier_request_id": "req-3", "supplier_id": "sup-3", "supplier_name": "Cog", "status": "supplier_action_required", "submission_attempt": 2, "reminder_count": 3, "current_state_entered_at": "2026-08-01T10:00:00Z", "last_reminder_sent_at": "2026-09-01T10:00:00Z", "reminders_enabled": true},
+          {"supplier_request_id": "req-4", "supplier_id": "sup-4", "supplier_name": "Dyn", "status": "sent", "submission_attempt": 0, "reminder_count": 0, "current_state_entered_at": "2026-08-01T10:00:00Z", "last_reminder_sent_at": "", "reminders_enabled": "false"},
+          {"supplier_request_id": "req-5", "supplier_id": "sup-5", "supplier_name": "Echo", "status": "pending_review", "submission_attempt": 1, "reminder_count": 0, "current_state_entered_at": "2026-08-01T10:00:00Z", "last_reminder_sent_at": "", "reminders_enabled": true},
+          {"supplier_request_id": "req-6", "supplier_id": "sup-6", "supplier_name": "Fox", "status": "sent", "submission_attempt": 0, "reminder_count": 0, "current_state_entered_at": "2026-08-01T10:00:00Z", "last_reminder_sent_at": "", "reminders_enabled": true},
+          {"supplier_request_id": "req-7", "supplier_id": "sup-7", "supplier_name": "Gale", "status": "sent", "submission_attempt": 0, "reminder_count": 0, "current_state_entered_at": "", "last_reminder_sent_at": "", "reminders_enabled": true},
+          {"supplier_request_id": "", "supplier_id": "sup-8", "supplier_name": "Hut", "status": "", "submission_attempt": "", "reminder_count": "", "current_state_entered_at": "", "last_reminder_sent_at": "", "reminders_enabled": ""},
+          {"supplier_request_id": "req-9", "supplier_id": "sup-1", "supplier_name": "Acme", "status": "approved", "submission_attempt": 3, "reminder_count": 2, "current_state_entered_at": "2026-07-01T10:00:00Z", "last_reminder_sent_at": "2026-07-10T10:00:00Z", "reminders_enabled": true}
+        ],
+        "supplier_users": [
+          {"supplier_id": "sup-1", "supplier_user_id": "su-1", "user_email": "al@acme.example", "contact_name": "Al", "primary": true, "status": "active", "kick_off_email_sent_time": "2026-08-30T08:00:00Z"},
+          {"supplier_id": "sup-1", "supplier_user_id": "su-1b", "user_email": "AL@acme.example", "contact_name": "Al dup", "primary": "false", "status": "active", "kick_off_email_sent_time": "2026-08-29T08:00:00Z"},
+          {"supplier_id": "sup-2", "supplier_user_id": "su-2", "user_email": "bo@bolt.example", "contact_name": "Bo", "primary": "1", "status": "active", "kick_off_email_sent_time": ""},
+          {"supplier_id": "sup-3", "supplier_user_id": "su-3", "user_email": "cog@cog.example", "contact_name": "Cog", "primary": true, "status": "active", "kick_off_email_sent_time": ""},
+          {"supplier_id": "sup-4", "supplier_user_id": "su-4", "user_email": "dyn@dyn.example", "contact_name": "Dyn", "primary": true, "status": "active", "kick_off_email_sent_time": ""},
+          {"supplier_id": "sup-5", "supplier_user_id": "su-5", "user_email": "echo@echo.example", "contact_name": "Echo", "primary": true, "status": "active", "kick_off_email_sent_time": ""},
+          {"supplier_id": "sup-7", "supplier_user_id": "su-7", "user_email": "", "contact_name": "Nobody", "primary": true, "status": "active", "kick_off_email_sent_time": ""},
+          {"supplier_id": "", "supplier_user_id": "su-x", "user_email": "orphan@x.example", "contact_name": "Orphan", "primary": false, "status": "active", "kick_off_email_sent_time": ""}
+        ]
+      }
+    },
+    {
+      "name": "no_users_no_emails_default_cap",
+      "input": {
+        "current_time": "2026-09-10T00:30:00+02:00", "reminder_cadence_days": 2, "max_reminders": "",
+        "requests": [
+          {"supplier_request_id": "req-1", "supplier_id": "sup-1", "supplier_name": "Acme", "status": "sent", "submission_attempt": 0, "reminder_count": 0, "current_state_entered_at": "2026-09-07T23:30:00Z", "last_reminder_sent_at": "", "reminders_enabled": ""},
+          {"supplier_request_id": "req-2", "supplier_id": "sup-2", "supplier_name": "Bolt", "status": "sent", "submission_attempt": 0, "reminder_count": 0, "current_state_entered_at": "2026-09-01T10:00:00Z", "last_reminder_sent_at": "", "reminders_enabled": true}
+        ],
+        "supplier_users": [
+          {"supplier_id": "sup-2", "supplier_user_id": "su-2", "user_email": "  ", "contact_name": "Blank", "primary": true, "status": "active", "kick_off_email_sent_time": ""}
+        ]
+      }
+    },
+    {"name": "raises_no_clock", "input": {"current_time": "", "reminder_cadence_days": 3, "max_reminders": 3, "requests": [], "supplier_users": []}},
+    {"name": "raises_no_cadence", "input": {"current_time": "2026-09-10T12:00:00Z", "reminder_cadence_days": "0", "max_reminders": 3, "requests": [], "supplier_users": []}}
+  ],
+
+  "build_request_rows": [
+    {"name": "success", "input": {"supplier_id": " sup-1 ", "assignee_email": "Al@Acme.example", "assignee_contact_name": "Al", "assigned_variant_id": "var-1", "assigned_version_id": "ver-3", "template_path": "templates/v3/base.xlsx"}},
+    {"name": "fail_blank_supplier", "input": {"supplier_id": "", "assignee_email": "al@acme.example", "assigned_variant_id": "var-1", "assigned_version_id": "ver-3", "template_path": "templates/v3/base.xlsx"}},
+    {"name": "fail_blank_email", "input": {"supplier_id": "sup-1", "assignee_email": " ", "assigned_variant_id": "var-1", "assigned_version_id": "ver-3", "template_path": "templates/v3/base.xlsx"}},
+    {"name": "fail_blank_variant", "input": {"supplier_id": "sup-1", "assignee_email": "al@acme.example", "assigned_variant_id": "", "assigned_version_id": "ver-3", "template_path": "templates/v3/base.xlsx"}},
+    {"name": "fail_blank_version", "input": {"supplier_id": "sup-1", "assignee_email": "al@acme.example", "assigned_variant_id": "var-1", "assigned_version_id": "", "template_path": "templates/v3/base.xlsx"}},
+    {"name": "fail_tbd_path", "input": {"supplier_id": "sup-1", "assignee_email": "al@acme.example", "assigned_variant_id": "var-1", "assigned_version_id": "ver-3", "template_path": "TBD"}},
+    {"name": "fail_blank_path", "input": {"supplier_id": "sup-1", "assignee_email": "al@acme.example", "assigned_variant_id": "var-1", "assigned_version_id": "ver-3", "template_path": ""}}
+  ],
+
+  "plan_user_migration": [
+    {
+      "name": "full_partition",
+      "input": {
+        "template_version_id": "ver-3", "will_reseed": false,
+        "requests": [
+          {"record_id": "1", "supplier_request_id": "req-1", "supplier_id": "sup-1", "status": "Sent", "assigned_version_id": "ver-2", "assigned_variant_id": "var-a2", "has_seeded_data": false},
+          {"record_id": "2", "supplier_request_id": "req-2", "supplier_id": "sup-2", "status": "pending_review", "assigned_version_id": "ver-2", "assigned_variant_id": "var-a2", "has_seeded_data": false},
+          {"record_id": "3", "supplier_request_id": "req-3", "supplier_id": "sup-3", "status": "approved", "assigned_version_id": "ver-2", "assigned_variant_id": "var-a2", "has_seeded_data": false},
+          {"record_id": "4", "supplier_request_id": "req-4", "supplier_id": "sup-4", "status": "sent", "assigned_version_id": "ver-3", "assigned_variant_id": "var-a3", "has_seeded_data": false},
+          {"record_id": "5", "supplier_request_id": "req-5", "supplier_id": "sup-5", "status": "sent", "assigned_version_id": "ver-2", "assigned_variant_id": "var-a2", "has_seeded_data": "true"},
+          {"record_id": "6", "supplier_request_id": "req-6", "supplier_id": "sup-6", "status": "sent", "assigned_version_id": "ver-2", "assigned_variant_id": "var-zz", "has_seeded_data": false},
+          {"record_id": "7", "supplier_request_id": "req-7", "supplier_id": "sup-7", "status": "sent", "assigned_version_id": "ver-2", "assigned_variant_id": "var-b2", "has_seeded_data": false},
+          {"record_id": "8", "supplier_request_id": "req-8", "supplier_id": "sup-8", "status": "sent", "assigned_version_id": "ver-2", "assigned_variant_id": "var-c2", "has_seeded_data": false},
+          {"record_id": "9", "supplier_request_id": "req-9", "supplier_id": "sup-9", "status": "sent", "assigned_version_id": "ver-2", "assigned_variant_id": "var-d2", "has_seeded_data": false},
+          {"record_id": "10", "supplier_request_id": "req-10", "supplier_id": "sup-1", "status": "supplier_action_required", "assigned_version_id": "ver-1", "assigned_variant_id": "var-a1", "has_seeded_data": ""}
+        ],
+        "variants": [
+          {"variant_id": "var-a1", "variant_name": "Base", "template_version_id": "ver-1", "template_path": "t/v1/base.xlsx"},
+          {"variant_id": "var-a2", "variant_name": "Base", "template_version_id": "ver-2", "template_path": "t/v2/base.xlsx"},
+          {"variant_id": "var-b2", "variant_name": "Dup", "template_version_id": "ver-2", "template_path": "t/v2/dup.xlsx"},
+          {"variant_id": "var-c2", "variant_name": "Gone", "template_version_id": "ver-2", "template_path": "t/v2/gone.xlsx"},
+          {"variant_id": "var-d2", "variant_name": "Unpublished", "template_version_id": "ver-2", "template_path": "t/v2/unp.xlsx"},
+          {"variant_id": "var-a3", "variant_name": "Base", "template_version_id": "ver-3", "template_path": "t/v3/base.xlsx"},
+          {"variant_id": "var-b3", "variant_name": "Dup", "template_version_id": "ver-3", "template_path": "t/v3/dup.xlsx"},
+          {"variant_id": "var-b3x", "variant_name": "Dup", "template_version_id": "ver-3", "template_path": "t/v3/dup2.xlsx"},
+          {"variant_id": "var-d3", "variant_name": "Unpublished", "template_version_id": "ver-3", "template_path": "tbd"},
+          {"variant_id": "", "variant_name": "Ghost", "template_version_id": "ver-3", "template_path": "x"}
+        ],
+        "suppliers": [
+          {"supplier_id": "sup-1", "supplier_name": "Acme"}, {"supplier_id": "sup-2", "supplier_name": "Bolt"}, {"supplier_id": "sup-5", "supplier_name": "Echo"},
+          {"supplier_id": "sup-6", "supplier_name": "Fox"}, {"supplier_id": "sup-7", "supplier_name": "Gale"}, {"supplier_id": "sup-8", "supplier_name": "Hut"},
+          {"supplier_id": "sup-9", "supplier_name": "Ivy"}, {"supplier_id": "", "supplier_name": "Nameless"}
+        ]
+      }
+    },
+    {
+      "name": "seeded_with_reseed_migrates",
+      "input": {
+        "template_version_id": "ver-3", "will_reseed": "true",
+        "requests": [{"record_id": "5", "supplier_request_id": "req-5", "supplier_id": "sup-5", "status": "sent", "assigned_version_id": "ver-2", "assigned_variant_id": "var-a2", "has_seeded_data": true}],
+        "variants": [
+          {"variant_id": "var-a2", "variant_name": "Base", "template_version_id": "ver-2", "template_path": "t/v2/base.xlsx"},
+          {"variant_id": "var-a3", "variant_name": "Base", "template_version_id": "ver-3", "template_path": "t/v3/base.xlsx"}
+        ],
+        "suppliers": [{"supplier_id": "sup-5", "supplier_name": "Echo"}]
+      }
+    },
+    {"name": "fail_blank_version", "input": {"template_version_id": " ", "will_reseed": false, "requests": [], "variants": [], "suppliers": []}},
+    {"name": "fail_no_variants_for_version", "input": {"template_version_id": "ver-9", "will_reseed": false, "requests": [], "variants": [{"variant_id": "var-a2", "variant_name": "Base", "template_version_id": "ver-2", "template_path": "t/v2/base.xlsx"}], "suppliers": []}}
+  ]
+}

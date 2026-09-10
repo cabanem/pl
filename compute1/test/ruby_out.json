@@ -1,0 +1,1551 @@
+{
+  "plan_primary_user_change": [
+    {
+      "name": "promote_existing",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "noop": false,
+        "plan": {
+          "mode": "promote",
+          "disposition": "promoted_existing",
+          "reassign": true,
+          "task_action": "delegated_to_inv02",
+          "skip_reason": "",
+          "target_record_id": "r2",
+          "supplier_user_id": "su-2",
+          "demote_rows": [
+            {
+              "record_id": "r1"
+            }
+          ],
+          "demote_count": 1,
+          "drift_detected": false,
+          "drift_note": "",
+          "old_primary_email": "al@acme.example",
+          "new_primary_email": "Bea@Acme.example",
+          "contact_name": "Bea",
+          "new_user_supplier_user_id": "",
+          "new_user_created_at": ""
+        }
+      }
+    },
+    {
+      "name": "create_new_user",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "noop": false,
+        "plan": {
+          "mode": "create",
+          "disposition": "invited_new",
+          "reassign": true,
+          "task_action": "delegated_to_inv02",
+          "skip_reason": "",
+          "target_record_id": "",
+          "supplier_user_id": "6f189537-0f41-4237-9f34-0c55895108d1",
+          "demote_rows": [
+            {
+              "record_id": "r1"
+            }
+          ],
+          "demote_count": 1,
+          "drift_detected": false,
+          "drift_note": "",
+          "old_primary_email": "al@acme.example",
+          "new_primary_email": "dee@acme.example",
+          "contact_name": "dee@acme.example",
+          "new_user_supplier_user_id": "6f189537-0f41-4237-9f34-0c55895108d1",
+          "new_user_created_at": "2026-09-10T21:33:56Z"
+        }
+      }
+    },
+    {
+      "name": "already_primary_noop",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "noop": true,
+        "plan": {
+          "mode": "",
+          "disposition": "already_primary",
+          "reassign": false,
+          "task_action": "",
+          "skip_reason": "",
+          "target_record_id": "",
+          "supplier_user_id": "",
+          "demote_rows": [
+
+          ],
+          "demote_count": 0,
+          "drift_detected": false,
+          "drift_note": "",
+          "old_primary_email": "",
+          "new_primary_email": "",
+          "contact_name": "",
+          "new_user_supplier_user_id": "",
+          "new_user_created_at": ""
+        }
+      }
+    },
+    {
+      "name": "drift_two_primaries",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "noop": false,
+        "plan": {
+          "mode": "promote",
+          "disposition": "promoted_existing",
+          "reassign": true,
+          "task_action": "delegated_to_inv02",
+          "skip_reason": "",
+          "target_record_id": "r3",
+          "supplier_user_id": "su-3",
+          "demote_rows": [
+            {
+              "record_id": "r1"
+            },
+            {
+              "record_id": "r2"
+            }
+          ],
+          "demote_count": 2,
+          "drift_detected": true,
+          "drift_note": "Found 2 primary rows for this supplier; repaired by demotion.",
+          "old_primary_email": "al@acme.example, bea@acme.example",
+          "new_primary_email": "cy@acme.example",
+          "contact_name": "Cy",
+          "new_user_supplier_user_id": "",
+          "new_user_created_at": ""
+        }
+      }
+    },
+    {
+      "name": "move_task_false",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "noop": false,
+        "plan": {
+          "mode": "promote",
+          "disposition": "promoted_existing",
+          "reassign": false,
+          "task_action": "left_in_place",
+          "skip_reason": "move_task is false; primary flag changed only.",
+          "target_record_id": "r2",
+          "supplier_user_id": "su-2",
+          "demote_rows": [
+            {
+              "record_id": "r1"
+            }
+          ],
+          "demote_count": 1,
+          "drift_detected": false,
+          "drift_note": "",
+          "old_primary_email": "al@acme.example",
+          "new_primary_email": "bea@acme.example",
+          "contact_name": "bea@acme.example",
+          "new_user_supplier_user_id": "",
+          "new_user_created_at": ""
+        }
+      }
+    },
+    {
+      "name": "users_as_json_string",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "noop": false,
+        "plan": {
+          "mode": "promote",
+          "disposition": "promoted_existing",
+          "reassign": true,
+          "task_action": "delegated_to_inv02",
+          "skip_reason": "",
+          "target_record_id": "r2",
+          "supplier_user_id": "su-2",
+          "demote_rows": [
+            {
+              "record_id": "r1"
+            }
+          ],
+          "demote_count": 1,
+          "drift_detected": false,
+          "drift_note": "",
+          "old_primary_email": "al@acme.example",
+          "new_primary_email": "bea@acme.example",
+          "contact_name": "bea@acme.example",
+          "new_user_supplier_user_id": "",
+          "new_user_created_at": ""
+        }
+      }
+    },
+    {
+      "name": "fail_invalid_email",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "recipe_invariant",
+          "message": "A valid new_primary_email is required."
+        },
+        "noop": false,
+        "plan": {
+          "mode": "",
+          "disposition": "",
+          "reassign": false,
+          "task_action": "",
+          "skip_reason": "",
+          "target_record_id": "",
+          "supplier_user_id": "",
+          "demote_rows": [
+
+          ],
+          "demote_count": 0,
+          "drift_detected": false,
+          "drift_note": "",
+          "old_primary_email": "",
+          "new_primary_email": "",
+          "contact_name": "",
+          "new_user_supplier_user_id": "",
+          "new_user_created_at": ""
+        }
+      }
+    },
+    {
+      "name": "fail_terminal_status",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "recipe_invariant",
+          "message": "Request has invariant status (approved). Cannot change primary."
+        },
+        "noop": false,
+        "plan": {
+          "mode": "",
+          "disposition": "",
+          "reassign": false,
+          "task_action": "",
+          "skip_reason": "",
+          "target_record_id": "",
+          "supplier_user_id": "",
+          "demote_rows": [
+
+          ],
+          "demote_count": 0,
+          "drift_detected": false,
+          "drift_note": "",
+          "old_primary_email": "",
+          "new_primary_email": "",
+          "contact_name": "",
+          "new_user_supplier_user_id": "",
+          "new_user_created_at": ""
+        }
+      }
+    },
+    {
+      "name": "fail_wfa_missing",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "state_inconsistent",
+          "message": "Request not found in the Workflow App."
+        },
+        "noop": false,
+        "plan": {
+          "mode": "",
+          "disposition": "",
+          "reassign": false,
+          "task_action": "",
+          "skip_reason": "",
+          "target_record_id": "",
+          "supplier_user_id": "",
+          "demote_rows": [
+
+          ],
+          "demote_count": 0,
+          "drift_detected": false,
+          "drift_note": "",
+          "old_primary_email": "",
+          "new_primary_email": "",
+          "contact_name": "",
+          "new_user_supplier_user_id": "",
+          "new_user_created_at": ""
+        }
+      }
+    },
+    {
+      "name": "fail_project_missing",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "state_inconsistent",
+          "message": "Project context is absent from the 'Project' table."
+        },
+        "noop": false,
+        "plan": {
+          "mode": "",
+          "disposition": "",
+          "reassign": false,
+          "task_action": "",
+          "skip_reason": "",
+          "target_record_id": "",
+          "supplier_user_id": "",
+          "demote_rows": [
+
+          ],
+          "demote_count": 0,
+          "drift_detected": false,
+          "drift_note": "",
+          "old_primary_email": "",
+          "new_primary_email": "",
+          "contact_name": "",
+          "new_user_supplier_user_id": "",
+          "new_user_created_at": ""
+        }
+      }
+    },
+    {
+      "name": "fail_supplier_missing",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "state_inconsistent",
+          "message": "Supplier not found in SUP_Supplier."
+        },
+        "noop": false,
+        "plan": {
+          "mode": "",
+          "disposition": "",
+          "reassign": false,
+          "task_action": "",
+          "skip_reason": "",
+          "target_record_id": "",
+          "supplier_user_id": "",
+          "demote_rows": [
+
+          ],
+          "demote_count": 0,
+          "drift_detected": false,
+          "drift_note": "",
+          "old_primary_email": "",
+          "new_primary_email": "",
+          "contact_name": "",
+          "new_user_supplier_user_id": "",
+          "new_user_created_at": ""
+        }
+      }
+    }
+  ],
+  "plan_task_ensure": [
+    {
+      "name": "recover_supplier_task",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "mode": "recover",
+        "reason": "No active task on a 'sent' request; creating one for al@acme.example.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "al@acme.example",
+          "contact_name": "Al",
+          "workflow_app_stage": "awaiting_data_submission",
+          "is_reassignment": false,
+          "currently_assigned_user_email": "ana@client.example",
+          "task_name": "Supplier data collection request for Acme on behalf of Client Co",
+          "days_to_complete_task": 10,
+          "send_email": true
+        }
+      }
+    },
+    {
+      "name": "reassign_to_requested",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "mode": "reassign",
+        "reason": "Moving task from al@acme.example to bea@acme.example.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "bea@acme.example",
+          "contact_name": "bea@acme.example",
+          "workflow_app_stage": "awaiting_data_submission",
+          "is_reassignment": true,
+          "currently_assigned_user_email": "al@acme.example",
+          "task_name": "Existing task",
+          "days_to_complete_task": 5,
+          "send_email": true
+        }
+      }
+    },
+    {
+      "name": "renew_expired",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "mode": "renew",
+        "reason": "Renewing expired task for al@acme.example.",
+        "drift_detected": true,
+        "drift_note": "WFA stage is 'Under review', expected 'Awaiting data submission' for status 'sent'.",
+        "plan": {
+          "assignee_email": "al@acme.example",
+          "contact_name": "Al",
+          "workflow_app_stage": "awaiting_data_submission",
+          "is_reassignment": true,
+          "currently_assigned_user_email": "al@acme.example",
+          "task_name": "Existing task",
+          "days_to_complete_task": 7,
+          "send_email": true
+        }
+      }
+    },
+    {
+      "name": "noop_live_task",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "mode": "noop",
+        "reason": "Task already held by al@acme.example and not expired.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "",
+          "contact_name": "",
+          "workflow_app_stage": "",
+          "is_reassignment": false,
+          "currently_assigned_user_email": "",
+          "task_name": "",
+          "days_to_complete_task": 0,
+          "send_email": false
+        }
+      }
+    },
+    {
+      "name": "under_review_recover",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "mode": "recover",
+        "reason": "No active task on a 'pending_review' request; creating one for ana@client.example.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "ana@client.example",
+          "contact_name": "Implementation team",
+          "workflow_app_stage": "under_review",
+          "is_reassignment": false,
+          "currently_assigned_user_email": "ana@client.example",
+          "task_name": "Review submission for Acme",
+          "days_to_complete_task": 7,
+          "send_email": true
+        }
+      }
+    },
+    {
+      "name": "under_review_renew_group_held",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "mode": "renew",
+        "reason": "Renewing expired task for ana@client.example.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "ana@client.example",
+          "contact_name": "Implementation team",
+          "workflow_app_stage": "under_review",
+          "is_reassignment": true,
+          "currently_assigned_user_email": "ana@client.example",
+          "task_name": "Review submission for Acme",
+          "days_to_complete_task": 7,
+          "send_email": true
+        }
+      }
+    },
+    {
+      "name": "refuse_taskless_status",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "recipe_invariant",
+          "message": "Status 'pending' carries no task; nothing to assign."
+        },
+        "mode": "refuse",
+        "reason": "Status 'pending' carries no task; nothing to assign.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "",
+          "contact_name": "",
+          "workflow_app_stage": "",
+          "is_reassignment": false,
+          "currently_assigned_user_email": "",
+          "task_name": "",
+          "days_to_complete_task": 0,
+          "send_email": false
+        }
+      }
+    },
+    {
+      "name": "refuse_blank_status",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "recipe_invariant",
+          "message": "Status 'blank' carries no task; nothing to assign."
+        },
+        "mode": "refuse",
+        "reason": "Status 'blank' carries no task; nothing to assign.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "",
+          "contact_name": "",
+          "workflow_app_stage": "",
+          "is_reassignment": false,
+          "currently_assigned_user_email": "",
+          "task_name": "",
+          "days_to_complete_task": 0,
+          "send_email": false
+        }
+      }
+    },
+    {
+      "name": "refuse_no_analyst",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "state_inconsistent",
+          "message": "Project has no analyst_email."
+        },
+        "mode": "refuse",
+        "reason": "Project has no analyst_email.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "",
+          "contact_name": "",
+          "workflow_app_stage": "",
+          "is_reassignment": false,
+          "currently_assigned_user_email": "",
+          "task_name": "",
+          "days_to_complete_task": 0,
+          "send_email": false
+        }
+      }
+    },
+    {
+      "name": "refuse_no_assignee",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "state_inconsistent",
+          "message": "No assignee: none requested, no task holder, no primary active user."
+        },
+        "mode": "refuse",
+        "reason": "No assignee: none requested, no task holder, no primary active user.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "",
+          "contact_name": "",
+          "workflow_app_stage": "",
+          "is_reassignment": false,
+          "currently_assigned_user_email": "",
+          "task_name": "",
+          "days_to_complete_task": 0,
+          "send_email": false
+        }
+      }
+    },
+    {
+      "name": "refuse_not_a_user",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "recipe_invariant",
+          "message": "zed@else.example is not a user of Acme; add them first via 'add a user' on this page."
+        },
+        "mode": "refuse",
+        "reason": "zed@else.example is not a user of Acme; add them first via 'add a user' on this page.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "",
+          "contact_name": "",
+          "workflow_app_stage": "",
+          "is_reassignment": false,
+          "currently_assigned_user_email": "",
+          "task_name": "",
+          "days_to_complete_task": 0,
+          "send_email": false
+        }
+      }
+    },
+    {
+      "name": "primary_inactive_skipped",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "mode": "recover",
+        "reason": "No active task on a 'sent' request; creating one for new@acme.example.",
+        "drift_detected": false,
+        "drift_note": "",
+        "plan": {
+          "assignee_email": "new@acme.example",
+          "contact_name": "New",
+          "workflow_app_stage": "awaiting_data_submission",
+          "is_reassignment": false,
+          "currently_assigned_user_email": "",
+          "task_name": "Supplier data collection request for Acme on behalf of Client Co",
+          "days_to_complete_task": 7,
+          "send_email": true
+        }
+      }
+    }
+  ],
+  "classify_requests_by_task": [
+    {
+      "name": "default_expired",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "matched_count": 2,
+        "counts": {
+          "expired": 2,
+          "stranded": 1,
+          "active": 1
+        },
+        "requests": [
+          {
+            "supplier_request_id": "req-1",
+            "supplier_id": "sup-1",
+            "supplier_name": "Acme",
+            "assignee_email": "al@acme.example",
+            "primary_contact_name": "Al",
+            "primary_contact_email": "al@acme.example",
+            "status": "sent",
+            "request_status": "sent",
+            "condition": "expired",
+            "task_status": "expired",
+            "task_holder_email": "al@acme.example",
+            "task_holder_status": "active",
+            "current_state_entered_at": "2026-09-01T10:00:00Z",
+            "stage_id": "s1",
+            "stage_name": "Awaiting data submission",
+            "note": "Active user",
+            "active_task": {
+              "active_task_id": "t-1",
+              "active_task_name": "Collect",
+              "active_task_due_date": "2026-09-08",
+              "active_task_url": "https://wfa/t-1",
+              "active_task_status": "Expired",
+              "assigned_user": {
+                "assigned_user_id": "u-1",
+                "assigned_user_name": "Al",
+                "assigned_user_email": "al@acme.example"
+              }
+            }
+          },
+          {
+            "supplier_request_id": "req-5",
+            "supplier_id": "sup-1",
+            "supplier_name": "Acme",
+            "assignee_email": "al@acme.example",
+            "primary_contact_name": "Al",
+            "primary_contact_email": "al@acme.example",
+            "status": "pending_review",
+            "request_status": "pending_review",
+            "condition": "expired",
+            "task_status": "expired",
+            "task_holder_email": "",
+            "task_holder_status": "invited",
+            "current_state_entered_at": null,
+            "stage_id": null,
+            "stage_name": null,
+            "note": "User never completed portal registration.",
+            "active_task": {
+              "active_task_id": "t-5",
+              "active_task_name": null,
+              "active_task_due_date": null,
+              "active_task_url": null,
+              "active_task_status": "expired",
+              "assigned_user": {
+                "assigned_user_id": null,
+                "assigned_user_name": null,
+                "assigned_user_email": ""
+              }
+            }
+          }
+        ],
+        "log": "arrivals: requests=5 suppliers=2 supplier_users=4 condition=expired\nSupplier sup-1 has multiple primary active users; keeping al@acme.example.\nclassified: expired=2 stranded=1 active=1 | returned=2 (expired) | supplier misses=0"
+      }
+    },
+    {
+      "name": "stranded",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "matched_count": 1,
+        "counts": {
+          "expired": 0,
+          "stranded": 1,
+          "active": 0
+        },
+        "requests": [
+          {
+            "supplier_request_id": "req-3",
+            "supplier_id": "sup-3",
+            "supplier_name": null,
+            "assignee_email": null,
+            "primary_contact_name": null,
+            "primary_contact_email": null,
+            "status": "sent",
+            "request_status": "sent",
+            "condition": "stranded",
+            "task_status": "",
+            "task_holder_email": null,
+            "task_holder_status": "",
+            "current_state_entered_at": null,
+            "stage_id": null,
+            "stage_name": null,
+            "note": "No task on a task-bearing request.",
+            "active_task": {
+              "active_task_id": "",
+              "active_task_name": null,
+              "active_task_due_date": null,
+              "active_task_url": null,
+              "active_task_status": null,
+              "assigned_user": {
+                "assigned_user_id": null,
+                "assigned_user_name": null,
+                "assigned_user_email": null
+              }
+            }
+          }
+        ],
+        "log": "arrivals: requests=2 suppliers=0 supplier_users=0 condition=stranded\nRequest req-3: supplier_id 'sup-3' not found in SUP_Supplier.\nclassified: expired=0 stranded=1 active=0 | returned=1 (stranded) | supplier misses=1"
+      }
+    },
+    {
+      "name": "all_with_bogus_condition",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "matched_count": 0,
+        "counts": {
+          "expired": 0,
+          "stranded": 1,
+          "active": 1
+        },
+        "requests": [
+
+        ],
+        "log": "condition 'everything' not recognised; using 'expired'.\narrivals: requests=2 suppliers=1 supplier_users=0 condition=expired\nclassified: expired=0 stranded=1 active=1 | returned=0 (expired) | supplier misses=0"
+      }
+    },
+    {
+      "name": "all",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "matched_count": 2,
+        "counts": {
+          "expired": 0,
+          "stranded": 1,
+          "active": 1
+        },
+        "requests": [
+          {
+            "supplier_request_id": "req-1",
+            "supplier_id": "sup-1",
+            "supplier_name": "Acme",
+            "assignee_email": null,
+            "primary_contact_name": null,
+            "primary_contact_email": null,
+            "status": "sent",
+            "request_status": "sent",
+            "condition": "active",
+            "task_status": "active",
+            "task_holder_email": null,
+            "task_holder_status": "",
+            "current_state_entered_at": null,
+            "stage_id": null,
+            "stage_name": null,
+            "note": "Active user",
+            "active_task": {
+              "active_task_id": "t-1",
+              "active_task_name": null,
+              "active_task_due_date": null,
+              "active_task_url": null,
+              "active_task_status": "active",
+              "assigned_user": {
+                "assigned_user_id": null,
+                "assigned_user_name": null,
+                "assigned_user_email": null
+              }
+            }
+          },
+          {
+            "supplier_request_id": "req-2",
+            "supplier_id": "sup-1",
+            "supplier_name": "Acme",
+            "assignee_email": null,
+            "primary_contact_name": null,
+            "primary_contact_email": null,
+            "status": "sent",
+            "request_status": "sent",
+            "condition": "stranded",
+            "task_status": "",
+            "task_holder_email": null,
+            "task_holder_status": "",
+            "current_state_entered_at": null,
+            "stage_id": null,
+            "stage_name": null,
+            "note": "No task on a task-bearing request.",
+            "active_task": {
+              "active_task_id": "",
+              "active_task_name": null,
+              "active_task_due_date": null,
+              "active_task_url": null,
+              "active_task_status": null,
+              "assigned_user": {
+                "assigned_user_id": null,
+                "assigned_user_name": null,
+                "assigned_user_email": null
+              }
+            }
+          }
+        ],
+        "log": "arrivals: requests=3 suppliers=1 supplier_users=0 condition=all\nclassified: expired=0 stranded=1 active=1 | returned=2 (all) | supplier misses=0"
+      }
+    },
+    {
+      "name": "empty",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "matched_count": 0,
+        "counts": {
+          "expired": 0,
+          "stranded": 0,
+          "active": 0
+        },
+        "requests": [
+
+        ],
+        "log": "arrivals: requests=0 suppliers=0 supplier_users=0 condition=expired\nclassified: expired=0 stranded=0 active=0 | returned=0 (expired) | supplier misses=0"
+      }
+    }
+  ],
+  "compute_reminders": [
+    {
+      "name": "mixed_portfolio",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "rows": [
+          {
+            "supplier_id": "sup-1",
+            "supplier_name": "Acme",
+            "has_request": true,
+            "request_ids": [
+              "req-1",
+              "req-9"
+            ],
+            "request_statuses": [
+              "sent",
+              "approved"
+            ],
+            "total_submission_attempts": 4,
+            "last_reminder_sent_at": "2026-07-10T10:00:00+00:00",
+            "first_kick_off_sent_at": "2026-08-29T08:00:00+00:00",
+            "reminder_eligible": true,
+            "users": [
+              {
+                "supplier_user_id": "su-1",
+                "user_email": "al@acme.example",
+                "contact_name": "Al",
+                "primary": true,
+                "status": "active",
+                "kick_off_email_sent_time": "2026-08-30T08:00:00Z"
+              },
+              {
+                "supplier_user_id": "su-1b",
+                "user_email": "AL@acme.example",
+                "contact_name": "Al dup",
+                "primary": false,
+                "status": "active",
+                "kick_off_email_sent_time": "2026-08-29T08:00:00Z"
+              }
+            ]
+          },
+          {
+            "supplier_id": "sup-2",
+            "supplier_name": "Bolt",
+            "has_request": true,
+            "request_ids": [
+              "req-2"
+            ],
+            "request_statuses": [
+              "sent"
+            ],
+            "total_submission_attempts": 0,
+            "last_reminder_sent_at": "2026-09-09T09:00:00+00:00",
+            "first_kick_off_sent_at": null,
+            "reminder_eligible": false,
+            "users": [
+              {
+                "supplier_user_id": "su-2",
+                "user_email": "bo@bolt.example",
+                "contact_name": "Bo",
+                "primary": true,
+                "status": "active",
+                "kick_off_email_sent_time": null
+              }
+            ]
+          },
+          {
+            "supplier_id": "sup-3",
+            "supplier_name": "Cog",
+            "has_request": true,
+            "request_ids": [
+              "req-3"
+            ],
+            "request_statuses": [
+              "supplier_action_required"
+            ],
+            "total_submission_attempts": 2,
+            "last_reminder_sent_at": "2026-09-01T10:00:00+00:00",
+            "first_kick_off_sent_at": null,
+            "reminder_eligible": false,
+            "users": [
+              {
+                "supplier_user_id": "su-3",
+                "user_email": "cog@cog.example",
+                "contact_name": "Cog",
+                "primary": true,
+                "status": "active",
+                "kick_off_email_sent_time": null
+              }
+            ]
+          },
+          {
+            "supplier_id": "sup-4",
+            "supplier_name": "Dyn",
+            "has_request": true,
+            "request_ids": [
+              "req-4"
+            ],
+            "request_statuses": [
+              "sent"
+            ],
+            "total_submission_attempts": 0,
+            "last_reminder_sent_at": null,
+            "first_kick_off_sent_at": null,
+            "reminder_eligible": false,
+            "users": [
+              {
+                "supplier_user_id": "su-4",
+                "user_email": "dyn@dyn.example",
+                "contact_name": "Dyn",
+                "primary": true,
+                "status": "active",
+                "kick_off_email_sent_time": null
+              }
+            ]
+          },
+          {
+            "supplier_id": "sup-5",
+            "supplier_name": "Echo",
+            "has_request": true,
+            "request_ids": [
+              "req-5"
+            ],
+            "request_statuses": [
+              "pending_review"
+            ],
+            "total_submission_attempts": 1,
+            "last_reminder_sent_at": null,
+            "first_kick_off_sent_at": null,
+            "reminder_eligible": false,
+            "users": [
+              {
+                "supplier_user_id": "su-5",
+                "user_email": "echo@echo.example",
+                "contact_name": "Echo",
+                "primary": true,
+                "status": "active",
+                "kick_off_email_sent_time": null
+              }
+            ]
+          },
+          {
+            "supplier_id": "sup-6",
+            "supplier_name": "Fox",
+            "has_request": true,
+            "request_ids": [
+              "req-6"
+            ],
+            "request_statuses": [
+              "sent"
+            ],
+            "total_submission_attempts": 0,
+            "last_reminder_sent_at": null,
+            "first_kick_off_sent_at": null,
+            "reminder_eligible": false,
+            "users": [
+
+            ]
+          },
+          {
+            "supplier_id": "sup-7",
+            "supplier_name": "Gale",
+            "has_request": true,
+            "request_ids": [
+              "req-7"
+            ],
+            "request_statuses": [
+              "sent"
+            ],
+            "total_submission_attempts": 0,
+            "last_reminder_sent_at": null,
+            "first_kick_off_sent_at": null,
+            "reminder_eligible": false,
+            "users": [
+              {
+                "supplier_user_id": "su-7",
+                "user_email": "",
+                "contact_name": "Nobody",
+                "primary": true,
+                "status": "active",
+                "kick_off_email_sent_time": null
+              }
+            ]
+          },
+          {
+            "supplier_id": "sup-8",
+            "supplier_name": "Hut",
+            "has_request": false,
+            "request_ids": [
+
+            ],
+            "request_statuses": [
+
+            ],
+            "total_submission_attempts": 0,
+            "last_reminder_sent_at": null,
+            "first_kick_off_sent_at": null,
+            "reminder_eligible": false,
+            "users": [
+
+            ]
+          }
+        ],
+        "pending_reminders": [
+          {
+            "supplier_request_id": "req-1",
+            "supplier_id": "sup-1",
+            "supplier_name": "Acme",
+            "status": "sent",
+            "submission_attempt": 1,
+            "reminder_count": 0,
+            "state_entered_time": "2026-09-01T10:00:00+00:00",
+            "last_reminder_sent": null,
+            "interval_days": 3,
+            "days_waiting": 9,
+            "recipient_emails": "al@acme.example",
+            "users": [
+              {
+                "supplier_user_id": "su-1",
+                "user_email": "al@acme.example",
+                "contact_name": "Al",
+                "primary": true,
+                "status": "active",
+                "kick_off_email_sent_time": "2026-08-30T08:00:00Z"
+              },
+              {
+                "supplier_user_id": "su-1b",
+                "user_email": "AL@acme.example",
+                "contact_name": "Al dup",
+                "primary": false,
+                "status": "active",
+                "kick_off_email_sent_time": "2026-08-29T08:00:00Z"
+              }
+            ]
+          }
+        ],
+        "log": [
+          "request req-6 (supplier sup-6): no assigned users - skipped",
+          "request req-7: no anchor (state_entered_time and last_reminder_sent both empty) - skipped"
+        ]
+      }
+    },
+    {
+      "name": "no_users_no_emails_default_cap",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "rows": [
+          {
+            "supplier_id": "sup-1",
+            "supplier_name": "Acme",
+            "has_request": true,
+            "request_ids": [
+              "req-1"
+            ],
+            "request_statuses": [
+              "sent"
+            ],
+            "total_submission_attempts": 0,
+            "last_reminder_sent_at": null,
+            "first_kick_off_sent_at": null,
+            "reminder_eligible": false,
+            "users": [
+
+            ]
+          },
+          {
+            "supplier_id": "sup-2",
+            "supplier_name": "Bolt",
+            "has_request": true,
+            "request_ids": [
+              "req-2"
+            ],
+            "request_statuses": [
+              "sent"
+            ],
+            "total_submission_attempts": 0,
+            "last_reminder_sent_at": null,
+            "first_kick_off_sent_at": null,
+            "reminder_eligible": false,
+            "users": [
+              {
+                "supplier_user_id": "su-2",
+                "user_email": "",
+                "contact_name": "Blank",
+                "primary": true,
+                "status": "active",
+                "kick_off_email_sent_time": null
+              }
+            ]
+          }
+        ],
+        "pending_reminders": [
+
+        ],
+        "log": [
+          "Project.max_reminders missing/zero - defaulting to 3",
+          "request req-1 (supplier sup-1): no assigned users - skipped",
+          "request req-2 (supplier sup-2): users present but no usable email addresses - skipped"
+        ]
+      }
+    },
+    {
+      "name": "raises_no_clock",
+      "raises": "StandardError: current_time missing or unparseable - cannot evaluate reminder cadence"
+    },
+    {
+      "name": "raises_no_cadence",
+      "raises": "StandardError: Project.reminder_cadence missing or zero - reminders cannot be evaluated"
+    }
+  ],
+  "build_request_rows": [
+    {
+      "name": "success",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "supplier_user_row": {
+          "supplier_user_id": "a962dfc0-d900-46d0-aa98-e6da4b24c176",
+          "supplier_id": "sup-1",
+          "user_email": "al@acme.example",
+          "contact_name": "Al",
+          "primary": true,
+          "status": "active",
+          "created_at": "2026-09-10T21:33:56Z"
+        },
+        "supplier_request_row": {
+          "supplier_request_id": "7f574893-510e-41f9-944a-1a096d8903a4",
+          "supplier_id": "sup-1",
+          "assigned_version_id": "ver-3",
+          "assigned_variant_id": "var-1",
+          "assignee_email": "al@acme.example",
+          "status": "pending",
+          "current_state_entered_at": "2026-09-10T21:33:56Z",
+          "supplier_display_status": "Not yet sent",
+          "supplier_message": "",
+          "reminders_enabled": true,
+          "has_seeded_data": false,
+          "submission_attempt": 0,
+          "last_reminder_tier": 0,
+          "template_path": "templates/v3/base.xlsx"
+        },
+        "supplier_user_id": "a962dfc0-d900-46d0-aa98-e6da4b24c176",
+        "supplier_request_id": "7f574893-510e-41f9-944a-1a096d8903a4",
+        "assignee_email": "al@acme.example"
+      }
+    },
+    {
+      "name": "fail_blank_supplier",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "recipe_invariant",
+          "message": "supplier_id is empty"
+        },
+        "supplier_user_row": {
+        },
+        "supplier_request_row": {
+        },
+        "supplier_user_id": "",
+        "supplier_request_id": "",
+        "assignee_email": ""
+      }
+    },
+    {
+      "name": "fail_blank_email",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "recipe_invariant",
+          "message": "assignee_email is empty"
+        },
+        "supplier_user_row": {
+        },
+        "supplier_request_row": {
+        },
+        "supplier_user_id": "",
+        "supplier_request_id": "",
+        "assignee_email": ""
+      }
+    },
+    {
+      "name": "fail_blank_variant",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "recipe_invariant",
+          "message": "assigned_variant_id is required (analyst must pick a variant)"
+        },
+        "supplier_user_row": {
+        },
+        "supplier_request_row": {
+        },
+        "supplier_user_id": "",
+        "supplier_request_id": "",
+        "assignee_email": ""
+      }
+    },
+    {
+      "name": "fail_blank_version",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "recipe_invariant",
+          "message": "assigned_version_id is empty"
+        },
+        "supplier_user_row": {
+        },
+        "supplier_request_row": {
+        },
+        "supplier_user_id": "",
+        "supplier_request_id": "",
+        "assignee_email": ""
+      }
+    },
+    {
+      "name": "fail_tbd_path",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "state_inconsistent",
+          "message": "variant 'var-1' has no resolved template path (value: 'TBD'). Republish the version to populate CFG_Variant paths."
+        },
+        "supplier_user_row": {
+        },
+        "supplier_request_row": {
+        },
+        "supplier_user_id": "",
+        "supplier_request_id": "",
+        "assignee_email": ""
+      }
+    },
+    {
+      "name": "fail_blank_path",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "state_inconsistent",
+          "message": "variant 'var-1' has no resolved template path (value: ''). Republish the version to populate CFG_Variant paths."
+        },
+        "supplier_user_row": {
+        },
+        "supplier_request_row": {
+        },
+        "supplier_user_id": "",
+        "supplier_request_id": "",
+        "assignee_email": ""
+      }
+    }
+  ],
+  "plan_user_migration": [
+    {
+      "name": "full_partition",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "to_migrate": [
+          {
+            "record_id": "1",
+            "supplier_request_id": "req-1",
+            "supplier_id": "sup-1",
+            "supplier_name": "Acme",
+            "status": "sent",
+            "old_version_id": "ver-2",
+            "old_variant_id": "var-a2",
+            "new_variant_id": "var-a3",
+            "new_template_path": "t/v3/base.xlsx",
+            "reason": ""
+          }
+        ],
+        "held": [
+          {
+            "record_id": "2",
+            "supplier_request_id": "req-2",
+            "supplier_id": "sup-2",
+            "supplier_name": "Bolt",
+            "status": "pending_review",
+            "old_version_id": "ver-2",
+            "old_variant_id": "var-a2",
+            "new_variant_id": "",
+            "new_template_path": "",
+            "reason": "mid-review; completes its cycle on the old version"
+          },
+          {
+            "record_id": "10",
+            "supplier_request_id": "req-10",
+            "supplier_id": "sup-1",
+            "supplier_name": "Acme",
+            "status": "supplier_action_required",
+            "old_version_id": "ver-1",
+            "old_variant_id": "var-a1",
+            "new_variant_id": "",
+            "new_template_path": "",
+            "reason": "mid-review; completes its cycle on the old version"
+          }
+        ],
+        "flagged": [
+          {
+            "record_id": "5",
+            "supplier_request_id": "req-5",
+            "supplier_id": "sup-5",
+            "supplier_name": "Echo",
+            "status": "sent",
+            "old_version_id": "ver-2",
+            "old_variant_id": "var-a2",
+            "new_variant_id": "",
+            "new_template_path": "",
+            "reason": "seeded request but this run has no seed data; re-run provisioning with the seed file, or migrate manually"
+          },
+          {
+            "record_id": "6",
+            "supplier_request_id": "req-6",
+            "supplier_id": "sup-6",
+            "supplier_name": "Fox",
+            "status": "sent",
+            "old_version_id": "ver-2",
+            "old_variant_id": "var-zz",
+            "new_variant_id": "",
+            "new_template_path": "",
+            "reason": "old variant 'var-zz' not found; cannot resolve its name"
+          },
+          {
+            "record_id": "7",
+            "supplier_request_id": "req-7",
+            "supplier_id": "sup-7",
+            "supplier_name": "Gale",
+            "status": "sent",
+            "old_version_id": "ver-2",
+            "old_variant_id": "var-b2",
+            "new_variant_id": "",
+            "new_template_path": "",
+            "reason": "variant name 'Dup' is duplicated in the new version"
+          },
+          {
+            "record_id": "8",
+            "supplier_request_id": "req-8",
+            "supplier_id": "sup-8",
+            "supplier_name": "Hut",
+            "status": "sent",
+            "old_version_id": "ver-2",
+            "old_variant_id": "var-c2",
+            "new_variant_id": "",
+            "new_template_path": "",
+            "reason": "no variant named 'Gone' in the new version; analyst must re-pick"
+          },
+          {
+            "record_id": "9",
+            "supplier_request_id": "req-9",
+            "supplier_id": "sup-9",
+            "supplier_name": "Ivy",
+            "status": "sent",
+            "old_version_id": "ver-2",
+            "old_variant_id": "var-d2",
+            "new_variant_id": "",
+            "new_template_path": "",
+            "reason": "new variant 'Unpublished' has no resolved template path; republish the version"
+          }
+        ],
+        "migrate_count": 1,
+        "held_count": 2,
+        "flagged_count": 5
+      }
+    },
+    {
+      "name": "seeded_with_reseed_migrates",
+      "output": {
+        "ok": true,
+        "error": {
+          "code": "",
+          "message": ""
+        },
+        "to_migrate": [
+          {
+            "record_id": "5",
+            "supplier_request_id": "req-5",
+            "supplier_id": "sup-5",
+            "supplier_name": "Echo",
+            "status": "sent",
+            "old_version_id": "ver-2",
+            "old_variant_id": "var-a2",
+            "new_variant_id": "var-a3",
+            "new_template_path": "t/v3/base.xlsx",
+            "reason": ""
+          }
+        ],
+        "held": [
+
+        ],
+        "flagged": [
+
+        ],
+        "migrate_count": 1,
+        "held_count": 0,
+        "flagged_count": 0
+      }
+    },
+    {
+      "name": "fail_blank_version",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "recipe_invariant",
+          "message": "template_version_id is empty"
+        },
+        "to_migrate": [
+
+        ],
+        "held": [
+
+        ],
+        "flagged": [
+
+        ],
+        "migrate_count": 0,
+        "held_count": 0,
+        "flagged_count": 0
+      }
+    },
+    {
+      "name": "fail_no_variants_for_version",
+      "output": {
+        "ok": false,
+        "error": {
+          "code": "state_inconsistent",
+          "message": "no variants found for version 'ver-9' -- run MIG-01 after PRV-03/04 have created and published the new version's variants"
+        },
+        "to_migrate": [
+
+        ],
+        "held": [
+
+        ],
+        "flagged": [
+
+        ],
+        "migrate_count": 0,
+        "held_count": 0,
+        "flagged_count": 0
+      }
+    }
+  ]
+}
