@@ -26,7 +26,8 @@
 #     UTL-06 matched_count / requests).
 #   - Booleans go through to_bool. Strings go through clean / norm. Nothing raises on a nil or an int where a string
 #     was expected.
-#   - Every boolean INPUT is built by toggleable_boolean: a checkbox with a text toggle, so it can be ticked or mapped.
+#   - Every boolean INPUT is a *_flag object definition: a checkbox with a same-name text toggle, so it can be ticked or mapped.
+#   - Methods take fixed arguments, no defaults: the SDK's call() enforces lambda arity.
 #
 # Runtime notes: the SDK runs full Ruby 2.7 with `require` for standard libraries (whitelist removal, 2025). The three
 # requires below cover JSON.parse, SecureRandom.uuid and Time. String#to_time is the SDK's own (ActiveSupport) method.
@@ -66,6 +67,89 @@ require 'time'
       end
     },
 
+    # A boolean input the builder can tick OR map. A bare checkbox has no text surface, so Workato cannot drop a pill on it;
+    # toggle_field swaps the control for a text box with the SAME name, and boolean_conversion turns "true"/"false"/a pill's
+    # text into a real boolean before execute runs. to_bool still guards the value inside execute.
+    # One fragment per flag (object definitions take no arguments), spliced into entity definitions and input_fields with *.
+    primary_flag: {
+      fields: lambda do |_connection, _config_fields, _object_definitions|
+        [
+          {
+            name: 'primary', type: 'boolean', control_type: 'checkbox', label: 'Primary', optional: true,
+            hint: 'true / 1 / yes / y / t are all read as true',
+            toggle_hint: 'Use a value or pill',
+            toggle_field: {
+              name: 'primary', type: 'boolean', control_type: 'text', label: 'Primary', optional: true,
+              convert_input: 'boolean_conversion', toggle_hint: 'Use checkbox', hint: 'true or false, or map a pill'
+            }
+          }
+        ]
+      end
+    },
+
+    reminders_enabled_flag: {
+      fields: lambda do |_connection, _config_fields, _object_definitions|
+        [
+          {
+            name: 'reminders_enabled', type: 'boolean', control_type: 'checkbox', label: 'Reminders enabled', optional: true,
+            hint: 'Blank counts as enabled',
+            toggle_hint: 'Use a value or pill',
+            toggle_field: {
+              name: 'reminders_enabled', type: 'boolean', control_type: 'text', label: 'Reminders enabled', optional: true,
+              convert_input: 'boolean_conversion', toggle_hint: 'Use checkbox', hint: 'true or false, or map a pill'
+            }
+          }
+        ]
+      end
+    },
+
+    has_seeded_data_flag: {
+      fields: lambda do |_connection, _config_fields, _object_definitions|
+        [
+          {
+            name: 'has_seeded_data', type: 'boolean', control_type: 'checkbox', label: 'Has seeded data', optional: true,
+            toggle_hint: 'Use a value or pill',
+            toggle_field: {
+              name: 'has_seeded_data', type: 'boolean', control_type: 'text', label: 'Has seeded data', optional: true,
+              convert_input: 'boolean_conversion', toggle_hint: 'Use checkbox', hint: 'true or false, or map a pill'
+            }
+          }
+        ]
+      end
+    },
+
+    move_task_flag: {
+      fields: lambda do |_connection, _config_fields, _object_definitions|
+        [
+          {
+            name: 'move_task', type: 'boolean', control_type: 'checkbox', label: 'Move task to new primary', optional: true,
+            hint: 'Default true. (Was read but never declared in the Python step.)',
+            toggle_hint: 'Use a value or pill',
+            toggle_field: {
+              name: 'move_task', type: 'boolean', control_type: 'text', label: 'Move task to new primary', optional: true,
+              convert_input: 'boolean_conversion', toggle_hint: 'Use checkbox', hint: 'true or false, or map a pill'
+            }
+          }
+        ]
+      end
+    },
+
+    will_reseed_flag: {
+      fields: lambda do |_connection, _config_fields, _object_definitions|
+        [
+          {
+            name: 'will_reseed', type: 'boolean', control_type: 'checkbox', label: 'This run re-seeds', optional: true,
+            hint: 'true when INC-01 runs after this step',
+            toggle_hint: 'Use a value or pill',
+            toggle_field: {
+              name: 'will_reseed', type: 'boolean', control_type: 'text', label: 'This run re-seeds', optional: true,
+              convert_input: 'boolean_conversion', toggle_hint: 'Use checkbox', hint: 'true or false, or map a pill'
+            }
+          }
+        ]
+      end
+    },
+
     supplier: {
       fields: lambda do |_connection, _config_fields, _object_definitions|
         [
@@ -79,14 +163,14 @@ require 'time'
     # One column vocabulary for SUP_SupplierUser. Map the table's columns onto these names once per recipe;
     # the per-step accessor code (user_supplier_id / su_user_email / USER_user_id ...) is gone.
     supplier_user: {
-      fields: lambda do |_connection, _config_fields, _object_definitions|
+      fields: lambda do |_connection, _config_fields, object_definitions|
         [
           { name: 'record_id', type: 'string', label: 'Record ID', hint: 'Data table record id, when the action must write back' },
           { name: 'supplier_user_id', type: 'string', label: 'Supplier user ID' },
           { name: 'supplier_id', type: 'string', label: 'Supplier ID' },
           { name: 'user_email', type: 'string', label: 'User email' },
           { name: 'contact_name', type: 'string', label: 'Contact name' },
-          call(:toggleable_boolean, 'primary', 'Primary', 'true / 1 / yes / y / t are all read as true'),
+          *object_definitions['primary_flag'],
           { name: 'status', type: 'string', label: 'Status', hint: 'active, inactive, invited ...' },
           { name: 'kick_off_email_sent_time', type: 'string', label: 'Kick-off email sent at' }
         ]
@@ -95,7 +179,7 @@ require 'time'
 
     # One vocabulary for a WFA request row (SUP_SupplierRequest + the task columns the WFA exposes).
     supplier_request: {
-      fields: lambda do |_connection, _config_fields, _object_definitions|
+      fields: lambda do |_connection, _config_fields, object_definitions|
         [
           { name: 'record_id', type: 'string', label: 'Record ID' },
           { name: 'supplier_request_id', type: 'string', label: 'Supplier request ID' },
@@ -112,8 +196,8 @@ require 'time'
           { name: 'submission_attempt', type: 'integer', label: 'Submission attempt' },
           { name: 'reminder_count', type: 'integer', label: 'Reminder count' },
           { name: 'last_reminder_sent_at', type: 'string', label: 'Last reminder sent at' },
-          call(:toggleable_boolean, 'reminders_enabled', 'Reminders enabled', 'Blank counts as enabled'),
-          call(:toggleable_boolean, 'has_seeded_data', 'Has seeded data'),
+          *object_definitions['reminders_enabled_flag'],
+          *object_definitions['has_seeded_data_flag'],
           { name: 'task_id', type: 'string', label: 'Task ID' },
           { name: 'task_name', type: 'string', label: 'Task name' },
           { name: 'task_status', type: 'string', label: 'Task status' },
@@ -274,8 +358,9 @@ require 'time'
   methods: {
 
     # true / 1 / yes / y / t (any case) => true; booleans pass through; blank or nil => default.
+    # Methods take FIXED arguments (no defaults): the SDK's call() enforces the lambda's arity.
     # Replaces _truthy x4, _is_truthy, _is_true, _as_bool x2, _flag / TRUTHY. (Decision 3.)
-    to_bool: lambda do |value, default = false|
+    to_bool: lambda do |value, default|
       return value if value == true || value == false
       s = value.to_s.strip.downcase
       return default if s.empty?
@@ -293,7 +378,7 @@ require 'time'
     end,
 
     # "12" / "12.0" / 12.0 -> 12; blank or garbage -> default. Truncates (the majority reading; PRV-01 rounded).
-    to_int: lambda do |value, default = 0|
+    to_int: lambda do |value, default|
       s = value.to_s.strip
       return default if s.empty?
       begin
@@ -349,25 +434,6 @@ require 'time'
       SecureRandom.uuid
     end,
 
-    # A boolean input the recipe builder can either tick or map. A bare checkbox has no text surface, so Workato cannot
-    # drop a datapill on it; toggle_field swaps the control for a text box with the SAME name, and boolean_conversion turns
-    # "true"/"false"/a pill's text into a real boolean before execute runs. to_bool still guards the value inside execute.
-    # Used for every boolean input, including the ones inside entity object definitions (list mapping shows them too).
-    toggleable_boolean: lambda do |name, label, hint = nil, optional = true|
-      field = {
-        name: name, type: 'boolean', control_type: 'checkbox', label: label, optional: optional,
-        toggle_hint: 'Use a value or pill',
-        toggle_field: {
-          name: name, type: 'boolean', control_type: 'text', label: label, optional: optional,
-          convert_input: 'boolean_conversion',
-          toggle_hint: 'Use checkbox',
-          hint: 'true or false, or map a pill'
-        }
-      }
-      field[:hint] = hint if hint
-      field
-    end,
-
     # The envelope. `payload` is the action's blank payload on failure, or its real payload on success.
     ok: lambda do |payload|
       { 'ok' => true, 'error' => { 'code' => '', 'message' => '' } }.merge(payload || {})
@@ -404,7 +470,7 @@ require 'time'
           { name: 'wfa_count', type: 'integer', optional: true, label: 'WFA request count', hint: 'Leave blank to skip the check' },
           { name: 'project_count', type: 'integer', optional: true, label: 'Project row count' },
           { name: 'supplier_count', type: 'integer', optional: true, label: 'Supplier row count' },
-          call(:toggleable_boolean, 'move_task', 'Move task to new primary', 'Default true. (Was read but never declared in the Python step.)'),
+          *object_definitions['move_task_flag'],
           { name: 'users', type: 'array', of: 'object', optional: true, label: 'Supplier users', properties: object_definitions['supplier_user'] }
         ]
       end,
@@ -429,8 +495,8 @@ require 'time'
         move_task = call(:to_bool, input['move_task'], true)
         request_assignee = call(:norm, input['current_assignee_email'])
         wfa_count_in = input['wfa_count']
-        project_count = call(:to_int, input['project_count'])
-        supplier_count = call(:to_int, input['supplier_count'])
+        project_count = call(:to_int, input['project_count'], 0)
+        supplier_count = call(:to_int, input['supplier_count'], 0)
 
         if new_email.empty? || !new_email.include?('@')
           next call(:fail, 'recipe_invariant', 'A valid new_primary_email is required.', blank)
@@ -438,7 +504,7 @@ require 'time'
         if terminal.include?(status)
           next call(:fail, 'recipe_invariant', "Request has invariant status (#{status}). Cannot change primary.", blank)
         end
-        if !call(:clean, wfa_count_in).empty? && call(:to_int, wfa_count_in) == 0
+        if !call(:clean, wfa_count_in).empty? && call(:to_int, wfa_count_in, 0) == 0
           next call(:fail, 'state_inconsistent', 'Request not found in the Workflow App.', blank)
         end
         if project_count == 0
@@ -449,11 +515,11 @@ require 'time'
         end
 
         target = users.find { |u| call(:norm, u['user_email']) == new_email }
-        primaries = users.select { |u| call(:to_bool, u['primary']) }
+        primaries = users.select { |u| call(:to_bool, u['primary'], false) }
         others = primaries.reject { |u| call(:norm, u['user_email']) == new_email }
         demote = others.map { |u| { 'record_id' => call(:clean, u['record_id']) } }
 
-        target_is_primary = !target.nil? && call(:to_bool, target['primary'])
+        target_is_primary = !target.nil? && call(:to_bool, target['primary'], false)
         if target_is_primary && others.empty?
           plan = blank['plan'].merge('disposition' => 'already_primary')
           next call(:ok, 'noop' => true, 'plan' => plan)
@@ -577,7 +643,7 @@ require 'time'
             e = call(:norm, u['user_email'])
             by_email[e] = u unless e.empty?
           end
-          primary = users.find { |u| call(:to_bool, u['primary']) && ['', 'active'].include?(call(:norm, u['status'])) }
+          primary = users.find { |u| call(:to_bool, u['primary'], false) && ['', 'active'].include?(call(:norm, u['status'])) }
           target = requested
           target = holder if target.empty?
           target = call(:norm, (primary || {})['user_email']) if target.empty?
@@ -709,7 +775,7 @@ require 'time'
         primary_by_supplier = {}
         supplier_users.each do |u|
           sid = call(:clean, u['supplier_id'])
-          next if sid.empty? || !call(:to_bool, u['primary'])
+          next if sid.empty? || !call(:to_bool, u['primary'], false)
           next unless ['', 'active'].include?(call(:norm, u['status']))
           if primary_by_supplier.key?(sid)
             log << "Supplier #{sid} has multiple primary active users; keeping #{primary_by_supplier[sid]['user_email']}."
@@ -866,7 +932,7 @@ require 'time'
             'supplier_user_id' => call(:clean, u['supplier_user_id']),
             'user_email' => call(:clean, u['user_email']),
             'contact_name' => call(:clean, u['contact_name']),
-            'primary' => call(:to_bool, u['primary']),
+            'primary' => call(:to_bool, u['primary'], false),
             'status' => call(:clean, u['status']),
             'kick_off_email_sent_time' => (call(:clean, u['kick_off_email_sent_time']).empty? ? nil : u['kick_off_email_sent_time'])
           }
@@ -1132,7 +1198,7 @@ require 'time'
       input_fields: lambda do |object_definitions|
         [
           { name: 'template_version_id', type: 'string', optional: false, label: 'New template version ID' },
-          call(:toggleable_boolean, 'will_reseed', 'This run re-seeds', 'true when INC-01 runs after this step'),
+          *object_definitions['will_reseed_flag'],
           { name: 'requests', type: 'array', of: 'object', optional: true, label: 'Requests', properties: object_definitions['supplier_request'] },
           { name: 'variants', type: 'array', of: 'object', optional: true, label: 'Variants (all versions)', properties: object_definitions['variant'] },
           { name: 'suppliers', type: 'array', of: 'object', optional: true, label: 'Suppliers', properties: object_definitions['supplier'] }
@@ -1146,7 +1212,7 @@ require 'time'
 
         new_version_id = call(:clean, input['template_version_id'])
         next call(:fail, 'recipe_invariant', 'template_version_id is empty', blank) if new_version_id.empty?
-        will_reseed = call(:to_bool, input['will_reseed'])
+        will_reseed = call(:to_bool, input['will_reseed'], false)
         requests = call(:rows, input['requests'])
         variants = call(:rows, input['variants'])
         suppliers = call(:rows, input['suppliers'])
@@ -1204,7 +1270,7 @@ require 'time'
             held << base
             next
           end
-          if call(:to_bool, r['has_seeded_data']) && !will_reseed
+          if call(:to_bool, r['has_seeded_data'], false) && !will_reseed
             base['reason'] = 'seeded request but this run has no seed data; re-run provisioning with the seed file, or migrate manually'
             flagged << base
             next
