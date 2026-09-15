@@ -40,17 +40,21 @@ var DP_REVIEW_HEADER = ['Accept', 'Status', 'Row', 'Field name', 'Target sheet',
 // Menu
 // ---------------------------------------------------------------------------
 
-/** Call this from your existing onOpen: dpAddMenu(SpreadsheetApp.getUi()). */
-function dpAddMenu(ui) {
-  ui.createMenu('Description parser')
+/**
+ * Menu. The item names (dpScan, dpApply, ...) must resolve in the project that owns the menu.
+ * Same project: dpAddMenu(ui). From a shim over the library: define wrappers named dpScan etc. in the
+ * shim, then call Lib.dpAddMenu(ui) — or nest it: existingMenu.addSubMenu(Lib.dpMenu(ui)).
+ */
+function dpMenu(ui) {
+  return ui.createMenu('Description parser')
     .addItem('1. Scan descriptions', 'dpScan')
     .addItem('2. Apply accepted proposals', 'dpApply')
     .addSeparator()
     .addItem('Accept all high-confidence rows', 'dpAcceptHigh')
     .addItem('Clear proposals', 'dpClear')
-    .addItem('Run extractor tests', 'dpRunTests')
-    .addToUi();
+    .addItem('Run extractor tests', 'dpRunTests');
 }
+function dpAddMenu(ui) { dpMenu(ui).addToUi(); }
 
 /** If this project has no onOpen yet, rename this function to onOpen. */
 function dpOnOpen() { dpAddMenu(SpreadsheetApp.getUi()); }
@@ -59,8 +63,13 @@ function dpOnOpen() { dpAddMenu(SpreadsheetApp.getUi()); }
 // Settings
 // ---------------------------------------------------------------------------
 
-function dpSettings_() {
+/**
+ * overrides: an object keyed like the Script Properties (DP_AI_MODE, DP_GCP_PROJECT, ...).
+ * A library reads its own Script Properties, not the host's — so a shim passes its properties in here.
+ */
+function dpSettings_(overrides) {
   var p = PropertiesService.getScriptProperties().getProperties();
+  Object.keys(overrides || {}).forEach(function (k) { if (/^DP_/.test(k)) p[k] = overrides[k]; });
   var s = {};
   Object.keys(DP_SETTINGS).forEach(function (k) { s[k] = DP_SETTINGS[k]; });
   if (p.DP_AI_MODE) s.AI_MODE = String(p.DP_AI_MODE).toLowerCase();
@@ -204,10 +213,10 @@ function dpRowContext_(base, r) {
 // 1. Scan
 // ---------------------------------------------------------------------------
 
-function dpScan() {
+function dpScan(overrides) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var corr = Utilities.getUuid();
-  var settings = dpSettings_();
+  var settings = dpSettings_(overrides);
   var shape = dpShape_(ss);
   var base = dpContext_(shape);
 
@@ -298,9 +307,9 @@ function dpWriteReview_(ss, lines, settings) {
   ss.setActiveSheet(sh);
 }
 
-function dpAcceptHigh() {
+function dpAcceptHigh(overrides) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sh = ss.getSheetByName(dpSettings_().PROPOSALS_SHEET);
+  var sh = ss.getSheetByName(dpSettings_(overrides).PROPOSALS_SHEET);
   if (!sh || sh.getLastRow() < 2) return;
   var n = sh.getLastRow() - 1;
   var conf = sh.getRange(2, 9, n, 1).getValues();
@@ -311,9 +320,9 @@ function dpAcceptHigh() {
   }));
 }
 
-function dpClear() {
+function dpClear(overrides) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sh = ss.getSheetByName(dpSettings_().PROPOSALS_SHEET);
+  var sh = ss.getSheetByName(dpSettings_(overrides).PROPOSALS_SHEET);
   if (sh) ss.deleteSheet(sh);
 }
 
@@ -321,10 +330,10 @@ function dpClear() {
 // 2. Apply
 // ---------------------------------------------------------------------------
 
-function dpApply() {
+function dpApply(overrides) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var corr = Utilities.getUuid();
-  var settings = dpSettings_();
+  var settings = dpSettings_(overrides);
   var sh = ss.getSheetByName(settings.PROPOSALS_SHEET);
   if (!sh || sh.getLastRow() < 2) throw new Error('No proposals to apply. Run "Scan descriptions" first.');
   var shape = dpShape_(ss);
