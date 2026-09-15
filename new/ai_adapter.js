@@ -14,7 +14,7 @@
  * appsscript.json needs the cloud-platform scope (see README). The account running the script
  * needs the Vertex AI User role on that project.
  *
- * To use your GeminiLib instead: replace the body of dpAiComplete_ so it returns the model's text.
+ * To use your GeminiLib instead: replace the body of dpAiComplete_ so it returns parsed JSON.
  */
 
 var DP_AI_SYSTEM = [
@@ -106,7 +106,7 @@ function dpAiPropose(entries, settings) {
       }), null, 1)
     ].join('\n');
 
-    var parsed = dpAiComplete_(system, user, DP_AI_SCHEMA);
+    var parsed = dpAiComplete_(system, user, DP_AI_SCHEMA, settings);
     (parsed.items || []).forEach(function (item) {
       var e = entries[Number(item.id)];
       if (!e) return;
@@ -145,8 +145,8 @@ function dpAiToProposals_(item, ctx) {
  * One call to Gemini on Vertex AI. Returns the parsed JSON object.
  * Swap this body for a GeminiLib call if you prefer — keep the signature and return parsed JSON.
  */
-function dpAiComplete_(systemText, userText, responseSchema) {
-  var s = dpSettings_();
+function dpAiComplete_(systemText, userText, responseSchema, settings) {
+  var s = settings || dpSettings_();
   if (!s.GCP_PROJECT) throw new Error('Script Property DP_GCP_PROJECT is not set');
   var host = s.GCP_LOCATION === 'global' ? 'aiplatform.googleapis.com' : s.GCP_LOCATION + '-aiplatform.googleapis.com';
   var url = 'https://' + host + '/v1/projects/' + s.GCP_PROJECT + '/locations/' + s.GCP_LOCATION +
