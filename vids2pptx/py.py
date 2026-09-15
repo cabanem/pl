@@ -237,6 +237,8 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         response_schema=RESPONSE_SCHEMA,
         temperature=0.2,             # we want faithful extraction, not creativity
         max_output_tokens=65535,     # 40 slides of full speaker notes is a lot of text
+        # We pass no tools, so AFC is irrelevant; saying so explicitly silences the SDK's warning.
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
     if args.resolution:
         config_kwargs["media_resolution"] = getattr(types.MediaResolution, MEDIA_RESOLUTION[args.resolution])
@@ -453,20 +455,64 @@ def cmd_build(args: argparse.Namespace) -> None:
     out = Path(args.out)
     prs.save(str(out))
     log(f"Saved {out} ({total} content slides, {frames_used} frames). Frames kept in {frames_dir}/")
+    log(f"Next: open {out}. To fix a slide, edit {json_path} (timestamp, bullets, notes) and run `build` again -")
+    log("      it is free and takes seconds. Re-run `analyze` only if the overall shape of the deck is wrong.")
 
 
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
+QUICKSTART = """\
+QUICK START  (PowerShell, from the folder containing this script)
+
+  1. Activate the environment           .\\.venv\\Scripts\\Activate.ps1
+  2. Try a 5-minute clip first          ffmpeg -i talk.mp4 -t 300 -c copy test5.mp4
+  3. Analyze  (video -> slides.json)    python video2pptx.py analyze --video test5.mp4 --project MY_PROJECT --bucket MY_BUCKET
+  4. Build    (json  -> deck.pptx)      python video2pptx.py build --video test5.mp4 --out test5.pptx
+  5. Happy? Repeat 3-4 on the full video.  Not happy? Edit slides.json and re-run step 4.
+
+  python video2pptx.py analyze --help     all analyze options (context, resolution, model ...)
+  python video2pptx.py build --help       all build options
+  See RUN_GUIDE.md for setup, tuning, and troubleshooting.
+"""
+
+ANALYZE_EXAMPLES = """\
+examples:
+  # simplest: script uploads the video for you
+  python video2pptx.py analyze --video talk.mp4 --project MY_PROJECT --bucket MY_BUCKET
+
+  # with context (recommended) and a slide ceiling
+  python video2pptx.py analyze --video talk.mp4 --project MY_PROJECT --bucket MY_BUCKET ^
+      --context "Audience: new hires. Walkthrough of the supplier portal." --max-slides 30
+
+  # video already in GCS; small on-screen text matters
+  python video2pptx.py analyze --video talk.mp4 --project MY_PROJECT ^
+      --gcs-uri gs://MY_BUCKET/video2pptx/talk.mp4 --resolution high
+
+(^ is PowerShell/cmd line continuation; on one line just omit it.)
+"""
+
+BUILD_EXAMPLES = """\
+examples:
+  python video2pptx.py build --video talk.mp4                       # uses slides.json -> deck.pptx
+  python video2pptx.py build --video talk.mp4 --json v2.json --out talk-v2.pptx
+
+Edit slides.json between runs: change a slide's "frame_at" to move its screenshot,
+set it to "" to drop the picture, reword "bullets", or delete a slide object entirely.
+"""
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(
         description="Turn a recorded presentation into a PowerPoint deck with Gemini on Vertex AI.",
+        epilog=QUICKSTART,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = ap.add_subparsers(dest="command", required=True)
+    sub = ap.add_subparsers(dest="command")
 
-    a = sub.add_parser("analyze", help="Send the video to Gemini and write slides.json")
+    a = sub.add_parser("analyze", help="Send the video to Gemini and write slides.json",
+                       epilog=ANALYZE_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
     a.add_argument("--video", required=True, help="Local MP4 (used for its name and duration)")
     src = a.add_mutually_exclusive_group()
     src.add_argument("--bucket", help="GCS bucket name; the script uploads the video there")
@@ -479,18 +525,23 @@ def main(argv: list[str] | None = None) -> None:
                         "Default: let the model choose.")
     a.add_argument("--context", default="",
                    help='Free text for the model, e.g. "Audience: new hires. This is a walkthrough of the X tool."')
-    a.add_argument("--max-slides", type=int, default=DEFAULT_MAX_SLIDES)
-    a.add_argument("--out", default="slides.json")
+    a.add_argument("--max-slides", type=int, default=DEFAULT_MAX_SLIDES,
+                   help=f"Ceiling on slide count (default: {DEFAULT_MAX_SLIDES})")
+    a.add_argument("--out", default="slides.json", help="Where to write the JSON (default: slides.json)")
     a.set_defaults(func=cmd_analyze)
 
-    b = sub.add_parser("build", help="Turn slides.json + the local MP4 into a .pptx")
+    b = sub.add_parser("build", help="Turn slides.json + the local MP4 into a .pptx",
+                       epilog=BUILD_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
     b.add_argument("--video", required=True, help="Local MP4 (frames are cut from this file)")
-    b.add_argument("--json", default="slides.json")
-    b.add_argument("--out", default="deck.pptx")
+    b.add_argument("--json", default="slides.json", help="JSON from `analyze` (default: slides.json)")
+    b.add_argument("--out", default="deck.pptx", help="Output .pptx (default: deck.pptx)")
     b.add_argument("--frames-dir", default="frames", help="Where extracted frames are written")
     b.set_defaults(func=cmd_build)
 
     args = ap.parse_args(argv)
+    if args.command is None:          # bare `python video2pptx.py` -> show the quick start, not an error
+        print(QUICKSTART)
+        return
     args.func(args)
 
 
