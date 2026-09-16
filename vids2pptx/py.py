@@ -51,6 +51,8 @@ DEFAULT_LOCATION = "global"          # or a region like "us-central1" if policy 
 DEFAULT_MAX_SLIDES = 40
 MAX_GAP_MINUTES = 3                  # consecutive slides further apart than this = the model skipped something
 TOKENS_PER_SECOND_DEFAULT_RES = 100  # rough Gemini 3 cost of video at default resolution, for sanity checks
+CONTEXT_WINDOW_TOKENS = 1_000_000    # warn when the prompt gets close to this
+MAX_OUTPUT_TOKENS = 65535            # includes the model's thinking tokens, not just the JSON it returns
 GCS_PREFIX = "video2pptx"            # folder inside the bucket for uploads
 DEFAULT_RUNS_DIR = "runs"            # each analyze creates runs/<video>_<timestamp>/ holding everything for that run
 REQUEST_TIMEOUT_MS = 30 * 60 * 1000  # a 50-minute video can take several minutes to process
@@ -241,6 +243,76 @@ def upload_to_gcs(video: Path, bucket_name: str, project: str) -> str:
     return uri
 
 
+def _enum_name(value) -> str | None:
+    """'STOP' from FinishReason.STOP; passes strings through; None stays None."""
+    if value is None:
+        return None
+    return getattr(value, "name", None) or str(value)
+
+
+def describe_response(response) -> dict:
+    """Everything the API tells us about the call, flattened into plain values, so a
+    truncated, blocked, or oversized run is diagnosable from slides.json alone."""
+    usage = getattr(response, "usage_metadata", None)
+    cands = getattr(response, "candidates", None) or []
+    cand = cands[0] if cands else None
+
+    def by_modality(details) -> dict:
+        return {_enum_name(getattr(d, "modality", None)) or "?": getattr(d, "token_count", None)
+                for d in (details or [])}
+
+    feedback = getattr(response, "prompt_feedback", None)
+    return {
+        "model_version": getattr(response, "model_version", None),
+        "response_id": getattr(response, "response_id", None),
+        "finish_reason": _enum_name(getattr(cand, "finish_reason", None)),
+        "finish_message": getattr(cand, "finish_message", None),
+        "candidates": len(cands),
+        "prompt_tokens": getattr(usage, "prompt_token_count", None),
+        "prompt_tokens_by_modality": by_modality(getattr(usage, "prompt_tokens_details", None)),
+        "cached_tokens": getattr(usage, "cached_content_token_count", None),
+        "thinking_tokens": getattr(usage, "thoughts_token_count", None),
+        "output_tokens": getattr(usage, "candidates_token_count", None),
+        "total_tokens": getattr(usage, "total_token_count", None),
+        "block_reason": _enum_name(getattr(feedback, "block_reason", None)),
+        "safety_ratings": [
+            {"category": _enum_name(getattr(r, "category", None)),
+             "probability": _enum_name(getattr(r, "probability", None)),
+             "blocked": getattr(r, "blocked", None)}
+            for r in (getattr(cand, "safety_ratings", None) or [])
+            if getattr(r, "blocked", None) or _enum_name(getattr(r, "probability", None)) not in (None, "NEGLIGIBLE")
+        ],
+    }
+
+
+def log_gemini_summary(g: dict) -> None:
+    """One dense line about the call, then warnings for the limits people actually hit."""
+    def n(x): return f"{x:,}" if isinstance(x, int) else "?"
+    mods = ", ".join(f"{k.lower()} {n(v)}" for k, v in (g.get("prompt_tokens_by_modality") or {}).items())
+    log(f"Gemini: {g.get('model_version') or '?'} | finish: {g.get('finish_reason') or '?'} | "
+        f"in {n(g.get('prompt_tokens'))}" + (f" ({mods})" if mods else "") +
+        f" | thinking {n(g.get('thinking_tokens'))} | out {n(g.get('output_tokens'))} | total {n(g.get('total_tokens'))}")
+
+    fr = g.get("finish_reason")
+    if fr == "MAX_TOKENS":
+        log(f"  WARNING: the model hit the {MAX_OUTPUT_TOKENS:,}-token output limit, so the deck was cut off. "
+            f"Thinking tokens ({n(g.get('thinking_tokens'))}) count against that limit. "
+            f"Lower --max-slides, or split the video and run each part.")
+    elif fr and fr != "STOP":
+        log(f"  WARNING: finish reason was {fr}{' - ' + g['finish_message'] if g.get('finish_message') else ''}. "
+            f"The output may be incomplete; see response.json in the run folder.")
+    if g.get("block_reason"):
+        log(f"  WARNING: the prompt was blocked ({g['block_reason']}); see response.json.")
+    if g.get("safety_ratings"):
+        log(f"  note: non-negligible safety ratings: {g['safety_ratings']}")
+    pt = g.get("prompt_tokens")
+    if isinstance(pt, int) and pt > 0.85 * CONTEXT_WINDOW_TOKENS:
+        log(f"  WARNING: prompt used {n(pt)} of a ~{n(CONTEXT_WINDOW_TOKENS)}-token context window. "
+            f"A longer video or --resolution high would exceed it; use --resolution low.")
+    if g.get("candidates", 1) == 0:
+        log("  WARNING: the response contained no candidates at all - nothing was generated.")
+
+
 def cmd_analyze(args: argparse.Namespace) -> None:
     try:
         from google import genai
@@ -293,7 +365,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         response_mime_type="application/json",
         response_schema=RESPONSE_SCHEMA,
         temperature=0.2,             # we want faithful extraction, not creativity
-        max_output_tokens=65535,     # 40 slides of full speaker notes is a lot of text
+        max_output_tokens=MAX_OUTPUT_TOKENS,   # 40 slides of full speaker notes is a lot of text
         # We pass no tools, so AFC is irrelevant; saying so explicitly silences the SDK's warning.
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
@@ -302,18 +374,35 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
     log(f"Calling {args.model} in {location} on {gcs_uri} "
         f"(~{minutes} min of video; this typically takes a few minutes) ...")
+    log(f"  request: resolution={args.resolution or 'default'} temperature={config_kwargs['temperature']} "
+        f"max_output_tokens={MAX_OUTPUT_TOKENS:,} min_slides={min_slides} max_slides={args.max_slides} "
+        f"prompt_chars={len(prompt):,}")
     started = dt.datetime.now()
-    response = client.models.generate_content(
-        model=args.model,
-        contents=[
-            types.Part.from_uri(file_uri=gcs_uri, mime_type="video/mp4"),
-            prompt,
-        ],
-        config=types.GenerateContentConfig(**config_kwargs),
-    )
+    try:
+        response = client.models.generate_content(
+            model=args.model,
+            contents=[
+                types.Part.from_uri(file_uri=gcs_uri, mime_type="video/mp4"),
+                prompt,
+            ],
+            config=types.GenerateContentConfig(**config_kwargs),
+        )
+    except Exception as e:  # noqa: BLE001 - we want the API's own message in the log, whatever it is
+        die(f"Gemini call failed after {(dt.datetime.now() - started).total_seconds():.0f}s: {e}\n"
+            f"If the message mentions token limits or input size, re-run with --resolution low. "
+            f"If it mentions the model name or location, check --model / --location.")
     elapsed = (dt.datetime.now() - started).total_seconds()
 
-    # 4. Parse and save.
+    # 4. Record what the API told us BEFORE trying to parse, so a bad parse still leaves a full trail.
+    try:
+        (run_dir / "response.json").write_text(
+            response.model_dump_json(indent=2, exclude_none=True), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        log(f"  note: could not serialise the raw response ({e})")
+    gemini = describe_response(response)
+    log_gemini_summary(gemini)
+
+    # 5. Parse and save.
     raw = response.text or ""
     try:
         data = json.loads(raw)
@@ -321,9 +410,8 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         raw_path = run_dir / "slides.raw.txt"
         raw_path.write_text(raw, encoding="utf-8")
         die(f"Model output was not valid JSON ({e}). Raw text saved to {raw_path}. "
-            f"If it looks truncated, lower --max-slides and retry.")
+            f"The Gemini line above says why: MAX_TOKENS means it was cut off (lower --max-slides).")
 
-    usage = getattr(response, "usage_metadata", None)
     data["_meta"] = {
         "source_video": video.name,
         "source_video_path": str(video),      # lets `build --run X` find the file without --video
@@ -333,8 +421,9 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         "media_resolution": args.resolution or "default",
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "elapsed_seconds": round(elapsed),
-        "prompt_tokens": getattr(usage, "prompt_token_count", None),
-        "output_tokens": getattr(usage, "candidates_token_count", None),
+        "prompt_tokens": gemini.get("prompt_tokens"),
+        "output_tokens": gemini.get("output_tokens"),
+        "gemini": gemini,                      # finish reason, tokens by modality, thinking, safety
     }
     json_path = run_dir / "slides.json"
     json_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -342,8 +431,6 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     slides = data.get("slides", [])
     with_frames = sum(1 for s in slides if parse_timestamp(s.get("frame_at")) is not None)
     log(f"Done in {elapsed:.0f}s. {len(slides)} slides ({with_frames} with a frame) -> {json_path}")
-    if usage:
-        log(f"Tokens: {data['_meta']['prompt_tokens']} in / {data['_meta']['output_tokens']} out")
     report_coverage(slides, duration, min_slides, data["_meta"].get("prompt_tokens"))
     log(f"Next: open {json_path}, sanity-check a few slides, then run `build` (it will pick this run by default).")
 
