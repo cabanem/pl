@@ -30,8 +30,10 @@ into a full-length deck:
 ```
 runs/talk_20260916-143205/
   prompt.txt     the exact prompt sent to the model
-  slides.json    the model's output plus _meta (model, tokens, timing, video path)
-  run.log        everything analyze and build printed, including coverage warnings
+  slides.json    the model's output plus _meta (model, tokens, timing, video path,
+                 and a `gemini` block: finish reason, tokens by modality, thinking)
+  response.json  the complete raw API response, saved before parsing
+  run.log        everything analyze and build printed, including all warnings
   frames/        slide01.jpg, slide02.jpg, …
   talk.pptx      the built deck
 ```
@@ -319,13 +321,39 @@ and pass it with `--model`; try `--location global` if you had set a region.
 **`400` mentioning token limit / video too long** — Re-run with `--resolution low`.
 
 **`ERROR: Model output was not valid JSON`** — The script saved the raw text to
-`slides.raw.txt` in the run folder. If it ends mid-sentence, the output was truncated: lower
-`--max-slides` (e.g. 30) and retry. If it's a JSON syntax slip, you can often
+`slides.raw.txt` in the run folder, and the `Gemini:` line just above the error
+says why. `finish: MAX_TOKENS` means it was truncated: lower `--max-slides`
+(e.g. 30) and retry. If it's a JSON syntax slip, you can often
 fix it by hand and save it as `slides.json`.
+
+**`ERROR: Gemini call failed …`** — The API's own message is printed and logged.
+Token-limit or input-size wording → `--resolution low`. Model-name or location
+wording → check `--model` / `--location`.
 
 **Timeout / connection reset after a long wait** — Retry; the upload is
 skipped on the second run, so only the model call repeats. Video processing on
 the Vertex side occasionally stalls.
+
+**Reading the `Gemini:` line** — every `analyze` prints one line like
+
+```
+Gemini: gemini-3.5-flash-001 | finish: STOP | in 302,411 (video 268,000, audio 33,200, text 1,211) | thinking 8,900 | out 14,300 | total 325,611
+```
+
+- `finish: STOP` is the only good value. `MAX_TOKENS` means the answer was cut off
+  at the 65,535-token output limit — and *thinking tokens count against that
+  limit*, so a run where the model thought hard can truncate even when the JSON
+  would have fit. Lower `--max-slides`, or split the video. Any other value
+  (`SAFETY`, `RECITATION`, …) means the model stopped for a policy reason; the
+  details are in the run's `response.json`.
+- `in` is the whole prompt. Video should dominate at roughly 100 tokens per
+  second of footage at default resolution (about 3× that at `--resolution high`);
+  audio adds about 30 per second. If `video` is far below what the duration
+  implies, the model didn't see the whole file. If `in` is above ~850,000 you're
+  near the 1M context window — use `--resolution low`.
+- `thinking` is the model's reasoning before it answered; large values are
+  normal for long inputs, but they eat into the output budget.
+- `out` is the JSON itself. Around 300–500 tokens per slide is typical.
 
 **Far fewer slides than expected (e.g. 7 from 50 minutes)** — `analyze` now prints
 a timeline line and warnings that say which of three things happened:
