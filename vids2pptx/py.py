@@ -40,7 +40,10 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 # --------------------------------------------------------------------------
 # Configuration you may want to tweak
@@ -55,7 +58,9 @@ CONTEXT_WINDOW_TOKENS = 1_000_000    # warn when the prompt gets close to this
 MAX_OUTPUT_TOKENS = 65535            # includes the model's thinking tokens, not just the JSON it returns
 GCS_PREFIX = "video2pptx"            # folder inside the bucket for uploads
 DEFAULT_RUNS_DIR = "runs"            # each analyze creates runs/<video>_<timestamp>/ holding everything for that run
-REQUEST_TIMEOUT_MS = 30 * 60 * 1000  # a 50-minute video can take several minutes to process
+DEFAULT_TIMEOUT_MINUTES = 30         # with streaming this is the longest silence tolerated, not the whole call
+DEFAULT_THINKING = "low"             # extraction, not reasoning: low keeps Gemini 3 fast; "none" sends no config
+HEARTBEAT_SECONDS = 60               # how often to print "still waiting" before the first output arrives
 
 STYLE = {
     "font": "Calibri",
@@ -313,6 +318,71 @@ def log_gemini_summary(g: dict) -> None:
         log("  WARNING: the response contained no candidates at all - nothing was generated.")
 
 
+def stream_generate(client, model: str, contents: list, config) -> tuple[str, object, dict]:
+    """Call generate_content_stream and gather the pieces.
+
+    Streaming instead of a single blocking call matters for two reasons. Bytes flow as soon
+    as the model starts writing, so a proxy or load balancer never sees a connection that is
+    'idle' for twenty minutes and quietly drops it. And it lets us report progress, which is
+    the difference between "hung" and "working" from where the user sits.
+
+    Returns (full_text, response_like, stats). response_like has the same attributes that
+    describe_response() reads from a non-streamed response."""
+    started = time.monotonic()
+    first_output: float | None = None
+    parts: list[str] = []
+    last_usage = last_cand = last_chunk = None
+    chunks = 0
+
+    stop = threading.Event()
+
+    def heartbeat() -> None:
+        while not stop.wait(HEARTBEAT_SECONDS):
+            log(f"  ... still waiting for the first output ({time.monotonic() - started:.0f}s): "
+                f"the model is ingesting the video and thinking")
+
+    threading.Thread(target=heartbeat, daemon=True).start()
+    next_progress = HEARTBEAT_SECONDS
+    try:
+        for chunk in client.models.generate_content_stream(model=model, contents=contents, config=config):
+            chunks += 1
+            if first_output is None:
+                first_output = time.monotonic() - started
+                stop.set()
+                log(f"  first output after {first_output:.0f}s; streaming the deck ...")
+            text = getattr(chunk, "text", None)
+            if text:
+                parts.append(text)
+            if getattr(chunk, "usage_metadata", None):
+                last_usage = chunk.usage_metadata
+            cands = getattr(chunk, "candidates", None) or []
+            if cands and getattr(cands[0], "finish_reason", None):
+                last_cand = cands[0]
+            last_chunk = chunk
+            elapsed = time.monotonic() - started
+            if elapsed >= next_progress:
+                log(f"  ... {sum(map(len, parts)):,} characters received ({elapsed:.0f}s)")
+                next_progress += HEARTBEAT_SECONDS
+    finally:
+        stop.set()
+
+    if last_cand is None and last_chunk is not None:
+        cands = getattr(last_chunk, "candidates", None) or []
+        last_cand = cands[0] if cands else None
+    response_like = SimpleNamespace(
+        model_version=getattr(last_chunk, "model_version", None),
+        response_id=getattr(last_chunk, "response_id", None),
+        usage_metadata=last_usage,
+        candidates=[last_cand] if last_cand else [],
+        prompt_feedback=getattr(last_chunk, "prompt_feedback", None),
+        last_chunk=last_chunk,
+    )
+    stats = {"chunks": chunks,
+             "first_output_seconds": round(first_output) if first_output is not None else None,
+             "total_seconds": round(time.monotonic() - started)}
+    return "".join(parts), response_like, stats
+
+
 def cmd_analyze(args: argparse.Namespace) -> None:
     try:
         from google import genai
@@ -359,7 +429,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     # 3. Call Gemini.
     client = genai.Client(
         vertexai=True, project=project, location=location,
-        http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
+        http_options=types.HttpOptions(timeout=args.timeout_minutes * 60 * 1000),   # milliseconds
     )
     config_kwargs = dict(
         response_mime_type="application/json",
@@ -371,39 +441,53 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     )
     if args.resolution:
         config_kwargs["media_resolution"] = getattr(types.MediaResolution, MEDIA_RESOLUTION[args.resolution])
+    if args.thinking != "none":
+        # Gemini 3 takes thinking_level; on these models thinking tokens share the max_output_tokens
+        # budget, so "high" can spend most of it (and most of the wall-clock) before writing a byte.
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=args.thinking)
 
     log(f"Calling {args.model} in {location} on {gcs_uri} "
         f"(~{minutes} min of video; this typically takes a few minutes) ...")
-    log(f"  request: resolution={args.resolution or 'default'} temperature={config_kwargs['temperature']} "
-        f"max_output_tokens={MAX_OUTPUT_TOKENS:,} min_slides={min_slides} max_slides={args.max_slides} "
-        f"prompt_chars={len(prompt):,}")
+    log(f"  request: resolution={args.resolution or 'default'} thinking={args.thinking} "
+        f"temperature={config_kwargs['temperature']} max_output_tokens={MAX_OUTPUT_TOKENS:,} "
+        f"min_slides={min_slides} max_slides={args.max_slides} prompt_chars={len(prompt):,} "
+        f"timeout={args.timeout_minutes}min")
     started = dt.datetime.now()
     try:
-        response = client.models.generate_content(
-            model=args.model,
-            contents=[
-                types.Part.from_uri(file_uri=gcs_uri, mime_type="video/mp4"),
-                prompt,
-            ],
-            config=types.GenerateContentConfig(**config_kwargs),
+        raw, response, stats = stream_generate(
+            client, args.model,
+            [types.Part.from_uri(file_uri=gcs_uri, mime_type="video/mp4"), prompt],
+            types.GenerateContentConfig(**config_kwargs),
         )
     except Exception as e:  # noqa: BLE001 - we want the API's own message in the log, whatever it is
-        die(f"Gemini call failed after {(dt.datetime.now() - started).total_seconds():.0f}s: {e}\n"
-            f"If the message mentions token limits or input size, re-run with --resolution low. "
-            f"If it mentions the model name or location, check --model / --location.")
+        msg = str(e)
+        hint = ("If the message mentions token limits or input size, re-run with --resolution low. "
+                "If it mentions the model name or location, check --model / --location.")
+        if "thinking" in msg.lower():
+            hint = "The model rejected the thinking setting; re-run with --thinking none."
+        elif "timeout" in msg.lower() or "timed out" in msg.lower():
+            hint = ("No bytes arrived for the whole timeout. Try the 5-minute clip first: if that also "
+                    "hangs, the network path is blocking the request; if it works, raise --timeout-minutes "
+                    "or lower --max-slides / --resolution low.")
+        die(f"Gemini call failed after {(dt.datetime.now() - started).total_seconds():.0f}s: {msg}\n{hint}")
     elapsed = (dt.datetime.now() - started).total_seconds()
 
     # 4. Record what the API told us BEFORE trying to parse, so a bad parse still leaves a full trail.
     try:
+        last = response.last_chunk
+        dump = last.model_dump(exclude_none=True) if last is not None and hasattr(last, "model_dump") else None
         (run_dir / "response.json").write_text(
-            response.model_dump_json(indent=2, exclude_none=True), encoding="utf-8")
+            json.dumps({"stats": stats, "last_chunk": dump, "text": raw}, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         log(f"  note: could not serialise the raw response ({e})")
     gemini = describe_response(response)
+    gemini.update(stats)
     log_gemini_summary(gemini)
+    log(f"  timing: first output after {stats['first_output_seconds']}s, "
+        f"{stats['total_seconds']}s total, {stats['chunks']} chunks")
 
     # 5. Parse and save.
-    raw = response.text or ""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -731,6 +815,10 @@ def main(argv: list[str] | None = None) -> None:
                    help="Floor on slide count (default: about one per 2 minutes of video, at least 5)")
     a.add_argument("--max-slides", type=int, default=DEFAULT_MAX_SLIDES,
                    help=f"Ceiling on slide count (default: {DEFAULT_MAX_SLIDES})")
+    a.add_argument("--thinking", choices=["low", "medium", "high", "none"], default=DEFAULT_THINKING,
+                   help=f"Gemini 3 thinking level (default: {DEFAULT_THINKING}). 'none' sends no thinking config.")
+    a.add_argument("--timeout-minutes", type=int, default=DEFAULT_TIMEOUT_MINUTES,
+                   help=f"Longest silence tolerated from the API (default: {DEFAULT_TIMEOUT_MINUTES})")
     a.add_argument("--run", help="Name for this run's folder (default: <video>_<timestamp>)")
     a.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR, help=f"Parent folder for runs (default: {DEFAULT_RUNS_DIR}/)")
     a.set_defaults(func=cmd_analyze)
