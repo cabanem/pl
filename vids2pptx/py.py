@@ -49,6 +49,8 @@ from pathlib import Path
 DEFAULT_MODEL = "gemini-3.5-flash"   # any current Gemini 3 model; Pro for higher quality
 DEFAULT_LOCATION = "global"          # or a region like "us-central1" if policy requires
 DEFAULT_MAX_SLIDES = 40
+MAX_GAP_MINUTES = 3                  # consecutive slides further apart than this = the model skipped something
+TOKENS_PER_SECOND_DEFAULT_RES = 100  # rough Gemini 3 cost of video at default resolution, for sanity checks
 GCS_PREFIX = "video2pptx"            # folder inside the bucket for uploads
 REQUEST_TIMEOUT_MS = 30 * 60 * 1000  # a 50-minute video can take several minutes to process
 
@@ -67,9 +69,14 @@ You are converting a recorded instructional presentation into a PowerPoint deck.
 The video is about {minutes} minutes long.{context}
 
 Rules:
-- Work through the whole video in order. Do not skip sections.
-- One slide per distinct step, concept, or decision the presenter explains.
-  Aim for roughly one slide per 1-2 minutes of content; no more than {max_slides} slides.
+- Work through the whole video in order, start to finish. Do not skip sections.
+- One slide per distinct step, concept, or decision the presenter explains. Produce between
+  {min_slides} and {max_slides} slides. The most common mistake is producing too few: do NOT
+  merge several steps into one slide, and do NOT simply mirror the slides the presenter shows
+  on screen - segment by what is SAID. Roughly one slide per 1-2 minutes of speech.
+- starts_at: the timestamp (MM:SS, or H:MM:SS past 59 minutes) where this slide's content
+  begins in the video. Slides must be in increasing order of starts_at, and no two consecutive
+  slides should be more than {max_gap} minutes apart - if they are, you have skipped something.
 - title: short and specific (max 8 words).
 - bullets: 3-5 terse lines (max 12 words each) capturing what to do or know. No sub-bullets.
 - notes: the FULL spoken instruction for this slide, rewritten as clear speaker notes in
@@ -93,13 +100,14 @@ RESPONSE_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "starts_at": {"type": "string"},
                     "title": {"type": "string"},
                     "bullets": {"type": "array", "items": {"type": "string"}},
                     "notes": {"type": "string"},
                     "frame_at": {"type": "string"},
                     "frame_caption": {"type": "string"},
                 },
-                "required": ["title", "bullets", "notes", "frame_at", "frame_caption"],
+                "required": ["starts_at", "title", "bullets", "notes", "frame_at", "frame_caption"],
             },
         },
     },
@@ -225,7 +233,15 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     duration = video_duration_seconds(video)
     minutes = f"{duration / 60:.0f}" if duration else "unknown"
     context = f"\nContext from the requester: {args.context.strip()}" if args.context else ""
-    prompt = PROMPT_TEMPLATE.format(minutes=minutes, context=context, max_slides=args.max_slides)
+    if args.min_slides is not None:
+        min_slides = args.min_slides
+    elif duration:
+        min_slides = max(5, round(duration / 60 / 2))      # one per 2 minutes is the floor
+    else:
+        min_slides = 5
+    min_slides = min(min_slides, args.max_slides)
+    prompt = PROMPT_TEMPLATE.format(minutes=minutes, context=context, min_slides=min_slides,
+                                    max_slides=args.max_slides, max_gap=MAX_GAP_MINUTES)
 
     # 3. Call Gemini.
     client = genai.Client(
@@ -285,7 +301,44 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     log(f"Done in {elapsed:.0f}s. {len(slides)} slides ({with_frames} with a frame) -> {args.out}")
     if usage:
         log(f"Tokens: {data['_meta']['prompt_tokens']} in / {data['_meta']['output_tokens']} out")
+    report_coverage(slides, duration, min_slides, data["_meta"].get("prompt_tokens"))
     log("Next: open the JSON, sanity-check a few slides, then run `build`.")
+
+
+def report_coverage(slides: list, duration: float | None, min_slides: int, prompt_tokens: int | None) -> None:
+    """Print where the slides fall on the video's timeline and flag the three ways a run
+    goes wrong: the model didn't ingest the whole video, it stopped early, or it merged
+    too much into too few slides. Each check is cheap and points at a different fix."""
+    starts = [parse_timestamp(s.get("starts_at")) for s in slides]
+    starts = [t for t in starts if t is not None]
+    problems = []
+
+    if duration and prompt_tokens:
+        expected = duration * TOKENS_PER_SECOND_DEFAULT_RES
+        if prompt_tokens < 0.3 * expected:
+            problems.append(f"prompt used {prompt_tokens:,} tokens but ~{expected:,.0f} were expected for "
+                            f"{duration/60:.0f} min of video - the model may not have ingested the whole file "
+                            f"(check that --video is the full recording and that it has an audio stream: ffprobe FILE)")
+
+    if starts:
+        first, last = min(starts), max(starts)
+        gaps = [(b - a, i) for i, (a, b) in enumerate(zip(starts, starts[1:]), start=1)]
+        worst_gap, at = max(gaps) if gaps else (0.0, 0)
+        where = f" of {fmt_timestamp(duration)}" if duration else ""
+        log(f"Timeline: slides span {fmt_timestamp(first)} - {fmt_timestamp(last)}{where}; "
+            f"largest gap {fmt_timestamp(worst_gap)} (between slides {at} and {at + 1})")
+        if duration and last < 0.7 * duration:
+            problems.append(f"the last slide starts at {fmt_timestamp(last)} of {fmt_timestamp(duration)} - "
+                            f"the model stopped early or only saw part of the video")
+        if worst_gap > MAX_GAP_MINUTES * 60 * 1.5:
+            problems.append(f"a {fmt_timestamp(worst_gap)} stretch has no slide - content was probably merged or skipped")
+
+    if len(slides) < min_slides:
+        problems.append(f"only {len(slides)} slides; the prompt asked for at least {min_slides}. "
+                        f"Re-run with --context describing the steps you expect, or a higher --min-slides")
+
+    for p in problems:
+        log(f"  WARNING: {p}")
 
 
 # --------------------------------------------------------------------------
@@ -472,7 +525,7 @@ QUICK START  (PowerShell, from the folder containing this script)
   4. Build    (json  -> deck.pptx)      python video2pptx.py build --video test5.mp4 --out test5.pptx
   5. Happy? Repeat 3-4 on the full video.  Not happy? Edit slides.json and re-run step 4.
 
-  python video2pptx.py analyze --help     all analyze options (context, resolution, model ...)
+  python video2pptx.py analyze --help     all analyze options (context, min/max slides, resolution ...)
   python video2pptx.py build --help       all build options
   See RUN_GUIDE.md for setup, tuning, and troubleshooting.
 """
@@ -525,6 +578,8 @@ def main(argv: list[str] | None = None) -> None:
                         "Default: let the model choose.")
     a.add_argument("--context", default="",
                    help='Free text for the model, e.g. "Audience: new hires. This is a walkthrough of the X tool."')
+    a.add_argument("--min-slides", type=int, default=None,
+                   help="Floor on slide count (default: about one per 2 minutes of video, at least 5)")
     a.add_argument("--max-slides", type=int, default=DEFAULT_MAX_SLIDES,
                    help=f"Ceiling on slide count (default: {DEFAULT_MAX_SLIDES})")
     a.add_argument("--out", default="slides.json", help="Where to write the JSON (default: slides.json)")
