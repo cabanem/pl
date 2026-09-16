@@ -1,0 +1,140 @@
+
+--- a/app_gemini-to-salesforce/ContractIntake.js	2026-09-15 10:17:28.064686960 +0000
++++ b/app_gemini-to-salesforce/ContractIntake.js	2026-09-15 10:16:56.612654384 +0000
+@@ -530,10 +530,9 @@
+     if (pair[0] === META.ORIGINAL) cell.setFormula(pair[1]);
+     else cell.setValue(pair[1]);
+   });
+-  // Make "Approved?" a real checkbox.
+-  sheet.getRange(meta.length, 2).insertCheckboxes();
++  // Make "Approved?" and "Cancel?" real checkboxes, found by label so reordering the block cannot break them.
+   [META.APPROVED, META.CANCEL].forEach(function (label) {
+-    const i = meta.findIndex(function (pair) { return pain[0] === label; });
++    const i = meta.findIndex(function (pair) { return pair[0] === label; });
+     sheet.getRange(i + 1, 2).insertCheckboxes();
+     if (label === META.CANCEL) {
+       sheet.getRange(i + 1, 2).setNote('Tick this instead of Approved? to withdraw the contract. Nothing is sent, and the sheet moves to the adjacent Cancelled folder.');
+@@ -592,7 +591,7 @@
+   if (h !== -1) {
+     for (let r = h + 1; r < values.length; r++) {
+       const label = String(values[r][0]).trim();
+-      if (!label || label === META.SOURCES) break;       // grid ends
++      if (!label || sameLabel_(label, META.SOURCES)) break;   // grid ends
+       extractedFields[label] = values[r][1];
+       approvedFields[label] = values[r][2];
+     }
+@@ -622,11 +621,22 @@
+ function readMeta_(sheet, label) {
+   const col = sheet.getRange(1, 1, Math.min(sheet.getLastRow(), 30), 2).getValues();
+   for (let i = 0; i < col.length; i++) {
+-    if (String(col[i][0]).trim() === label) return col[i][1];
++    if (sameLabel_(col[i][0], label)) return col[i][1];
+   }
+   return '';
+ }
+ /**
++ * Label equality for the review sheet: trimmed and case-insensitive, so sheets created before the labels were
++ * sentence-cased ("Source File ID") still read under the current constants ("Source file ID").
++ * @param {*} a
++ * @param {*} b
++ * @return {boolean}
++ * @private
++ */
++function sameLabel_(a, b) {
++  return String(a == null ? '' : a).trim().toLowerCase() === String(b == null ? '' : b).trim().toLowerCase();
++}
++/**
+  * Mark a review sheet as pushed (status + timestamp).
+  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+  * @private
+@@ -670,7 +680,7 @@
+   const last = Math.min(sheet.getLastRow(), 30);
+   const col = sheet.getRange(1, 1, last, 1).getValues();
+   for (let i = 0; i < col.length; i++) {
+-    if (String(col[i][0]).trim() === label) { sheet.getRange(i + 1, 2).setValue(value); return; }
++    if (sameLabel_(col[i][0], label)) { sheet.getRange(i + 1, 2).setValue(value); return; }
+   }
+   const row = sheet.getLastRow() + 1;
+   sheet.getRange(row, 1).setValue(label).setFontWeight('bold');
+
+--- a/app_gemini-to-salesforce/Tests.js	2026-09-15 10:17:28.073797055 +0000
++++ b/app_gemini-to-salesforce/Tests.js	2026-09-15 10:16:56.613034196 +0000
+@@ -272,9 +272,17 @@
+     assertEq_(readApproval_(fakeReviewSpreadsheet_(false, true)).cancelled, false);
+   });
+   t('readApproval_: Cancel? ticked => cancelled true', function () {
+-    var g = reviewGrid_(false, true);
+-    g.forEach(function (r) { if (r[0] === 'Cancel?') r[1] = true; });
+-    assertEq_(readApproval_(makeFakeSpreadsheet_(makeFakeSheet_(g), {})).cancelled, true);
++    assertEq_(readApproval_(fakeReviewSpreadsheet_(false, true, true)).cancelled, true);
++    assertEq_(readApproval_(fakeReviewSpreadsheet_(false, true, false)).cancelled, false);
++  });
++
++  t('readApproval_: a sheet created with the OLD Title Case labels still reads correctly', function () {
++    var a = readApproval_(makeFakeSpreadsheet_(makeFakeSheet_(legacyReviewGrid_()), {}));
++    assertEq_(a.fileId, 'FILE123');
++    assertEq_(a.approved, true);
++    assertEq_(a.extractedAt, '2026-01-01T00:00:00.000Z');
++    assert_(!('Grounding Sources' in a.fields), 'legacy Sources row must still end the grid');
++    assertEq_(Object.keys(a.fields).length, 3);
+   });
+ 
+   t('readMeta_: returns blank for an unknown label', function () {
+@@ -282,29 +290,39 @@
+     assertEq_(readMeta_(sheet, 'No Such Label'), '');
+   });
+ }
+-/** A faithful in-memory copy of what createReviewSheet_ writes. */
+-function reviewGrid_(approved, withBlankBeforeSources) {
++/** A faithful in-memory copy of what createReviewSheet_ writes, built from the same constants so it cannot drift. */
++function reviewGrid_(approved, withBlankBeforeSources, cancelled) {
+   var g = [
+-    ['Original File', '(hyperlink)', ''],
+-    ['Source File ID', 'FILE123', ''],
+-    ['Source File Name', 'contract.pdf', ''],
+-    ['Correlation ID', 'corr-1', ''],
+-    ['Extracted At', '2026-01-01T00:00:00.000Z', ''],
+-    ['Model', 'gemini-2.5-pro', ''],
+-    ['Status', 'Pending Review', ''],
+-    ['Approved?', approved, ''],
+-    ['', '', ''],                                   // row 9 blank (headerRow = 10)
+-    ['Field', 'Extracted', 'Approved'],
+-    ['Party', 'Acme', 'Acme Corp'],           // corrected
+-    ['Amount', '$100', '$100'],
+-    ['Term', '12 months', '24 months']            // corrected
++    [META.ORIGINAL,    '(hyperlink)',  ''],
++    [META.SOURCE_ID,   'FILE123',      ''],
++    [META.SOURCE_NAME, 'contract.pdf', ''],
++    [META.CORRELATION, 'corr-1',       ''],
++    [META.EXTRACTED,   '2026-01-01T00:00:00.000Z', ''],
++    [META.MODEL,       'gemini-2.5-pro', ''],
++    [META.STATUS,      'Pending Review', ''],
++    [META.APPROVED,    approved,       ''],
++    [META.CANCEL,      cancelled === true, ''],
++    ['', '', ''],
++    GRID_HEADER.slice(),
++    ['Party',  'Acme',      'Acme Corp'],           // corrected
++    ['Amount', '$100',      '$100'],
++    ['Term',   '12 months', '24 months']            // corrected
+   ];
+   if (withBlankBeforeSources) g.push(['', '', '']);
+-  g.push(['Grounding Sources', '(none)', '']);
++  g.push([META.SOURCES, '(none)', '']);
+   return g;
+ }
+-function fakeReviewSpreadsheet_(approved, withBlankBeforeSources) {
+-  var sheet = makeFakeSheet_(reviewGrid_(approved, withBlankBeforeSources));
++/** The same sheet as written BEFORE the labels were sentence-cased — what is sitting in Pending today. */
++function legacyReviewGrid_() {
++  return reviewGrid_(true, true, false).map(function (r) {
++    var l = String(r[0]);
++    return [l.replace('Source file ID', 'Source File ID').replace('Source file name', 'Source File Name')
++             .replace('Extracted at', 'Extracted At').replace('Grounding sources', 'Grounding Sources')
++             .replace('Original file', 'Original File'), r[1], r[2]];
++  });
++}
++function fakeReviewSpreadsheet_(approved, withBlankBeforeSources, cancelled) {
++  var sheet = makeFakeSheet_(reviewGrid_(approved, withBlankBeforeSources, cancelled));
+   return makeFakeSpreadsheet_(sheet, { Review: sheet });
+ }
+ /** Minimal fake of the Sheet surface readApproval_/readMeta_ actually call. */
