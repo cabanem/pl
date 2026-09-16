@@ -52,6 +52,7 @@ DEFAULT_MAX_SLIDES = 40
 MAX_GAP_MINUTES = 3                  # consecutive slides further apart than this = the model skipped something
 TOKENS_PER_SECOND_DEFAULT_RES = 100  # rough Gemini 3 cost of video at default resolution, for sanity checks
 GCS_PREFIX = "video2pptx"            # folder inside the bucket for uploads
+DEFAULT_RUNS_DIR = "runs"            # each analyze creates runs/<video>_<timestamp>/ holding everything for that run
 REQUEST_TIMEOUT_MS = 30 * 60 * 1000  # a 50-minute video can take several minutes to process
 
 STYLE = {
@@ -125,13 +126,48 @@ MEDIA_RESOLUTION = {  # CLI value -> google.genai.types.MediaResolution member n
 # Small shared helpers
 # --------------------------------------------------------------------------
 
+_LOG_FILE: Path | None = None   # set by start_run_log(); everything logged is also appended there
+
+
 def log(msg: str) -> None:
     print(msg, flush=True)
+    if _LOG_FILE:
+        with _LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(msg + "\n")
 
 
 def die(msg: str, code: int = 1) -> None:
     print(f"ERROR: {msg}", file=sys.stderr, flush=True)
+    if _LOG_FILE:
+        with _LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"ERROR: {msg}\n")
     sys.exit(code)
+
+
+def start_run_log(run_dir: Path, command: str, argv: list[str]) -> None:
+    """Append a dated header to <run>/run.log and tee all further log() output into it,
+    so the coverage warnings and build messages survive after the terminal scrolls."""
+    global _LOG_FILE
+    _LOG_FILE = run_dir / "run.log"
+    with _LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"\n=== {command}  {dt.datetime.now():%Y-%m-%d %H:%M:%S}  {' '.join(argv)}\n")
+
+
+def new_run_dir(runs_dir: Path, video: Path, name: str | None) -> Path:
+    """runs/<name>/ or runs/<video-stem>_<YYYYMMDD-HHMMSS>/, created empty."""
+    run_dir = runs_dir / (name or f"{video.stem}_{dt.datetime.now():%Y%m%d-%H%M%S}")
+    if run_dir.exists() and any(run_dir.iterdir()):
+        die(f"Run folder already exists and is not empty: {run_dir}. Pick another --run name.")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def latest_run_dir(runs_dir: Path) -> Path:
+    """The most recently modified run folder that contains a slides.json."""
+    candidates = [d for d in runs_dir.iterdir() if (d / "slides.json").is_file()] if runs_dir.is_dir() else []
+    if not candidates:
+        die(f"No runs found under {runs_dir}/. Run `analyze` first, or pass --run / --json.")
+    return max(candidates, key=lambda d: (d / "slides.json").stat().st_mtime)
 
 
 def require_tool(name: str) -> None:
@@ -212,9 +248,13 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     except ImportError:
         die("google-genai is not installed. Run: pip install -r requirements.txt")
 
-    video = Path(args.video)
+    video = Path(args.video).resolve()
     if not video.is_file():
         die(f"Video not found: {video}")
+
+    run_dir = new_run_dir(Path(args.runs_dir), video, args.run)
+    start_run_log(run_dir, "analyze", sys.argv[1:])
+    log(f"Run folder: {run_dir}")
 
     project = args.project or os.environ.get("GOOGLE_CLOUD_PROJECT")
     if not project:
@@ -242,6 +282,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     min_slides = min(min_slides, args.max_slides)
     prompt = PROMPT_TEMPLATE.format(minutes=minutes, context=context, min_slides=min_slides,
                                     max_slides=args.max_slides, max_gap=MAX_GAP_MINUTES)
+    (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")   # exactly what the model was asked
 
     # 3. Call Gemini.
     client = genai.Client(
@@ -277,7 +318,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        raw_path = Path(args.out).with_suffix(".raw.txt")
+        raw_path = run_dir / "slides.raw.txt"
         raw_path.write_text(raw, encoding="utf-8")
         die(f"Model output was not valid JSON ({e}). Raw text saved to {raw_path}. "
             f"If it looks truncated, lower --max-slides and retry.")
@@ -285,6 +326,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     usage = getattr(response, "usage_metadata", None)
     data["_meta"] = {
         "source_video": video.name,
+        "source_video_path": str(video),      # lets `build --run X` find the file without --video
         "gcs_uri": gcs_uri,
         "model": args.model,
         "location": location,
@@ -294,15 +336,16 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         "prompt_tokens": getattr(usage, "prompt_token_count", None),
         "output_tokens": getattr(usage, "candidates_token_count", None),
     }
-    Path(args.out).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    json_path = run_dir / "slides.json"
+    json_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     slides = data.get("slides", [])
     with_frames = sum(1 for s in slides if parse_timestamp(s.get("frame_at")) is not None)
-    log(f"Done in {elapsed:.0f}s. {len(slides)} slides ({with_frames} with a frame) -> {args.out}")
+    log(f"Done in {elapsed:.0f}s. {len(slides)} slides ({with_frames} with a frame) -> {json_path}")
     if usage:
         log(f"Tokens: {data['_meta']['prompt_tokens']} in / {data['_meta']['output_tokens']} out")
     report_coverage(slides, duration, min_slides, data["_meta"].get("prompt_tokens"))
-    log("Next: open the JSON, sanity-check a few slides, then run `build`.")
+    log(f"Next: open {json_path}, sanity-check a few slides, then run `build` (it will pick this run by default).")
 
 
 def report_coverage(slides: list, duration: float | None, min_slides: int, prompt_tokens: int | None) -> None:
@@ -365,21 +408,34 @@ def cmd_build(args: argparse.Namespace) -> None:
     from pptx.util import Inches, Pt
 
     require_tool("ffmpeg")
-    video = Path(args.video)
-    if not video.is_file():
-        die(f"Video not found: {video}")
-    json_path = Path(args.json)
+
+    # Which run? An explicit --json wins; else --run; else the newest run folder.
+    if args.json:
+        json_path = Path(args.json)
+        run_dir = json_path.parent
+    else:
+        run_dir = Path(args.run) if args.run else latest_run_dir(Path(args.runs_dir))
+        json_path = run_dir / "slides.json"
     if not json_path.is_file():
         die(f"JSON not found: {json_path} (run `analyze` first)")
+    start_run_log(run_dir, "build", sys.argv[1:])
+    log(f"Run folder: {run_dir}")
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
     slides = data.get("slides") or []
     if not slides:
         die("No slides in JSON.")
+    meta = data.get("_meta") or {}
+
+    # The video: --video if given, else the path analyze recorded for this run.
+    video = Path(args.video or meta.get("source_video_path") or "")
+    if not str(video) or not video.is_file():
+        die(f"Video not found ({video or 'no path recorded in the run'}). Pass --video.")
     deck_title = data.get("deck_title") or video.stem
     duration = video_duration_seconds(video)
 
-    frames_dir = Path(args.frames_dir)
+    out = Path(args.out) if args.out else run_dir / f"{video.stem}.pptx"
+    frames_dir = Path(args.frames_dir) if args.frames_dir else run_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- layout constants (16:9, 13.333 x 7.5 in) ----
@@ -505,7 +561,6 @@ def cmd_build(args: argparse.Namespace) -> None:
 
         log(f"  slide {n:02d}/{total}: {title}" + (f"  [frame @ {fmt_timestamp(secs)}]" if frame_path else ""))
 
-    out = Path(args.out)
     prs.save(str(out))
     log(f"Saved {out} ({total} content slides, {frames_used} frames). Frames kept in {frames_dir}/")
     log(f"Next: open {out}. To fix a slide, edit {json_path} (timestamp, bullets, notes) and run `build` again -")
@@ -522,8 +577,11 @@ QUICK START  (PowerShell, from the folder containing this script)
   1. Activate the environment           .\\.venv\\Scripts\\Activate.ps1
   2. Try a 5-minute clip first          ffmpeg -i talk.mp4 -t 300 -c copy test5.mp4
   3. Analyze  (video -> slides.json)    python video2pptx.py analyze --video test5.mp4 --project MY_PROJECT --bucket MY_BUCKET
-  4. Build    (json  -> deck.pptx)      python video2pptx.py build --video test5.mp4 --out test5.pptx
-  5. Happy? Repeat 3-4 on the full video.  Not happy? Edit slides.json and re-run step 4.
+  4. Build    (json  -> deck.pptx)      python video2pptx.py build
+  5. Happy? Repeat 3-4 on the full video.  Not happy? Edit the run's slides.json and re-run step 4.
+
+  Every analyze creates runs/<video>_<timestamp>/ holding prompt.txt, slides.json, run.log,
+  frames/ and the built deck. `build` uses the newest run unless you pass --run <folder>.
 
   python video2pptx.py analyze --help     all analyze options (context, min/max slides, resolution ...)
   python video2pptx.py build --help       all build options
@@ -532,8 +590,11 @@ QUICK START  (PowerShell, from the folder containing this script)
 
 ANALYZE_EXAMPLES = """\
 examples:
-  # simplest: script uploads the video for you
+  # simplest: script uploads the video for you; output lands in runs/talk_<timestamp>/
   python video2pptx.py analyze --video talk.mp4 --project MY_PROJECT --bucket MY_BUCKET
+
+  # name the run yourself
+  python video2pptx.py analyze --video talk.mp4 --project MY_PROJECT --bucket MY_BUCKET --run talk-highres
 
   # with context (recommended) and a slide ceiling
   python video2pptx.py analyze --video talk.mp4 --project MY_PROJECT --bucket MY_BUCKET ^
@@ -548,10 +609,11 @@ examples:
 
 BUILD_EXAMPLES = """\
 examples:
-  python video2pptx.py build --video talk.mp4                       # uses slides.json -> deck.pptx
-  python video2pptx.py build --video talk.mp4 --json v2.json --out talk-v2.pptx
+  python video2pptx.py build                                  # newest run -> runs/<run>/<video>.pptx
+  python video2pptx.py build --run runs/talk_20260916-143205  # a specific run
+  python video2pptx.py build --run runs/talk_20260916-143205 --out C:\\share\\talk-v2.pptx
 
-Edit slides.json between runs: change a slide's "frame_at" to move its screenshot,
+Edit the run's slides.json between builds: change a slide's "frame_at" to move its screenshot,
 set it to "" to drop the picture, reword "bullets", or delete a slide object entirely.
 """
 
@@ -582,15 +644,18 @@ def main(argv: list[str] | None = None) -> None:
                    help="Floor on slide count (default: about one per 2 minutes of video, at least 5)")
     a.add_argument("--max-slides", type=int, default=DEFAULT_MAX_SLIDES,
                    help=f"Ceiling on slide count (default: {DEFAULT_MAX_SLIDES})")
-    a.add_argument("--out", default="slides.json", help="Where to write the JSON (default: slides.json)")
+    a.add_argument("--run", help="Name for this run's folder (default: <video>_<timestamp>)")
+    a.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR, help=f"Parent folder for runs (default: {DEFAULT_RUNS_DIR}/)")
     a.set_defaults(func=cmd_analyze)
 
     b = sub.add_parser("build", help="Turn slides.json + the local MP4 into a .pptx",
                        epilog=BUILD_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
-    b.add_argument("--video", required=True, help="Local MP4 (frames are cut from this file)")
-    b.add_argument("--json", default="slides.json", help="JSON from `analyze` (default: slides.json)")
-    b.add_argument("--out", default="deck.pptx", help="Output .pptx (default: deck.pptx)")
-    b.add_argument("--frames-dir", default="frames", help="Where extracted frames are written")
+    b.add_argument("--run", help="Run folder to build from (default: the newest under --runs-dir)")
+    b.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR, help=f"Parent folder for runs (default: {DEFAULT_RUNS_DIR}/)")
+    b.add_argument("--video", help="Local MP4 (default: the path recorded by analyze for this run)")
+    b.add_argument("--json", help="Explicit slides.json to build from (its folder becomes the run folder)")
+    b.add_argument("--out", help="Output .pptx (default: <run>/<video>.pptx)")
+    b.add_argument("--frames-dir", help="Where frames are written (default: <run>/frames)")
     b.set_defaults(func=cmd_build)
 
     args = ap.parse_args(argv)
