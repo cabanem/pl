@@ -32,16 +32,17 @@ Setup (once)
 ::
 
     pip install google-genai youtube-transcript-api google-api-python-client
+    pip install truststore        # optional; needs Python 3.10+. See "Behind a corporate proxy" below.
 
 Vertex works with plain ADC, as in video2pptx. Drive does not: gcloud's built-in OAuth client
 may not request Drive scopes, so ADC has to be minted with an OAuth client ID of your own.
 
 1. In the project: enable the Google Drive API, then APIs & Services > Credentials >
    Create OAuth client ID > Desktop app (consent screen: Internal). Download the JSON.
-2. Log in with both scopes (``^`` is the PowerShell/cmd line continuation)::
+2. Log in with both scopes. One line, on purpose, and with the scopes QUOTED: PowerShell can
+   split an unquoted comma-separated value into separate arguments::
 
-       gcloud auth application-default login --client-id-file=client_secret.json ^
-           --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.file
+       gcloud auth application-default login --client-id-file=client_secret.json --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive.file"
 
 3. Create the folder: ``python vid2notes.py --make-folder "GCP training notes"`` (prints its ID).
 
@@ -54,11 +55,24 @@ Usage
 -----
 ::
 
-    python vid2notes.py URL [URL ...] --project MY_PROJECT --drive-folder FOLDER_ID
-    python vid2notes.py --urls-file course.txt --project MY_PROJECT --drive-folder FOLDER_ID ^
+    python vid2notes.py "URL" ["URL" ...] --project MY_PROJECT --drive-folder FOLDER_ID
+    python vid2notes.py --urls-file course.txt --project MY_PROJECT --drive-folder FOLDER_ID `
         --instructions gem.txt --context "Course: Developing apps on Google Cloud"
 
+The trailing backtick continues a line in PowerShell. In cmd.exe use a caret (^) instead; they are
+not interchangeable, and the wrong one reaches the script as a stray argument. Quote URLs: an
+unquoted ``&`` in a URL is an operator in both shells.
+
 Without ``--drive-folder`` the notes are only written to ``--work-dir`` as ``<video_id>.md``.
+
+Behind a corporate proxy
+------------------------
+A proxy that inspects TLS re-signs every site's certificate with the company's own root CA. IT
+installs that root in the Windows certificate store, so browsers are happy, but Python verifies
+against the ``certifi`` bundle, which has never heard of it: ``CERTIFICATE_VERIFY_FAILED ...
+unable to get local issuer certificate``. With ``truststore`` installed, the script verifies
+against the operating system's store instead - the same trust decisions as your browser, kept
+current by IT. Verification is never switched off.
 
 Exit status
 -----------
@@ -110,7 +124,7 @@ ADC_SCOPES = ["https://www.googleapis.com/auth/cloud-platform",   # Vertex AI
               "https://www.googleapis.com/auth/drive.file"]       # Drive, limited to files this script created
 # Built from ADC_SCOPES so the fix we print can never drift from the scopes we ask for.
 ADC_LOGIN = ("gcloud auth application-default login --client-id-file=client_secret.json "
-             "--scopes=" + ",".join(ADC_SCOPES))
+             '--scopes="' + ",".join(ADC_SCOPES) + '"')   # quoted: PowerShell can split an unquoted a,b
 
 # STYLE: how the notes read. Replace it with your Gem's instructions via --instructions FILE.
 DEFAULT_INSTRUCTIONS = """\
@@ -313,8 +327,18 @@ _ID_RE = re.compile(r"""
 """, re.VERBOSE)
 
 
+# Paste artefacts. A YouTube ID only ever contains the ASCII hyphen, so mapping the look-alikes
+# that rich-text editors and chat apps substitute back to "-" cannot change a valid ID.
+_PASTE_FIXES = {**dict.fromkeys(map(ord, "\u2010\u2011\u2012\u2013\u2014\u2212"), "-"),   # hyphen/dash look-alikes
+                **dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"), None)}          # zero-width characters
+_WRAPPERS = "<>\"'\u2018\u2019\u201c\u201d"   # <url> from e-mail, straight and curly quotes
+
+
 def video_id(url_or_id: str) -> str | None:
-    """Extract the 11-character video ID from a YouTube URL, or accept a bare ID.
+    r"""Extract the 11-character video ID from a YouTube URL, or accept a bare ID.
+
+    The input is cleaned of paste artefacts first: look-alike hyphens become ``-``, zero-width
+    characters are dropped, and wrapping quotes or angle brackets are stripped.
 
     The result is guaranteed to match ``[A-Za-z0-9_-]{11}``. Everything downstream relies on
     that: the ID goes into file names, URLs and a Drive query string without any escaping.
@@ -330,8 +354,10 @@ def video_id(url_or_id: str) -> str | None:
     'dQw4w9WgXcQ'
     >>> video_id("https://example.com/") is None
     True
+    >>> video_id("<youtu.be/abcd\u2011EFGhi1?si=xyz>")   # a non-breaking hyphen looks identical on screen
+    'abcd-EFGhi1'
     """
-    s = url_or_id.strip()
+    s = url_or_id.translate(_PASTE_FIXES).strip().strip(_WRAPPERS)
     if re.fullmatch(r"[A-Za-z0-9_-]{11}", s):
         return s
     m = _ID_RE.search(s)
@@ -641,6 +667,30 @@ def drive_hint(e: Exception) -> str:
     return ""
 
 
+def ssl_hint(e: Exception) -> str:
+    """Explain a certificate-verification failure, which on a work machine almost always means TLS inspection.
+
+    Returns:
+        The fix, or ``""`` if ``e`` is not a certificate-verification failure.
+    """
+    if "certificate verify failed" not in str(e).lower():
+        return ""
+    if "truststore" in sys.modules:   # use_system_trust_store() succeeded, so the OS store was already in use
+        return ("Verification failed even against the operating system's certificate store, so the proxy's "
+                "root CA is probably not installed in Windows. Ask IT for it; or export it as Base-64 "
+                "(.cer), append it to a copy of the file `python -m certifi` prints, and point both "
+                "REQUESTS_CA_BUNDLE and SSL_CERT_FILE at that copy.")
+    return ("Python was shown a certificate it cannot trace to a CA it knows - typical of a corporate proxy "
+            "that inspects TLS. Run `pip install truststore` (Python 3.10+) and re-run: the script will then "
+            "verify against the Windows certificate store, as your browser does. Do not disable verification: "
+            "your Google credentials travel over these connections.")
+
+
+def failure_hint(e: Exception) -> str:
+    """Return the first applicable hint for an exception, or ``""``. Safe to call with any exception."""
+    return drive_hint(e) or ssl_hint(e)
+
+
 def make_folder(svc: Any, name: str) -> None:
     """Create a folder at the root of My Drive and print its ID.
 
@@ -721,13 +771,79 @@ def upsert_doc(svc: Any, folder_id: str, vid: str, name: str, markdown: str) -> 
 EXAMPLES = """\
 examples:
   python vid2notes.py --make-folder "GCP training notes"
-  python vid2notes.py https://youtu.be/VIDEO_ID --project MY_PROJECT --drive-folder FOLDER_ID
-  python vid2notes.py --urls-file course.txt --project MY_PROJECT --drive-folder FOLDER_ID ^
+  python vid2notes.py "https://youtu.be/VIDEO_ID" --project MY_PROJECT --drive-folder FOLDER_ID
+  python vid2notes.py --urls-file course.txt --project MY_PROJECT --drive-folder FOLDER_ID `
       --instructions gem.txt --context "Course: Developing apps on Google Cloud"
 
+(The trailing ` continues a line in PowerShell; in cmd.exe use ^ instead. Quote URLs: & is an operator.)
 course.txt holds one URL or video ID per line; blank lines and # comments are ignored.
 Re-running a video reuses its cached transcript and updates its existing Doc.
 """
+
+
+def use_system_trust_store() -> bool:
+    """Verify TLS against the operating system's certificate store, if ``truststore`` is installed.
+
+    Must run before any HTTP library creates an SSL context, which is why ``main`` calls it first
+    and why it matters that the SDK imports in this file are lazy. ``inject_into_ssl()`` swaps
+    ``ssl.SSLContext`` process-wide, so any library that builds its contexts from the ``ssl``
+    module picks it up - requests (the transcript and title) and httpx (Gemini) among them. It is
+    meant for applications and scripts, never for libraries; this file is a script.
+
+    Returns:
+        True if the OS store is now in use; False if ``truststore`` is not installed, in which
+        case every library keeps its default (the ``certifi`` bundle) and nothing changes.
+    """
+    try:
+        import truststore
+    except ImportError:
+        return False
+    truststore.inject_into_ssl()
+    return True
+
+
+def read_text_file(path: str) -> str:
+    """Read a user-supplied text file, whichever encoding Windows gave it.
+
+    ``echo ... > file`` in Windows PowerShell 5.1 writes UTF-16 with a byte-order mark; Notepad
+    and PowerShell 7 write UTF-8, with or without one. A UTF-8 BOM left in place would cling to
+    the first line, and UTF-16 read as UTF-8 fails outright, so the BOM decides the codec.
+    """
+    raw = Path(path).read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")      # the BOM tells the codec the byte order, and is consumed
+    return raw.decode("utf-8-sig")       # strips a UTF-8 BOM if there is one
+
+
+def explain_bad_target(item: str) -> str:
+    """Say why a target was rejected, for the mistakes people actually make.
+
+    The caller shows the rejected text with ``ascii()``, so a stray, invisible or look-alike
+    character is visible in the message as an escape. This function adds the likely cause.
+
+    >>> explain_bad_target("^")[:41]
+    'That is a line-continuation character. Po'
+    >>> explain_bad_target("https://www.youtube.com/playlist?list=PL123")[:23]
+    'That is a playlist URL.'
+    >>> explain_bad_target("https://www.skills.google/course/1/video/2")[:30]
+    'That is not a youtube.com or y'
+    """
+    low = item.strip().lower()
+    if low in ("^", "`"):
+        return ("That is a line-continuation character. PowerShell continues a line with a backtick (`), "
+                "cmd.exe with a caret (^); the wrong one is passed to the script as an argument, and the "
+                "lines after it run as separate commands. Use the right one, or put the command on one line.")
+    if "list=" in low:
+        return ("That is a playlist URL. Playlists are not expanded: list the videos' own URLs or IDs, "
+                "one per line, in a file and pass it with --urls-file.")
+    if not item.isascii():
+        return ("It contains a non-ASCII character, shown above as a \\u.... escape - usually picked up by "
+                "copying the link through a document or chat app. Copy it again from YouTube's Share dialog.")
+    if low.startswith(("http://", "https://")) and "youtu" not in low:
+        return ("That is not a youtube.com or youtu.be address. If the video is embedded in a course page, "
+                "right-click the player and choose 'Copy video URL'.")
+    return ("Expected https://www.youtube.com/watch?v=VIDEO_ID, https://youtu.be/VIDEO_ID, "
+            "or the bare 11-character ID. Quote URLs on the command line: an unquoted & is an operator.")
 
 
 def read_targets(args: argparse.Namespace) -> list[str]:
@@ -738,7 +854,7 @@ def read_targets(args: argparse.Namespace) -> list[str]:
     """
     raw = list(args.urls)
     if args.urls_file:
-        for line in Path(args.urls_file).read_text(encoding="utf-8").splitlines():
+        for line in read_text_file(args.urls_file).splitlines():
             line = line.split("#", 1)[0].strip()   # strip comments; a video ID always precedes any URL #fragment
             if line:
                 raw.append(line)
@@ -746,7 +862,8 @@ def read_targets(args: argparse.Namespace) -> list[str]:
     for item in raw:
         vid = video_id(item)
         if vid is None:
-            die(f"Not a YouTube URL or 11-character video ID: {item}")
+            # !a, not !r: repr() prints a non-breaking hyphen as itself; ascii() shows it as \u2011.
+            die(f"Not a YouTube URL or 11-character video ID: {item!a}\n{explain_bad_target(item)}")
         if vid not in ids:
             ids.append(vid)
     return ids
@@ -782,12 +899,16 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--refetch", action="store_true", help="Ignore cached transcripts")
     args = ap.parse_args(argv)
 
+    # First, before anything opens a connection: see use_system_trust_store().
+    if use_system_trust_store():
+        log("TLS: verifying against the operating system's certificate store (truststore)")
+
     # --make-folder stands alone: it needs neither a project nor the Gemini SDK.
     if args.make_folder:
         try:
             make_folder(drive_service(), args.make_folder)
         except Exception as e:  # noqa: BLE001
-            die(f"{e}\n{drive_hint(e)}")
+            die(f"{e}\n{failure_hint(e)}")
         return
 
     # ---- configuration: everything that can fail without doing any work, fails here ----
@@ -805,7 +926,7 @@ def main(argv: list[str] | None = None) -> None:
     except ImportError:
         die("google-genai is not installed. Run: pip install google-genai")
 
-    style = Path(args.instructions).read_text(encoding="utf-8") if args.instructions else DEFAULT_INSTRUCTIONS
+    style = read_text_file(args.instructions) if args.instructions else DEFAULT_INSTRUCTIONS
     system = style.rstrip() + "\n" + OUTPUT_CONTRACT
     languages = [x.strip() for x in args.languages.split(",") if x.strip()]
     work = Path(args.work_dir)
@@ -817,7 +938,7 @@ def main(argv: list[str] | None = None) -> None:
             svc = drive_service()
             log(f"Drive folder: {check_drive_folder(svc, args.drive_folder)}")
         except Exception as e:  # noqa: BLE001
-            die(f"Cannot file Docs in --drive-folder {args.drive_folder}: {e}\n{drive_hint(e)}")
+            die(f"Cannot file Docs in --drive-folder {args.drive_folder}: {e}\n{failure_hint(e)}")
 
     client = genai.Client(vertexai=True, project=project, location=location,
                           http_options=genai_types.HttpOptions(timeout=TIMEOUT_MINUTES * 60 * 1000))   # milliseconds
@@ -847,7 +968,7 @@ def main(argv: list[str] | None = None) -> None:
                 log(f"  wrote {work / (vid + '.md')}")
         except Exception as e:  # noqa: BLE001 - one bad video must not stop the batch
             failed.append(vid)
-            hint = drive_hint(e)
+            hint = failure_hint(e)
             log(f"  FAILED ({type(e).__name__}): {e}" + (f"\n  {hint}" if hint else ""))
 
     # The failed IDs are printed so they can be pasted straight into a re-run: that is the retry mechanism.
