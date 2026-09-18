@@ -1,0 +1,136 @@
+<script>
+/*
+  DrivePicker {{VERSION}} — host-side embed. Emitted into the host page by DrivePicker.clientHtml().
+
+  window.DrivePicker.mount({
+    button,                 // Element the "Add from Drive" button is appended to               (required)
+    url,                    // the picker helper's /exec URL (this library's own web-app deployment) (required)
+    onPicked(files, token), // files: [{id, name, mimeType, sizeBytes, url}]; token: the VISITOR's  (required)
+    onError(err),           // optional; default console.error
+    mimeTypes,              // optional array the picker offers
+    label, className,       // optional cosmetics
+    authTimeoutMs           // optional; default 6000 — how long to wait for the helper before offering sign-in
+  }) -> { open(), close(), button }
+
+  How it works:
+    1. Click → an overlay with an <iframe> pointing at the helper, carrying our origin (o), a nonce (n) and the
+       MIME list. The helper executes as the visitor, so its ScriptApp.getOAuthToken() is the visitor's.
+    2. The helper posts 'drivepicker:ready', then opens the Google Picker, then posts 'drivepicker:picked' with the
+       files and the token (or 'drivepicker:cancel'). We accept only messages carrying our nonce from a
+       *-script.googleusercontent.com origin, and only while the overlay is open.
+    3. If no 'ready' arrives in time, the visitor has not yet authorised the helper (Google's consent page cannot
+       render inside an iframe), so the overlay offers a link that opens the helper in its own tab for the
+       one-time authorisation; afterwards they click Add from Drive again.
+  No OAuth client, no Google Identity Services, no origin registration with Google. The helper's allow-list of
+  host origins (Script Property PICKER_ALLOWED_ORIGINS) is the only registration, and its error names the string.
+*/
+(function () {
+  'use strict';
+  if (window.DrivePicker) return;
+
+  var ORIGIN_OK = /^https:\/\/[a-z0-9-]+-script\.googleusercontent\.com$/i;
+
+  function el(tag, attrs, text) {
+    var e = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) { if (k === 'style') e.style.cssText = attrs[k]; else e.setAttribute(k, attrs[k]); });
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function nonce() {
+    var a = new Uint8Array(12); (window.crypto || window.msCrypto).getRandomValues(a);
+    return Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+  }
+  function required(opts, keys) {
+    keys.forEach(function (k) { if (opts[k] == null || opts[k] === '') throw new Error('DrivePicker.mount: "' + k + '" is required.'); });
+  }
+
+  function mount(opts) {
+    opts = opts || {};
+    required(opts, ['button', 'url', 'onPicked']);
+    var onError = opts.onError || function (err) { console.error('[DrivePicker]', err); };
+    var timeoutMs = opts.authTimeoutMs || 6000;
+
+    var btn = el('button', { type: 'button', 'class': opts.className || 'drivepicker-btn' }, opts.label || 'Add from Drive');
+    opts.button.appendChild(btn);
+
+    var session = null;   // { nonce, overlay, timer, listener }
+
+    function helperUrl(n, standalone) {
+      var q = 'o=' + encodeURIComponent(window.location.origin) + '&n=' + encodeURIComponent(n);
+      if (opts.mimeTypes && opts.mimeTypes.length) q += '&mime=' + encodeURIComponent(opts.mimeTypes.join(','));
+      if (standalone) q += '&standalone=1';
+      return opts.url + (opts.url.indexOf('?') === -1 ? '?' : '&') + q;
+    }
+
+    function close() {
+      if (!session) return;
+      clearTimeout(session.timer);
+      window.removeEventListener('message', session.listener);
+      if (session.overlay.parentNode) session.overlay.parentNode.removeChild(session.overlay);
+      session = null;
+      btn.disabled = false;
+    }
+
+    function open() {
+      if (session) return;
+      btn.disabled = true;
+      var n = nonce();
+
+      var overlay = el('div', { 'class': 'drivepicker-overlay', style:
+        'position:fixed;inset:0;z-index:9999;background:rgba(10,20,40,.45);display:flex;align-items:center;justify-content:center;padding:16px;' });
+      var card = el('div', { style:
+        'position:relative;width:min(960px,96vw);height:min(660px,90vh);background:#fff;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.35);overflow:hidden;display:flex;flex-direction:column;' });
+      var bar = el('div', { style: 'display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #e3e6ea;font:14px system-ui,sans-serif;' });
+      bar.appendChild(el('b', {}, 'Choose from Drive'));
+      var x = el('button', { type: 'button', 'aria-label': 'Close', style: 'border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:#5f6b7a;' }, '×');
+      bar.appendChild(x);
+      var frame = el('iframe', { src: helperUrl(n, false), title: 'Drive picker', style: 'flex:1;border:0;width:100%;' });
+      var note = el('div', { style: 'display:none;padding:22px;font:14px/1.5 system-ui,sans-serif;color:#1a1a1a;' });
+      card.appendChild(bar); card.appendChild(frame); card.appendChild(note); overlay.appendChild(card);
+      document.body.appendChild(overlay);
+
+      function showNote(html) { frame.style.display = 'none'; note.style.display = 'block'; note.innerHTML = html; }
+
+      var listener = function (ev) {
+        if (!session || ev.data == null || typeof ev.data !== 'object') return;
+        if (ev.data.nonce !== n) return;
+        if (!ORIGIN_OK.test(ev.origin)) return;
+        var d = ev.data;
+        if (d.type === 'drivepicker:ready') {
+          clearTimeout(session.timer);
+        } else if (d.type === 'drivepicker:picked') {
+          var files = d.files || [], token = d.token;
+          close();
+          try { opts.onPicked(files, token); } catch (e) { onError(e); }
+        } else if (d.type === 'drivepicker:cancel') {
+          close();
+        } else if (d.type === 'drivepicker:error') {
+          clearTimeout(session.timer);
+          showNote('<b>Drive picker</b><p style="color:#b3261e;margin:8px 0 0">' + String(d.message || 'Unknown error').replace(/[<>&]/g, function (c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]; }) + '</p>');
+          onError(new Error(d.message || 'Picker error'));
+        }
+      };
+      window.addEventListener('message', listener);
+
+      var timer = setTimeout(function () {
+        if (!session) return;
+        var a = document.createElement('a');
+        a.href = helperUrl(n, true); a.target = '_blank'; a.rel = 'noopener';
+        a.textContent = 'Sign in to Drive for the picker';
+        a.style.cssText = 'display:inline-block;margin-top:10px;padding:8px 14px;border-radius:999px;background:#1c5cab;color:#fff;text-decoration:none;font-weight:600;';
+        showNote('<b>One-time sign-in needed.</b><p style="margin:8px 0 0;color:#5f6b7a">Google’s sign-in page can’t open inside this panel. Open it in a new tab, approve access to the files you pick, then come back and click <b>Add from Drive</b> again.</p>');
+        note.appendChild(a);
+      }, timeoutMs);
+
+      x.addEventListener('click', close);
+      overlay.addEventListener('click', function (ev) { if (ev.target === overlay) close(); });
+      session = { nonce: n, overlay: overlay, timer: timer, listener: listener };
+    }
+
+    btn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); open(); });
+    return { open: open, close: close, button: btn };
+  }
+
+  window.DrivePicker = { version: '{{VERSION}}', mount: mount };
+})();
+</script>

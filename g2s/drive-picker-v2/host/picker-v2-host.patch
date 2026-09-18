@@ -1,0 +1,77 @@
+
+--- a/app_gemini-to-salesforce/ContractIntake.js	2026-09-16 14:51:38.840490292 +0000
++++ b/app_gemini-to-salesforce/ContractIntake.js	2026-09-18 16:04:43.827470601 +0000
+@@ -68,9 +68,7 @@
+  * @property {string}           workato_shared_secret Optional webhook auth secret.
+  * @property {string}           chat_webhook_url      Optional Google Chat webhook.
+  * @property {string[]}         upload_allowed_emails Lower-cased emails allowed to upload from the dashboard; [] = anyone who can open it.
+- * @property {string}           picker_api_key        Optional. Google Picker API key. All three picker_* keys present = picker on.
+- * @property {string}           picker_client_id      Optional. OAuth 2.0 Web client ID.
+- * @property {string}           picker_app_id         Optional. Project NUMBER of the project that owns the client ID.
++ * @property {string}           picker_url            Optional. /exec URL of the DrivePicker helper web app. Present = "Add from Drive" on.
+  * @property {string}           support_contact       Optional. Who the dashboard tells people to ask for access or help.
+  */
+ 
+@@ -770,9 +768,7 @@
+ 
+     upload_allowed_emails: parseList_(raw.upload_allowed_emails).map(function (e) { return e.toLowerCase(); }),
+ 
+-    picker_api_key: str_(raw.picker_api_key),
+-    picker_client_id: str_(raw.picker_client_id),
+-    picker_app_id: str_(raw.picker_app_id),
++    picker_url: str_(raw.picker_url),
+ 
+     support_contact: str_(raw.support_contact)
+   };
+
+--- a/app_gemini-to-salesforce/Dashboard.html	2026-09-16 14:52:36.926132935 +0000
++++ b/app_gemini-to-salesforce/Dashboard.html	2026-09-18 16:04:43.827814108 +0000
+@@ -1151,7 +1151,7 @@
+           button: $('intakeActions'),
+           className: 'refresh',                 // reuse the pill-button style
+           label: 'Add from Drive',
+-          apiKey: p.apiKey, clientId: p.clientId, appId: p.appId,
++          url: p.url,
+           mimeTypes: p.mimeTypes,
+           onPicked: function (files, token) {
+             files.forEach(function (f) {
+
+--- a/app_gemini-to-salesforce/Tests.js	2026-09-16 14:53:04.558801391 +0000
++++ b/app_gemini-to-salesforce/Tests.js	2026-09-18 16:04:43.828014590 +0000
+@@ -603,6 +603,13 @@
+     assertEq_(out.map(function (m) { return m.id; }), ['a', 'b']);
+   });
+ 
++  t('pickerConfig_: presence of picker_url is the switch', function () {
++    assertEq_(pickerConfig_({ picker_url: '' }), null);
++    var p = pickerConfig_({ picker_url: 'https://script.google.com/a/macros/x/s/ID/exec' });
++    assertEq_(p.url, 'https://script.google.com/a/macros/x/s/ID/exec');
++    assert_(p.mimeTypes.indexOf('application/pdf') !== -1, 'mime list carried');
++  });
++
+   t('classifyError_: the messages a visitor without access actually sees', function () {
+     assertEq_(classifyError_('Exception: You do not have permission to access the requested document.'), 'permission');
+     assertEq_(classifyError_('ScriptError: Authorization is required to perform that action.'), 'authorization');
+
+--- a/app_gemini-to-salesforce/WebApp.js	2026-09-16 14:51:38.840080379 +0000
++++ b/app_gemini-to-salesforce/WebApp.js	2026-09-18 16:04:43.827610649 +0000
+@@ -56,14 +56,15 @@
+ }
+ 
+ /**
+- * Picker settings for the page, or null when any of the three Config keys is blank. Presence is the switch.
++ * Picker settings for the page, or null when Config has no picker_url. Presence is the switch. The API key and
++ * project number live in the DrivePicker project's Script Properties, so hosts carry only the helper's URL.
+  * @param {Config} cfg
+- * @return {?{apiKey:string, clientId:string, appId:string, mimeTypes:string[]}}
++ * @return {?{url:string, mimeTypes:string[]}}
+  * @private
+  */
+ function pickerConfig_(cfg) {
+-  if (!cfg.picker_api_key || !cfg.picker_client_id || !cfg.picker_app_id) return null;
+-  return { apiKey: cfg.picker_api_key, clientId: cfg.picker_client_id, appId: cfg.picker_app_id, mimeTypes: PICKER_MIME_TYPES };
++  if (!cfg.picker_url) return null;
++  return { url: cfg.picker_url, mimeTypes: PICKER_MIME_TYPES };
+ }
+ 
+ /**
